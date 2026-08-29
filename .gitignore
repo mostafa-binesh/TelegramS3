@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+*.session
+*.session-wal
+*.session-shm
+*.db
+*.sqlite
+*.sqlite3
+*.log
+recovery/
+cache/
+data/
+target/
+
