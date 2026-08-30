@@ -3,6 +3,7 @@ use crate::manifest::{ChunkRef, CommitState, ObjectChecksum, ObjectManifest};
 use crate::metadata::{
     BucketRecord, JournalEntry, MetadataError, MetadataStatus, MetadataStore, OperationKind,
 };
+use crate::multipart::{MultipartCompletionPlan, MultipartPart, MultipartSession, MultipartState};
 use futures::StreamExt;
 use s3s::{Body, dto::StreamingBlob};
 use sha2::{Digest, Sha256};
@@ -23,6 +24,7 @@ const STAGING_ROOT: &str = "staging";
 const MANIFEST_ROOT: &str = "manifests";
 const CHUNK_ROOT: &str = "chunks";
 const QUARANTINE_ROOT: &str = "quarantine";
+const MULTIPART_ROOT: &str = "multipart";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkPlan {
@@ -153,6 +155,7 @@ impl ObjectFormatService {
         fs::create_dir_all(data_dir.join(MANIFEST_ROOT))?;
         fs::create_dir_all(data_dir.join(CHUNK_ROOT))?;
         fs::create_dir_all(data_dir.join(QUARANTINE_ROOT))?;
+        fs::create_dir_all(data_dir.join(MULTIPART_ROOT))?;
         Ok(Self {
             metadata,
             data_dir,
@@ -163,6 +166,10 @@ impl ObjectFormatService {
 
     pub fn metadata_status(&self) -> Result<MetadataStatus, ObjectFormatError> {
         Ok(self.metadata.status()?)
+    }
+
+    pub fn list_manifests(&self) -> Result<Vec<ObjectManifest>, ObjectFormatError> {
+        Ok(self.metadata.list_manifests()?)
     }
 
     pub fn create_bucket(&self, bucket: &str) -> Result<BucketRecord, ObjectFormatError> {
@@ -220,6 +227,295 @@ impl ObjectFormatService {
             manifest.object_id,
             "deleted via S3",
         )?))
+    }
+
+    pub fn tombstone_manifest(
+        &self,
+        object_id: Uuid,
+        reason: &str,
+    ) -> Result<ObjectManifest, ObjectFormatError> {
+        Ok(self.metadata.tombstone_manifest(object_id, reason)?)
+    }
+
+    pub fn initiate_multipart_upload(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: &str,
+        checksum_algorithm: Option<&str>,
+    ) -> Result<MultipartSession, ObjectFormatError> {
+        if !self.bucket_exists(bucket)? {
+            return Err(ObjectFormatError::InvalidPlan(format!(
+                "bucket does not exist: {bucket}"
+            )));
+        }
+        let upload_id = Uuid::new_v4();
+        let session = MultipartSession {
+            upload_id,
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            version_id: Some(upload_id.to_string()),
+            content_type: content_type.to_string(),
+            checksum_algorithm: checksum_algorithm.unwrap_or(CHECKSUM_ALGORITHM).to_string(),
+            state: MultipartState::Initiated,
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+        };
+        self.metadata.create_multipart_session(session.clone())?;
+        fs::create_dir_all(self.multipart_dir(upload_id))?;
+        Ok(session)
+    }
+
+    pub async fn upload_multipart_part(
+        &self,
+        upload_id: Uuid,
+        part_number: u32,
+        body: Option<StreamingBlob>,
+        checksum: Option<&str>,
+    ) -> Result<MultipartPart, ObjectFormatError> {
+        if part_number == 0 {
+            return Err(ObjectFormatError::InvalidPlan(
+                "part number must be at least 1".to_string(),
+            ));
+        }
+        let session = self
+            .metadata
+            .get_multipart_session(upload_id)?
+            .ok_or_else(|| {
+                ObjectFormatError::InvalidPlan(format!("upload not found: {upload_id}"))
+            })?;
+        if matches!(
+            session.state,
+            MultipartState::Aborted | MultipartState::Completed | MultipartState::Quarantined
+        ) {
+            return Err(ObjectFormatError::InvalidPlan(format!(
+                "multipart upload is not active: {upload_id}"
+            )));
+        }
+
+        let part_path = self.multipart_part_path(upload_id, part_number);
+        if let Some(parent) = part_path.parent() {
+            async_fs::create_dir_all(parent).await?;
+        }
+        let mut writer = async_fs::File::create(&part_path).await?;
+        let mut body = body.unwrap_or_else(|| StreamingBlob::new(Body::empty()));
+        let mut hasher = Sha256::new();
+        let mut size = 0_u64;
+        while let Some(chunk) = body.next().await {
+            let bytes = chunk.map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+            hasher.update(&bytes);
+            size = size
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| ObjectFormatError::InvalidPlan("part size overflow".to_string()))?;
+            writer.write_all(&bytes).await?;
+        }
+        writer.sync_all().await?;
+        let checksum_value = hex::encode(hasher.finalize());
+        if let Some(expected) = checksum {
+            if expected != checksum_value {
+                return Err(ObjectFormatError::ChecksumMismatch {
+                    scope: format!("multipart part {}", part_number),
+                    expected: expected.to_string(),
+                    actual: checksum_value,
+                });
+            }
+        }
+        let part = MultipartPart {
+            upload_id,
+            part_number,
+            size,
+            checksum: checksum_value.clone(),
+            e_tag: checksum_value,
+            created_at: OffsetDateTime::now_utc(),
+        };
+        self.metadata.put_multipart_part(part.clone())?;
+        Ok(part)
+    }
+
+    pub fn list_multipart_uploads(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+    ) -> Result<Vec<MultipartSession>, ObjectFormatError> {
+        Ok(self
+            .metadata
+            .list_multipart_sessions(Some(bucket), prefix)?)
+    }
+
+    pub fn get_multipart_session(
+        &self,
+        upload_id: Uuid,
+    ) -> Result<Option<MultipartSession>, ObjectFormatError> {
+        Ok(self.metadata.get_multipart_session(upload_id)?)
+    }
+
+    pub fn list_multipart_parts(
+        &self,
+        upload_id: Uuid,
+    ) -> Result<Vec<MultipartPart>, ObjectFormatError> {
+        Ok(self.metadata.list_multipart_parts(upload_id)?)
+    }
+
+    pub fn complete_multipart_upload(
+        &self,
+        plan: MultipartCompletionPlan,
+    ) -> Result<ObjectManifest, ObjectFormatError> {
+        let session = self
+            .metadata
+            .get_multipart_session(plan.upload_id)?
+            .ok_or_else(|| {
+                ObjectFormatError::InvalidPlan(format!("upload not found: {}", plan.upload_id))
+            })?;
+        if session.bucket != plan.bucket || session.key != plan.key {
+            return Err(ObjectFormatError::InvalidPlan(
+                "multipart completion target mismatch".to_string(),
+            ));
+        }
+
+        let stored_parts = self.metadata.list_multipart_parts(plan.upload_id)?;
+        let stored_parts_by_number: HashMap<u32, MultipartPart> = stored_parts
+            .into_iter()
+            .map(|part| (part.part_number, part))
+            .collect();
+
+        if plan.parts.is_empty() {
+            return Err(ObjectFormatError::InvalidPlan(
+                "multipart completion requires at least one part".to_string(),
+            ));
+        }
+
+        let object_id = Uuid::new_v4();
+        let mut chunk_refs = Vec::with_capacity(plan.parts.len());
+        let mut chunk_plan = ChunkPlan {
+            chunk_size: self.chunk_size,
+            content_length: 0,
+            chunks: Vec::new(),
+        };
+        let mut whole_hasher = Sha256::new();
+        let multipart_stage_dir = self.multipart_dir(plan.upload_id);
+        let staging_dir = self.staging_dir(plan.upload_id);
+        if staging_dir.exists() {
+            fs::remove_dir_all(&staging_dir)?;
+        }
+        fs::create_dir_all(&staging_dir)?;
+
+        let mut offset = 0_u64;
+        for (index, part_plan) in plan.parts.iter().enumerate() {
+            let stored_part = stored_parts_by_number
+                .get(&part_plan.part_number)
+                .ok_or_else(|| {
+                    ObjectFormatError::InvalidPlan(format!(
+                        "missing multipart part {}",
+                        part_plan.part_number
+                    ))
+                })?;
+            if stored_part.e_tag != part_plan.e_tag {
+                return Err(ObjectFormatError::ChecksumMismatch {
+                    scope: format!("multipart part {}", part_plan.part_number),
+                    expected: part_plan.e_tag.clone(),
+                    actual: stored_part.e_tag.clone(),
+                });
+            }
+
+            let source_path = multipart_stage_dir.join(part_file_name(part_plan.part_number));
+            if !source_path.exists() {
+                return Err(ObjectFormatError::MissingChunk {
+                    object_id: plan.upload_id,
+                    order: index as u32,
+                });
+            }
+
+            let destination_path = staging_dir.join(chunk_file_name(index as u32));
+            if let Err(_) = fs::hard_link(&source_path, &destination_path) {
+                fs::copy(&source_path, &destination_path)?;
+            }
+            update_hasher_from_path(&mut whole_hasher, &source_path)?;
+
+            chunk_plan.chunks.push(PlannedChunk {
+                order: index as u32,
+                offset,
+                size: stored_part.size,
+            });
+            chunk_refs.push(ChunkRef {
+                order: index as u32,
+                offset,
+                size: stored_part.size,
+                checksum: stored_part.checksum.clone(),
+                telegram_peer_id: self.storage_chat_id.clone(),
+                telegram_message_id: i64::from(index as i32 + 1),
+                telegram_document_id: Some(format!(
+                    "multipart:{}:{}",
+                    plan.upload_id, part_plan.part_number
+                )),
+            });
+            chunk_plan.content_length = chunk_plan
+                .content_length
+                .checked_add(stored_part.size)
+                .ok_or_else(|| {
+                    ObjectFormatError::InvalidPlan("content length overflow".to_string())
+                })?;
+            offset = offset
+                .checked_add(stored_part.size)
+                .ok_or_else(|| ObjectFormatError::InvalidPlan("offset overflow".to_string()))?;
+        }
+
+        let whole_checksum = hex::encode(whole_hasher.finalize());
+        let manifest = self.new_manifest(ManifestBuildArgs {
+            object_id,
+            bucket: plan.bucket.clone(),
+            key: plan.key.clone(),
+            content_type: plan.content_type.clone(),
+            commit_state: CommitState::Staging,
+            chunks: chunk_refs,
+            whole_checksum,
+        });
+        let operation_id = self
+            .metadata
+            .stage_manifest(OperationKind::Put, manifest.clone())?;
+        let stage_manifest_path = staging_dir.join(MANIFEST_FILE_NAME);
+        write_json_file(&stage_manifest_path, &manifest)?;
+        verify_staged_chunks(&staging_dir, &manifest)?;
+        let committed = self.commit_staged_object(&StagedObject {
+            operation_id,
+            object_id,
+            manifest,
+            chunk_plan,
+        })?;
+        self.metadata
+            .update_multipart_session_state(plan.upload_id, MultipartState::Completed)?;
+        self.metadata.delete_multipart_parts(plan.upload_id)?;
+        match fs::remove_dir_all(&multipart_stage_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+            Err(_) => {}
+        }
+        Ok(committed)
+    }
+
+    pub fn abort_multipart_upload(&self, upload_id: Uuid) -> Result<(), ObjectFormatError> {
+        self.metadata
+            .update_multipart_session_state(upload_id, MultipartState::Aborted)?;
+        self.metadata.delete_multipart_parts(upload_id)?;
+        self.metadata.delete_multipart_session(upload_id)?;
+        let multipart_stage_dir = self.multipart_dir(upload_id);
+        match fs::remove_dir_all(&multipart_stage_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+            Err(_) => {}
+        }
+        Ok(())
+    }
+
+    pub fn get_manifest_by_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<Option<ObjectManifest>, ObjectFormatError> {
+        let object_id = Uuid::parse_str(version_id)
+            .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+        let manifest = self.metadata.get_manifest(object_id)?;
+        Ok(manifest.filter(|manifest| manifest.bucket == bucket && manifest.key == key))
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -351,7 +647,7 @@ impl ObjectFormatService {
                 .ok_or_else(|| ObjectFormatError::InvalidPlan("offset overflow".to_string()))?;
         }
 
-        let whole_checksum = sha256_hex(whole_hasher.finalize());
+        let whole_checksum = hex::encode(whole_hasher.finalize());
         let manifest = self.new_manifest(ManifestBuildArgs {
             object_id,
             bucket: bucket.to_string(),
@@ -488,7 +784,7 @@ impl ObjectFormatService {
                 .ok_or_else(|| ObjectFormatError::InvalidPlan("offset overflow".to_string()))?;
         }
 
-        let whole_checksum = sha256_hex(whole_hasher.finalize());
+        let whole_checksum = hex::encode(whole_hasher.finalize());
         let manifest = self.new_manifest(ManifestBuildArgs {
             object_id,
             bucket: bucket.to_string(),
@@ -568,9 +864,29 @@ impl ObjectFormatService {
                 });
             }
             let mut file = File::open(&path)?;
-            let mut chunk_bytes = Vec::new();
-            file.read_to_end(&mut chunk_bytes)?;
-            let actual_checksum = sha256_hex(&chunk_bytes);
+            let mut checksum_hasher = Sha256::new();
+            let mut chunk_offset = 0_u64;
+            let mut buffer = [0_u8; 8192];
+            let start = span.offset_within_chunk;
+            let end = start + span.length;
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                checksum_hasher.update(&buffer[..read]);
+                let buffer_start = chunk_offset;
+                let buffer_end = chunk_offset + read as u64;
+                let write_start = buffer_start.max(start);
+                let write_end = buffer_end.min(end);
+                if write_start < write_end {
+                    let slice_start = (write_start - buffer_start) as usize;
+                    let slice_end = (write_end - buffer_start) as usize;
+                    writer.write_all(&buffer[slice_start..slice_end])?;
+                }
+                chunk_offset = buffer_end;
+            }
+            let actual_checksum = hex::encode(checksum_hasher.finalize());
             if actual_checksum != chunk.checksum {
                 return Err(ObjectFormatError::ChecksumMismatch {
                     scope: format!("chunk {}", chunk.order),
@@ -578,9 +894,6 @@ impl ObjectFormatService {
                     actual: actual_checksum,
                 });
             }
-            let start = span.offset_within_chunk as usize;
-            let end = start + span.length as usize;
-            writer.write_all(&chunk_bytes[start..end])?;
         }
         Ok(())
     }
@@ -919,6 +1232,17 @@ impl ObjectFormatService {
         self.data_dir.join(CHUNK_ROOT).join(object_id.to_string())
     }
 
+    fn multipart_dir(&self, upload_id: Uuid) -> PathBuf {
+        self.data_dir
+            .join(MULTIPART_ROOT)
+            .join(upload_id.to_string())
+    }
+
+    fn multipart_part_path(&self, upload_id: Uuid, part_number: u32) -> PathBuf {
+        self.multipart_dir(upload_id)
+            .join(part_file_name(part_number))
+    }
+
     fn quarantine_dir(&self) -> PathBuf {
         self.data_dir.join(QUARANTINE_ROOT)
     }
@@ -930,7 +1254,7 @@ impl ObjectFormatService {
             object_id: args.object_id,
             bucket: args.bucket,
             key: args.key,
-            version_id: None,
+            version_id: Some(args.object_id.to_string()),
             content_length: args.chunks.iter().map(|chunk| chunk.size).sum(),
             content_type: args.content_type,
             user_metadata: BTreeMap::new(),
@@ -1021,6 +1345,23 @@ pub fn parse_checksum_hex(value: &str) -> Result<Vec<u8>, ObjectFormatError> {
 
 fn chunk_file_name(order: u32) -> String {
     format!("chunk-{order:08}.bin")
+}
+
+fn part_file_name(part_number: u32) -> String {
+    format!("part-{part_number:08}.bin")
+}
+
+fn update_hasher_from_path(hasher: &mut Sha256, path: &Path) -> Result<(), io::Error> {
+    let mut file = File::open(path)?;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

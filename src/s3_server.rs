@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::multipart::MultipartPartPlan;
 use crate::object_format::{ObjectFormatService, sha256_hex};
 use crate::redact;
 use crate::telegram::TelegramTransport;
@@ -12,10 +13,17 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use s3s::S3ErrorCode;
 use s3s::auth::SimpleAuth;
 use s3s::dto::{
-    Bucket, CreateBucketInput, CreateBucketOutput, DeleteBucketInput, DeleteBucketOutput,
-    DeleteObjectInput, DeleteObjectOutput, ETag, GetObjectInput, GetObjectOutput, HeadBucketInput,
-    HeadBucketOutput, HeadObjectInput, HeadObjectOutput, ListBucketsInput, ListBucketsOutput,
-    ListObjectsV2Input, ListObjectsV2Output, Object, ObjectStorageClass, StreamingBlob, Timestamp,
+    AbortMultipartUploadInput, AbortMultipartUploadOutput, Bucket, CompleteMultipartUploadInput,
+    CompleteMultipartUploadOutput, CopyObjectInput, CopyObjectOutput, CopySource,
+    CreateBucketInput, CreateBucketOutput, CreateMultipartUploadInput, CreateMultipartUploadOutput,
+    DeleteBucketInput, DeleteBucketOutput, DeleteMarkerEntry, DeleteObjectInput,
+    DeleteObjectOutput, ETag, GetObjectInput, GetObjectOutput, HeadBucketInput, HeadBucketOutput,
+    HeadObjectInput, HeadObjectOutput, ListBucketsInput, ListBucketsOutput,
+    ListMultipartUploadsInput, ListMultipartUploadsOutput, ListObjectVersionsInput,
+    ListObjectVersionsOutput, ListObjectsV2Input, ListObjectsV2Output, ListPartsInput,
+    ListPartsOutput, MultipartUpload, Object, ObjectStorageClass, ObjectVersion,
+    ObjectVersionStorageClass, Part, StreamingBlob, Timestamp, UploadPartCopyInput,
+    UploadPartCopyOutput, UploadPartInput, UploadPartOutput,
 };
 use s3s::service::{S3Service, S3ServiceBuilder};
 use s3s::{Body, S3, S3Request, S3Response, S3Result};
@@ -56,6 +64,23 @@ impl fmt::Debug for TelegramS3Backend {
     }
 }
 
+impl TelegramS3Backend {
+    fn resolve_manifest(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> Result<Option<crate::manifest::ObjectManifest>, crate::object_format::ObjectFormatError>
+    {
+        if let Some(version_id) = version_id {
+            self.object_format
+                .get_manifest_by_version(bucket, key, version_id)
+        } else {
+            Ok(self.object_format.get_active_manifest(bucket, key)?)
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct AllowAllAccess;
 
@@ -74,10 +99,10 @@ pub struct S3Server {
 impl S3Server {
     pub async fn bootstrap(config: &AppConfig) -> Result<Self, S3ServerError> {
         config.validate()?;
-        let object_format = Arc::new(ObjectFormatService::open(config)?);
-        let object_status = object_format.bootstrap()?;
         let transport = TelegramTransport::open(config.clone()).await?;
         let transport_status = transport.bootstrap().await?;
+        let object_format = Arc::new(ObjectFormatService::open(config)?);
+        let object_status = object_format.bootstrap()?;
 
         println!("object format bootstrap: {:?}", object_status);
         println!("telegram bootstrap: {:?}", transport_status.session_state);
@@ -229,16 +254,302 @@ impl S3 for TelegramS3Backend {
         }))
     }
 
+    async fn create_multipart_upload(
+        &self,
+        req: S3Request<CreateMultipartUploadInput>,
+    ) -> S3Result<S3Response<CreateMultipartUploadOutput>> {
+        let input = req.input;
+        if !self
+            .object_format
+            .bucket_exists(&input.bucket)
+            .map_err(map_object_error)?
+        {
+            return Err(s3s::s3_error!(NoSuchBucket, "bucket does not exist"));
+        }
+        let session = self
+            .object_format
+            .initiate_multipart_upload(
+                &input.bucket,
+                &input.key,
+                input
+                    .content_type
+                    .as_deref()
+                    .unwrap_or("application/octet-stream"),
+                input
+                    .checksum_algorithm
+                    .as_ref()
+                    .map(|algorithm| algorithm.as_str()),
+            )
+            .map_err(map_object_error)?;
+        Ok(S3Response::new(CreateMultipartUploadOutput {
+            bucket: Some(input.bucket),
+            key: Some(input.key),
+            upload_id: Some(session.upload_id.to_string()),
+            checksum_algorithm: input.checksum_algorithm,
+            ..Default::default()
+        }))
+    }
+
+    async fn upload_part(
+        &self,
+        req: S3Request<UploadPartInput>,
+    ) -> S3Result<S3Response<UploadPartOutput>> {
+        let input = req.input;
+        let upload_id = uuid::Uuid::parse_str(&input.upload_id).map_err(|error| {
+            s3s::S3Error::with_message(S3ErrorCode::InvalidArgument, error.to_string())
+        })?;
+        let part_number: u32 = input.part_number.try_into().map_err(|_| {
+            s3s::S3Error::with_message(S3ErrorCode::InvalidArgument, "invalid part number")
+        })?;
+        let part = self
+            .object_format
+            .upload_multipart_part(upload_id, part_number, input.body, None)
+            .await
+            .map_err(map_object_error)?;
+        Ok(S3Response::new(UploadPartOutput {
+            e_tag: Some(ETag::Strong(part.e_tag)),
+            ..Default::default()
+        }))
+    }
+
+    async fn upload_part_copy(
+        &self,
+        req: S3Request<UploadPartCopyInput>,
+    ) -> S3Result<S3Response<UploadPartCopyOutput>> {
+        let input = req.input;
+        let source = parse_copy_source(&input.copy_source)?;
+        let source_manifest = self
+            .resolve_manifest(&source.bucket, &source.key, source.version_id.as_deref())
+            .map_err(map_object_error)?
+            .ok_or_else(|| s3s::s3_error!(NoSuchKey, "source object does not exist"))?;
+        let range = input
+            .copy_source_range
+            .as_ref()
+            .map(|range| parse_byte_range(range, source_manifest.content_length))
+            .transpose()?
+            .unwrap_or(0..source_manifest.content_length);
+        let bytes = self
+            .object_format
+            .read_bytes(&source_manifest.bucket, &source_manifest.key, range)
+            .map_err(map_object_error)?;
+        let upload_id = uuid::Uuid::parse_str(&input.upload_id).map_err(|error| {
+            s3s::S3Error::with_message(S3ErrorCode::InvalidArgument, error.to_string())
+        })?;
+        let part_number: u32 = input.part_number.try_into().map_err(|_| {
+            s3s::S3Error::with_message(S3ErrorCode::InvalidArgument, "invalid part number")
+        })?;
+        let part = self
+            .object_format
+            .upload_multipart_part(
+                upload_id,
+                part_number,
+                Some(StreamingBlob::from_bytes(Bytes::from(bytes))),
+                None,
+            )
+            .await
+            .map_err(map_object_error)?;
+        Ok(S3Response::new(UploadPartCopyOutput {
+            copy_part_result: Some(s3s::dto::CopyPartResult {
+                e_tag: Some(ETag::Strong(part.e_tag)),
+                last_modified: Some(Timestamp::from(source_manifest.created_at)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        req: S3Request<CompleteMultipartUploadInput>,
+    ) -> S3Result<S3Response<CompleteMultipartUploadOutput>> {
+        let input = req.input;
+        let upload_id = uuid::Uuid::parse_str(&input.upload_id).map_err(|error| {
+            s3s::S3Error::with_message(S3ErrorCode::InvalidArgument, error.to_string())
+        })?;
+        let completed = input
+            .multipart_upload
+            .and_then(|upload| upload.parts)
+            .ok_or_else(|| s3s::s3_error!(InvalidArgument, "missing multipart parts"))?;
+        let mut parts = Vec::with_capacity(completed.len());
+        for part in completed {
+            let part_number: u32 = part
+                .part_number
+                .ok_or_else(|| s3s::s3_error!(InvalidPart, "missing part number"))?
+                .try_into()
+                .map_err(|_| s3s::s3_error!(InvalidPart, "invalid part number"))?;
+            let e_tag = match part.e_tag {
+                Some(ETag::Strong(value)) => value,
+                Some(ETag::Weak(value)) => value,
+                None => return Err(s3s::s3_error!(InvalidPart, "missing part etag")),
+            };
+            parts.push(MultipartPartPlan {
+                part_number,
+                offset: 0,
+                size: 0,
+                checksum: e_tag.clone(),
+                e_tag,
+            });
+        }
+        let session = self
+            .object_format
+            .get_multipart_session(upload_id)
+            .map_err(map_object_error)?
+            .ok_or_else(|| s3s::s3_error!(NoSuchUpload, "multipart upload does not exist"))?;
+        let actual_parts = self
+            .object_format
+            .list_multipart_parts(upload_id)
+            .map_err(map_object_error)?;
+        let mut plan_parts = Vec::with_capacity(parts.len());
+        for request_part in &parts {
+            let stored = actual_parts
+                .iter()
+                .find(|part| part.part_number == request_part.part_number)
+                .ok_or_else(|| s3s::s3_error!(InvalidPart, "missing part"))?;
+            plan_parts.push(MultipartPartPlan {
+                part_number: request_part.part_number,
+                offset: 0,
+                size: stored.size,
+                checksum: stored.checksum.clone(),
+                e_tag: stored.e_tag.clone(),
+            });
+        }
+        let manifest = self
+            .object_format
+            .complete_multipart_upload(crate::multipart::MultipartCompletionPlan {
+                upload_id,
+                object_id: upload_id,
+                bucket: session.bucket,
+                key: session.key,
+                content_type: session.content_type,
+                checksum_algorithm: session.checksum_algorithm,
+                content_length: plan_parts.iter().map(|part| part.size).sum(),
+                parts: plan_parts,
+            })
+            .map_err(map_object_error)?;
+        Ok(S3Response::new(CompleteMultipartUploadOutput {
+            bucket: Some(manifest.bucket),
+            key: Some(manifest.key),
+            e_tag: Some(ETag::Strong(manifest.checksum.whole_object)),
+            version_id: manifest.version_id,
+            ..Default::default()
+        }))
+    }
+
+    async fn abort_multipart_upload(
+        &self,
+        req: S3Request<AbortMultipartUploadInput>,
+    ) -> S3Result<S3Response<AbortMultipartUploadOutput>> {
+        let input = req.input;
+        let upload_id = uuid::Uuid::parse_str(&input.upload_id).map_err(|error| {
+            s3s::S3Error::with_message(S3ErrorCode::InvalidArgument, error.to_string())
+        })?;
+        self.object_format
+            .abort_multipart_upload(upload_id)
+            .map_err(map_object_error)?;
+        Ok(S3Response::new(AbortMultipartUploadOutput::default()))
+    }
+
+    async fn list_multipart_uploads(
+        &self,
+        req: S3Request<ListMultipartUploadsInput>,
+    ) -> S3Result<S3Response<ListMultipartUploadsOutput>> {
+        let input = req.input;
+        let uploads = self
+            .object_format
+            .list_multipart_uploads(&input.bucket, input.prefix.as_deref())
+            .map_err(map_object_error)?
+            .into_iter()
+            .map(|session| MultipartUpload {
+                key: Some(session.key),
+                initiated: Some(Timestamp::from(session.created_at)),
+                upload_id: Some(session.upload_id.to_string()),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        Ok(S3Response::new(ListMultipartUploadsOutput {
+            bucket: Some(input.bucket),
+            prefix: input.prefix,
+            uploads: Some(uploads),
+            ..Default::default()
+        }))
+    }
+
+    async fn list_parts(
+        &self,
+        req: S3Request<ListPartsInput>,
+    ) -> S3Result<S3Response<ListPartsOutput>> {
+        let input = req.input;
+        let upload_id = uuid::Uuid::parse_str(&input.upload_id).map_err(|error| {
+            s3s::S3Error::with_message(S3ErrorCode::InvalidArgument, error.to_string())
+        })?;
+        let parts = self
+            .object_format
+            .list_multipart_parts(upload_id)
+            .map_err(map_object_error)?
+            .into_iter()
+            .map(|part| Part {
+                e_tag: Some(ETag::Strong(part.e_tag)),
+                last_modified: Some(Timestamp::from(part.created_at)),
+                part_number: Some(part.part_number.try_into().unwrap_or(i32::MAX)),
+                size: Some(part.size as i64),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        Ok(S3Response::new(ListPartsOutput {
+            bucket: Some(input.bucket),
+            key: Some(input.key),
+            upload_id: Some(input.upload_id),
+            parts: Some(parts),
+            ..Default::default()
+        }))
+    }
+
+    async fn copy_object(
+        &self,
+        req: S3Request<CopyObjectInput>,
+    ) -> S3Result<S3Response<CopyObjectOutput>> {
+        let input = req.input;
+        let source = parse_copy_source(&input.copy_source)?;
+        let manifest = self
+            .resolve_manifest(&source.bucket, &source.key, source.version_id.as_deref())
+            .map_err(map_object_error)?
+            .ok_or_else(|| s3s::s3_error!(NoSuchKey, "source object does not exist"))?;
+        let bytes = self
+            .object_format
+            .read_bytes(&manifest.bucket, &manifest.key, 0..manifest.content_length)
+            .map_err(map_object_error)?;
+        let content_type = input
+            .content_type
+            .clone()
+            .unwrap_or(manifest.content_type.clone());
+        let copied = self
+            .object_format
+            .put_bytes(&input.bucket, &input.key, &content_type, &bytes)
+            .map_err(map_object_error)?;
+        let copy_result = s3s::dto::CopyObjectResult {
+            e_tag: Some(ETag::Strong(copied.checksum.whole_object.clone())),
+            last_modified: Some(Timestamp::from(copied.created_at)),
+            ..Default::default()
+        };
+        Ok(S3Response::new(CopyObjectOutput {
+            copy_object_result: Some(copy_result),
+            version_id: copied.version_id,
+            ..Default::default()
+        }))
+    }
+
     async fn head_object(
         &self,
         req: S3Request<HeadObjectInput>,
     ) -> S3Result<S3Response<HeadObjectOutput>> {
         let input = req.input;
         let manifest = self
-            .object_format
-            .get_active_manifest(&input.bucket, &input.key)
+            .resolve_manifest(&input.bucket, &input.key, input.version_id.as_deref())
             .map_err(map_object_error)?
             .ok_or_else(|| s3s::s3_error!(NoSuchKey, "object does not exist"))?;
+        if manifest.commit_state != crate::manifest::CommitState::Committed {
+            return Err(s3s::s3_error!(NoSuchKey, "object does not exist"));
+        }
         let metadata: HashMap<_, _> = manifest
             .user_metadata
             .iter()
@@ -263,10 +574,12 @@ impl S3 for TelegramS3Backend {
         let headers = req.headers.clone();
         let input = req.input;
         let manifest = self
-            .object_format
-            .get_active_manifest(&input.bucket, &input.key)
+            .resolve_manifest(&input.bucket, &input.key, input.version_id.as_deref())
             .map_err(map_object_error)?
             .ok_or_else(|| s3s::s3_error!(NoSuchKey, "object does not exist"))?;
+        if manifest.commit_state != crate::manifest::CommitState::Committed {
+            return Err(s3s::s3_error!(NoSuchKey, "object does not exist"));
+        }
         let (range, content_range) = object_range(&headers, manifest.content_length)?;
         let spans = ObjectFormatService::plan_read(&manifest, range.clone())
             .map_err(map_object_error)?
@@ -381,10 +694,21 @@ impl S3 for TelegramS3Backend {
         req: S3Request<DeleteObjectInput>,
     ) -> S3Result<S3Response<DeleteObjectOutput>> {
         let input = req.input;
-        let deleted = self
-            .object_format
-            .delete_object(&input.bucket, &input.key)
-            .map_err(map_object_error)?;
+        let deleted = if let Some(version_id) = input.version_id.as_deref() {
+            let manifest = self
+                .resolve_manifest(&input.bucket, &input.key, Some(version_id))
+                .map_err(map_object_error)?
+                .ok_or_else(|| s3s::s3_error!(NoSuchKey, "object does not exist"))?;
+            Some(
+                self.object_format
+                    .tombstone_manifest(manifest.object_id, "deleted via S3")
+                    .map_err(map_object_error)?,
+            )
+        } else {
+            self.object_format
+                .delete_object(&input.bucket, &input.key)
+                .map_err(map_object_error)?
+        };
         let version_id = deleted.map(|manifest| manifest.object_id.to_string());
         Ok(S3Response::new(DeleteObjectOutput {
             delete_marker: Some(version_id.is_some()),
@@ -459,6 +783,78 @@ impl S3 for TelegramS3Backend {
             next_continuation_token,
             continuation_token: input.continuation_token,
             start_after: start_after_value,
+            ..Default::default()
+        }))
+    }
+
+    async fn list_object_versions(
+        &self,
+        req: S3Request<ListObjectVersionsInput>,
+    ) -> S3Result<S3Response<ListObjectVersionsOutput>> {
+        let input = req.input;
+        if !self
+            .object_format
+            .bucket_exists(&input.bucket)
+            .map_err(map_object_error)?
+        {
+            return Err(s3s::s3_error!(NoSuchBucket, "bucket does not exist"));
+        }
+        let prefix = input.prefix.clone().unwrap_or_default();
+        let mut manifests = self
+            .object_format
+            .list_manifests()
+            .map_err(map_object_error)?
+            .into_iter()
+            .filter(|manifest| manifest.bucket == input.bucket)
+            .filter(|manifest| prefix.is_empty() || manifest.key.starts_with(&prefix))
+            .collect::<Vec<_>>();
+        manifests.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+
+        let mut latest_key = HashMap::<String, String>::new();
+        for manifest in &manifests {
+            latest_key
+                .entry(manifest.key.clone())
+                .or_insert_with(|| manifest.object_id.to_string());
+        }
+
+        let mut versions = Vec::new();
+        let mut delete_markers = Vec::new();
+        for manifest in manifests {
+            let is_latest = latest_key
+                .get(&manifest.key)
+                .map(|object_id| object_id == &manifest.object_id.to_string())
+                .unwrap_or(false);
+            match manifest.commit_state {
+                crate::manifest::CommitState::Committed => versions.push(ObjectVersion {
+                    key: Some(manifest.key),
+                    last_modified: Some(Timestamp::from(manifest.created_at)),
+                    e_tag: Some(ETag::Strong(manifest.checksum.whole_object)),
+                    is_latest: Some(is_latest),
+                    size: Some(manifest.content_length as i64),
+                    storage_class: Some(ObjectVersionStorageClass::from_static(
+                        ObjectVersionStorageClass::STANDARD,
+                    )),
+                    version_id: Some(manifest.object_id.to_string()),
+                    ..Default::default()
+                }),
+                crate::manifest::CommitState::Tombstoned => {
+                    delete_markers.push(DeleteMarkerEntry {
+                        key: Some(manifest.key),
+                        last_modified: Some(Timestamp::from(manifest.created_at)),
+                        is_latest: Some(is_latest),
+                        version_id: Some(manifest.object_id.to_string()),
+                        ..Default::default()
+                    })
+                }
+                _ => {}
+            }
+        }
+
+        Ok(S3Response::new(ListObjectVersionsOutput {
+            name: Some(input.bucket),
+            prefix: Some(prefix),
+            versions: Some(versions),
+            delete_markers: Some(delete_markers),
             ..Default::default()
         }))
     }
@@ -537,4 +933,57 @@ fn object_range(
         ));
     };
     Ok((start..end, Some(content_range)))
+}
+
+struct CopySourceRef {
+    bucket: String,
+    key: String,
+    version_id: Option<String>,
+}
+
+fn parse_copy_source(copy_source: &CopySource) -> Result<CopySourceRef, s3s::S3Error> {
+    match copy_source {
+        CopySource::Bucket {
+            bucket,
+            key,
+            version_id,
+        } => Ok(CopySourceRef {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            version_id: version_id.as_ref().map(|value| value.to_string()),
+        }),
+        _ => Err(s3s::S3Error::with_message(
+            S3ErrorCode::InvalidArgument,
+            "unsupported copy source format",
+        )),
+    }
+}
+
+fn parse_byte_range(
+    value: &str,
+    content_length: u64,
+) -> Result<std::ops::Range<u64>, s3s::S3Error> {
+    let value = value.strip_prefix("bytes=").ok_or_else(|| {
+        s3s::S3Error::with_message(S3ErrorCode::InvalidRange, "unsupported range header")
+    })?;
+    let (start, end) = value.split_once('-').ok_or_else(|| {
+        s3s::S3Error::with_message(S3ErrorCode::InvalidRange, "invalid range header")
+    })?;
+    let start = start.parse::<u64>().map_err(|_| {
+        s3s::S3Error::with_message(S3ErrorCode::InvalidRange, "invalid range start")
+    })?;
+    let end = if end.is_empty() {
+        content_length
+    } else {
+        end.parse::<u64>().map_err(|_| {
+            s3s::S3Error::with_message(S3ErrorCode::InvalidRange, "invalid range end")
+        })? + 1
+    };
+    if start > end || end > content_length {
+        return Err(s3s::S3Error::with_message(
+            S3ErrorCode::InvalidRange,
+            "requested range is invalid",
+        ));
+    }
+    Ok(start..end)
 }

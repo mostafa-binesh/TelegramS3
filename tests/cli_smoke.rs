@@ -49,10 +49,10 @@ fn config_doctor_db_and_index_smoke_test() {
     assert!(config_stdout.contains("configuration looks structurally valid"));
 
     let migrate_stdout = run_and_capture(&tempdir, &["db", "migrate"]);
-    assert!(migrate_stdout.contains("database migrated to schema version 2"));
+    assert!(migrate_stdout.contains("database migrated to schema version 3"));
 
     let doctor_stdout = run_and_capture(&tempdir, &["doctor"]);
-    assert!(doctor_stdout.contains("metadata schema version: 2"));
+    assert!(doctor_stdout.contains("metadata schema version: 3"));
 
     let rebuild_stdout = run_and_capture(&tempdir, &["index", "rebuild"]);
     assert!(rebuild_stdout.contains("rebuild complete"));
@@ -61,7 +61,7 @@ fn config_doctor_db_and_index_smoke_test() {
     assert!(verify_stdout.contains("mismatched rows: 0"));
 
     let status_stdout = run_and_capture(&tempdir, &["db", "status"]);
-    assert!(status_stdout.contains("schema version: 2"));
+    assert!(status_stdout.contains("schema version: 3"));
 
     let mut server_command = command_for(&tempdir);
     server_command.arg("server");

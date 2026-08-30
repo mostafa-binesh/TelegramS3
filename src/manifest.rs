@@ -108,7 +108,7 @@ impl ObjectManifest {
             object_id: Uuid::new_v4(),
             bucket: args.bucket,
             key: args.key,
-            version_id: None,
+            version_id: Some(Uuid::new_v4().to_string()),
             content_length: args.content_length,
             content_type: args.content_type,
             user_metadata: BTreeMap::new(),

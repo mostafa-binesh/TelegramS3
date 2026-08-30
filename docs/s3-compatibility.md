@@ -16,20 +16,20 @@ available through `server`, and the standard S3 CRUD smoke test now passes.
 | Head object | implemented | cargo test | Returns committed metadata only | Manifest rebuild may be needed | 4 |
 | Delete object | implemented | cargo test | Tombstones before cleanup | Physical delete is deferred | 4 |
 | List objects v2 | implemented | cargo test | Uses the local index and manifest list for ordering | Remote reconciliation lag exists | 4 |
-| Copy object | planned | none yet | Prefer metadata-aware copy path | Telegram copy semantics are not atomic with local commit | 5 |
+| Copy object | implemented | cargo check | Reuses the bounded object-format backend for source-to-destination copies | Copy is still local-first rather than remote-atomic | 5 |
 | Byte-range GET | implemented | cargo test | Maps ranges to chunk spans | Requires chunk-aware verification | 4 |
-| Multipart initiation | planned | none yet | Persist durable upload state | Multipart state is local | 5 |
-| Multipart part upload | planned | none yet | Stage part and checksum | Each part must stay under Telegram limits | 5 |
-| Multipart completion | planned | none yet | Commit manifest atomically | Completion must reconcile staged parts | 5 |
-| Multipart abort | planned | none yet | Mark upload aborted and clean up | Abort is eventually consistent | 5 |
-| Multipart listing | planned | none yet | Can be backed by local journal | Telegram does not expose upload sessions natively | 5 |
+| Multipart initiation | implemented | cargo check | Persists durable upload state in the local metadata store | Multipart state is local | 5 |
+| Multipart part upload | implemented | cargo check | Stages part data and checksums | Each part must stay under Telegram limits | 5 |
+| Multipart completion | implemented | cargo check | Commits manifest atomically after staged parts are verified | Completion must reconcile staged parts | 5 |
+| Multipart abort | implemented | cargo check | Marks upload aborted and cleans up local state | Abort is local cleanup | 5 |
+| Multipart listing | implemented | cargo check | Lists live multipart sessions from the local journal/metadata | Telegram does not expose upload sessions natively | 5 |
 | Conditional requests | compatibility gap | none yet | Must be enforced in the adapter | Requires strong object-state checks | 5 |
-| Object versioning | compatibility gap | none yet | Needs version IDs in manifest/index | Telegram lacks built-in versions | 5 |
-| Delete markers | compatibility gap | none yet | Needs tombstones | Must be modeled locally | 5 |
+| Object versioning | implemented | cargo check | Version IDs are surfaced from manifests and version listings | Telegram lacks built-in versions | 5 |
+| Delete markers | implemented | cargo check | Tombstones are listed as delete markers and remain recoverable until cleanup | Must be modeled locally | 5 |
 | Object tags | compatibility gap | none yet | Must persist in manifest/index | Captions are not enough | 5 |
-| Checksums | planned | none yet | Manifest should carry per-chunk and whole-object checksums | Telegram alone is not enough | 5 |
+| Checksums | implemented | cargo test | Chunk and whole-object checksums are enforced during upload, read, and reconciliation | Telegram alone is not enough | 5 |
 | Presigned URLs | compatibility gap | none yet | Likely local capability URLs only | Telegram is not a URL signer | 5 |
-| Server-side copy | compatibility gap | none yet | Copy should prefer local manifest reuse | Telegram copy may not preserve metadata exactly | 5 |
+| Server-side copy | implemented | cargo check | Copy uses the local object-format backend and manifest reuse | Telegram copy may not preserve metadata exactly | 5 |
 | Lifecycle cleanup | planned | none yet | Needs background GC and tombstone reconciliation | Cleanup is deferred | 6 |
 | Batch delete | compatibility gap | none yet | Can be translated to per-object tombstones | Telegram does not batch object deletes | 6 |
 | Bucket policies | compatibility gap | none yet | Policy evaluation belongs above storage | Telegram is out of scope | 6 |

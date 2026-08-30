@@ -23,6 +23,17 @@
 3. Resume only if the upload state is safe to continue.
 4. Otherwise roll back and clean up staging chunks or quarantined artifacts.
 
+## Interrupted Multipart Upload
+
+1. Check `telegram-s3 auth status` first if the session was refreshed around
+   the same time as the failure.
+2. Multipart sessions are durable in local metadata, so restart reuse should
+   preserve the upload ID and uploaded parts.
+3. If a multipart session is marked `recovery_required`, abort or repair it
+   before trying to complete the upload.
+4. If the session files are gone but the local session row remains, clean up
+   the multipart metadata and retry the upload from a fresh initiate call.
+
 ## Telegram Session Loss
 
 1. Keep the local metadata and data directories intact.

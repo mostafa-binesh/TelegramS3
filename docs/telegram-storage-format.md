@@ -12,9 +12,10 @@
 Phase 3 now implements the object-format service in this repository. Uploads
 are chunked, checksummed, and staged through the journal before they become
 visible, while startup reconciliation repairs complete staged uploads and
-quarantines orphaned staging or chunk data. The RustFS-backed S3 server now
-consumes the same manifest and chunk shape for bucket CRUD, object CRUD, and
-range reads, so the layout is no longer just an internal placeholder.
+quarantines orphaned staging or chunk data. Phase 5 extends that model with
+durable multipart sessions and version-aware object copies, so the layout is
+now shared by single PUTs, multipart completion, and the RustFS-backed S3
+surface.
 
 ## Design
 
@@ -23,6 +24,7 @@ Each object is represented by:
 1. one canonical manifest document
 2. one or more immutable chunk documents
 3. a local index row and journal entry
+4. optional multipart session and part rows while an upload is in progress
 
 ## Default Chunk Size
 
@@ -117,9 +119,21 @@ Supported states:
 - `orphaned`
 - `recovery_required`
 
+Multipart sessions use their own local states:
+
+- `initiated`
+- `uploading`
+- `completing`
+- `completed`
+- `aborted`
+- `recovery_required`
+
 ## Recovery Rules
 
 - A manifest without a local commit row is not visible until reconciliation.
 - A staged upload without a manifest is aborted or resumed.
 - A tombstone must survive long enough for background cleanup.
 - Missing chunks make the object corrupt until repaired.
+- Multipart parts remain hidden until completion publishes the final manifest.
+- Version IDs are derived from the stored manifest identity, so copy and delete
+  marker flows can remain explicit across restarts.
