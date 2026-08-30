@@ -29,6 +29,7 @@ pub struct AppConfig {
     pub telegram_s3_master_key: Option<String>,
     pub rustfs_access_key: Option<String>,
     pub rustfs_secret_key: Option<String>,
+    pub telegram_s3_bind_addr: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -77,6 +78,7 @@ impl AppConfig {
             telegram_s3_master_key: read("TELEGRAM_S3_MASTER_KEY"),
             rustfs_access_key: read("RUSTFS_ACCESS_KEY"),
             rustfs_secret_key: read("RUSTFS_SECRET_KEY"),
+            telegram_s3_bind_addr: read("TELEGRAM_S3_BIND_ADDR"),
         }
     }
 
@@ -167,6 +169,17 @@ impl AppConfig {
             .as_deref()
             .unwrap_or("auto")
             .to_string()
+    }
+
+    pub fn s3_bind_addr(&self) -> Result<std::net::SocketAddr, ConfigError> {
+        let value = self
+            .telegram_s3_bind_addr
+            .as_deref()
+            .unwrap_or("127.0.0.1:9000");
+        value.parse().map_err(|_| ConfigError::Parse {
+            field: "TELEGRAM_S3_BIND_ADDR",
+            value: value.to_string(),
+        })
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {

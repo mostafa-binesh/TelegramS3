@@ -9,14 +9,14 @@ Telegram alone to answer read/write consistency questions.
 
 ## Schema Version
 
-- Current schema version: `1`
+- Current schema version: `2`
 - Version contract: migrations are applied on startup and are also available
   through the `telegram-s3 db migrate` command.
 - Startup behavior: the store opens the configured SQLite file, creates the
   schema if needed, rebuilds the active index, and records recovery markers for
   staged operations. The object-format bootstrap layer now uses the same store
-  to reconcile staged uploads, recovery-required objects, and quarantined
-  orphans before `doctor` or `server` report success.
+  to reconcile staged uploads, recovery-required objects, quarantined orphans,
+  and bucket state before `doctor` or `server` report success.
 
 ## Tables
 
@@ -26,6 +26,9 @@ Telegram alone to answer read/write consistency questions.
 - `object_manifests`
   - one row per object manifest revision
   - stores the full manifest JSON and commit state
+- `buckets`
+  - one row per bucket name
+  - stores creation time, deletion state, and bucket-level flags
 - `operation_journal`
   - one row per staged operation
   - stores the operation kind, current state, and serialized recovery details
@@ -36,7 +39,8 @@ Telegram alone to answer read/write consistency questions.
 
 The phase 3 object-format service also persists chunk and manifest documents
 under the configured data directory, using the metadata store as the
-authoritative fast path and recovery journal.
+authoritative fast path and recovery journal. The RustFS-backed S3 server now
+uses the same store for bucket visibility and CRUD routing.
 
 ## Write Path
 
@@ -52,8 +56,9 @@ visible until the new manifest commits.
 ## Recovery and Rebuild
 
 - `telegram-s3 doctor` opens the database and prints the current metadata
-  status. It also bootstraps the object-format layer and fails fast if staged
-  uploads or recovery-required objects remain unresolved.
+  status. It bootstraps the object-format layer and the RustFS-backed S3
+  server seam, and fails fast if staged uploads, recovery-required objects, or
+  invalid Telegram/session state remain unresolved.
 - `telegram-s3 db status` reports the stored schema version and row counts.
 - `telegram-s3 db migrate` applies outstanding migrations.
 - `telegram-s3 index rebuild` repopulates the active index from committed

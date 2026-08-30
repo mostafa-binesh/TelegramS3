@@ -1,22 +1,23 @@
 # S3 Compatibility Matrix
 
-Phase 3 has implemented the manifest/chunk object-format backend, but the
-rows below still track externally visible S3 API wiring. Those APIs remain
-planned until the RustFS integration phase exposes them through the server.
+Phase 3 has implemented the manifest/chunk object-format backend, and Phase 4
+now wires the RustFS-backed S3 server through that layer for the CRUD slice.
+The rows below track externally visible S3 API wiring; implemented entries are
+available through `server`, and the standard S3 CRUD smoke test now passes.
 
 | API operation | Status | Test coverage | Compatibility notes | Telegram-specific limitation | Planned phase |
 | --- | --- | --- | --- | --- | --- |
-| Create bucket | planned | none yet | Must create remote namespace and local bucket row | Telegram has no native bucket primitive | 4 |
-| Delete empty bucket | planned | none yet | Must refuse non-empty buckets | Cleanup is asynchronous | 4 |
-| List buckets | planned | none yet | Local index should be authoritative | Remote reconstruction is slower | 4 |
-| Head bucket | planned | none yet | Must reflect bucket metadata | Telegram metadata is indirect | 4 |
-| Put object | planned | none yet | Chunk upload + manifest commit | 2 GiB Telegram file limit | 4 |
-| Get object | planned | none yet | Stream from manifest and chunks | Requires chunk fetch and verification | 4 |
-| Head object | planned | none yet | Return committed metadata only | Manifest rebuild may be needed | 4 |
-| Delete object | planned | none yet | Tombstone before cleanup | Physical delete is deferred | 4 |
-| List objects v2 | planned | none yet | Use local index first | Remote reconciliation lag exists | 4 |
+| Create bucket | implemented | cargo test | Creates the local bucket row and exposes it through the S3 server | Telegram has no native bucket primitive | 4 |
+| Delete empty bucket | implemented | cargo test | Refuses non-empty buckets and preserves recoverable state until cleanup | Cleanup is asynchronous | 4 |
+| List buckets | implemented | cargo test | Local index is authoritative for bucket visibility | Remote reconstruction is slower | 4 |
+| Head bucket | implemented | cargo test | Reflects bucket metadata from the local store | Telegram metadata is indirect | 4 |
+| Put object | implemented | cargo test | Chunk upload plus manifest commit through the object-format service | 2 GiB Telegram file limit | 4 |
+| Get object | implemented | cargo test | Streams from manifest and chunks with checksum verification | Requires chunk fetch and verification | 4 |
+| Head object | implemented | cargo test | Returns committed metadata only | Manifest rebuild may be needed | 4 |
+| Delete object | implemented | cargo test | Tombstones before cleanup | Physical delete is deferred | 4 |
+| List objects v2 | implemented | cargo test | Uses the local index and manifest list for ordering | Remote reconciliation lag exists | 4 |
 | Copy object | planned | none yet | Prefer metadata-aware copy path | Telegram copy semantics are not atomic with local commit | 5 |
-| Byte-range GET | planned | none yet | Map ranges to chunk spans | Requires chunk-aware verification | 4 |
+| Byte-range GET | implemented | cargo test | Maps ranges to chunk spans | Requires chunk-aware verification | 4 |
 | Multipart initiation | planned | none yet | Persist durable upload state | Multipart state is local | 5 |
 | Multipart part upload | planned | none yet | Stage part and checksum | Each part must stay under Telegram limits | 5 |
 | Multipart completion | planned | none yet | Commit manifest atomically | Completion must reconcile staged parts | 5 |

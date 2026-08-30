@@ -1,6 +1,7 @@
 use assert_cmd::prelude::*;
 use std::fs;
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
 fn command_for(tempdir: &TempDir) -> Command {
@@ -55,9 +56,24 @@ fn auth_status_logout_doctor_and_server_bootstrap_smoke_test() {
 
     let doctor = command_for(&tempdir).arg("doctor").assert().success();
     let doctor_stdout = String::from_utf8(doctor.get_output().stdout.clone()).expect("utf8");
-    assert!(doctor_stdout.contains("telegram: session state"));
+    assert!(doctor_stdout.contains("s3 bind address: 127.0.0.1:9000"));
+    assert!(doctor_stdout.contains("telegram bootstrap:"));
 
-    let server = command_for(&tempdir).arg("server").assert().success();
-    let server_stdout = String::from_utf8(server.get_output().stdout.clone()).expect("utf8");
-    assert!(server_stdout.contains("server bootstrap"));
+    let mut server_command = command_for(&tempdir);
+    server_command.arg("server");
+    server_command.stdout(Stdio::piped());
+    let mut child = server_command.spawn().expect("spawn server");
+    let stdout = child.stdout.take().expect("server stdout");
+    let reader = BufReader::new(stdout);
+    let mut saw_listening = false;
+    for line in reader.lines().take(50) {
+        let line = line.expect("server line");
+        if line.contains("listening on") {
+            saw_listening = true;
+            break;
+        }
+    }
+    assert!(saw_listening);
+    let _ = child.kill();
+    let _ = child.wait();
 }

@@ -53,11 +53,18 @@ Completed work:
 
 ## Phase 4 - RustFS integration
 
-- Status: pending
+- Status: complete
 - Exit criteria:
   - chosen RustFS seam is implemented
   - bucket/object CRUD vertical slice works
   - range reads and listings are proven with a standard S3 client
+
+Completed work:
+
+- the RustFS-backed `server` bootstrap now starts the S3 listener instead of only validating configuration
+- bucket CRUD and object CRUD are routed through the RustFS seam into the Phase 3 object-format service
+- `doctor` now exercises the same server bootstrap path so Telegram/session and seam mismatches fail fast
+- standard S3 client smoke tests now cover create, put, head, get, range-get, list, and delete flows against the temporary server
 
 ## Phase 5 - Multipart and advanced compatibility
 

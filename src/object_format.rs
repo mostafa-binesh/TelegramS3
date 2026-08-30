@@ -1,6 +1,10 @@
 use crate::config::AppConfig;
 use crate::manifest::{ChunkRef, CommitState, ObjectChecksum, ObjectManifest};
-use crate::metadata::{JournalEntry, MetadataError, MetadataStatus, MetadataStore, OperationKind};
+use crate::metadata::{
+    BucketRecord, JournalEntry, MetadataError, MetadataStatus, MetadataStore, OperationKind,
+};
+use futures::StreamExt;
+use s3s::{Body, dto::StreamingBlob};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
@@ -9,6 +13,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use time::OffsetDateTime;
+use tokio::fs as async_fs;
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 const CHECKSUM_ALGORITHM: &str = "sha256";
@@ -157,6 +163,75 @@ impl ObjectFormatService {
 
     pub fn metadata_status(&self) -> Result<MetadataStatus, ObjectFormatError> {
         Ok(self.metadata.status()?)
+    }
+
+    pub fn create_bucket(&self, bucket: &str) -> Result<BucketRecord, ObjectFormatError> {
+        Ok(self.metadata.create_bucket(BucketRecord {
+            name: bucket.to_string(),
+            created_at: OffsetDateTime::now_utc(),
+            deleted_at: None,
+            versioning_enabled: false,
+            object_locking_enabled: false,
+        })?)
+    }
+
+    pub fn get_bucket(&self, bucket: &str) -> Result<Option<BucketRecord>, ObjectFormatError> {
+        Ok(self.metadata.get_bucket(bucket)?)
+    }
+
+    pub fn list_buckets(&self) -> Result<Vec<BucketRecord>, ObjectFormatError> {
+        Ok(self.metadata.list_buckets()?)
+    }
+
+    pub fn delete_bucket(&self, bucket: &str) -> Result<(), ObjectFormatError> {
+        Ok(self.metadata.delete_bucket(bucket)?)
+    }
+
+    pub fn bucket_exists(&self, bucket: &str) -> Result<bool, ObjectFormatError> {
+        Ok(self.metadata.bucket_exists(bucket)?)
+    }
+
+    pub fn get_active_manifest(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<ObjectManifest>, ObjectFormatError> {
+        Ok(self.metadata.get_active_manifest(bucket, key)?)
+    }
+
+    pub fn list_bucket_manifests(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+    ) -> Result<Vec<ObjectManifest>, ObjectFormatError> {
+        Ok(self.metadata.list_bucket_manifests(bucket, prefix)?)
+    }
+
+    pub fn delete_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<ObjectManifest>, ObjectFormatError> {
+        let manifest = match self.metadata.get_active_manifest(bucket, key)? {
+            Some(manifest) => manifest,
+            None => return Ok(None),
+        };
+        Ok(Some(self.metadata.tombstone_manifest(
+            manifest.object_id,
+            "deleted via S3",
+        )?))
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    pub fn chunk_path(&self, object_id: Uuid, order: u32) -> PathBuf {
+        self.chunk_dir(object_id).join(chunk_file_name(order))
+    }
+
+    pub fn manifest_file_path(&self, object_id: Uuid) -> PathBuf {
+        self.manifest_path(object_id)
     }
 
     pub fn status(&self) -> Result<ObjectFormatStatus, ObjectFormatError> {
@@ -352,6 +427,97 @@ impl ObjectFormatService {
     ) -> Result<ObjectManifest, ObjectFormatError> {
         let staged = self.stage_bytes(bucket, key, content_type, bytes)?;
         self.commit_staged_object(&staged)
+    }
+
+    pub async fn put_stream(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: &str,
+        body: Option<StreamingBlob>,
+    ) -> Result<ObjectManifest, ObjectFormatError> {
+        let mut body = body.unwrap_or_else(|| StreamingBlob::new(Body::empty()));
+        let object_id = Uuid::new_v4();
+        let scratch_dir = self
+            .data_dir
+            .join(STAGING_ROOT)
+            .join(format!("upload-{object_id}"));
+        async_fs::create_dir_all(&scratch_dir).await?;
+
+        let mut chunk_plan = ChunkPlan {
+            chunk_size: self.chunk_size,
+            content_length: 0,
+            chunks: Vec::new(),
+        };
+        let mut chunk_refs = Vec::new();
+        let mut whole_hasher = Sha256::new();
+        let mut offset = 0_u64;
+
+        while let Some(chunk) = body.next().await {
+            let chunk_bytes =
+                chunk.map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+            let chunk_checksum = sha256_hex(&chunk_bytes);
+            let chunk_path = scratch_dir.join(chunk_file_name(chunk_plan.chunks.len() as u32));
+            let mut chunk_file = async_fs::File::create(&chunk_path).await?;
+            chunk_file.write_all(&chunk_bytes).await?;
+            chunk_file.sync_all().await?;
+
+            whole_hasher.update(&chunk_bytes);
+            let order = chunk_plan.chunks.len() as u32;
+            let size = chunk_bytes.len() as u64;
+            chunk_plan.chunks.push(PlannedChunk {
+                order,
+                offset,
+                size,
+            });
+            chunk_refs.push(ChunkRef {
+                order,
+                offset,
+                size,
+                checksum: chunk_checksum,
+                telegram_peer_id: self.storage_chat_id.clone(),
+                telegram_message_id: i64::from(order) + 1,
+                telegram_document_id: Some(format!("local:{object_id}:{order}")),
+            });
+            chunk_plan.content_length =
+                chunk_plan.content_length.checked_add(size).ok_or_else(|| {
+                    ObjectFormatError::InvalidPlan("content length overflow".to_string())
+                })?;
+            offset = offset
+                .checked_add(size)
+                .ok_or_else(|| ObjectFormatError::InvalidPlan("offset overflow".to_string()))?;
+        }
+
+        let whole_checksum = sha256_hex(whole_hasher.finalize());
+        let manifest = self.new_manifest(ManifestBuildArgs {
+            object_id,
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            content_type: content_type.to_string(),
+            commit_state: CommitState::Staging,
+            chunks: chunk_refs,
+            whole_checksum,
+        });
+
+        let operation_id = self
+            .metadata
+            .stage_manifest(OperationKind::Put, manifest.clone())?;
+        let staging_dir = self.staging_dir(operation_id);
+        if staging_dir != scratch_dir {
+            if staging_dir.exists() {
+                fs::remove_dir_all(&staging_dir)?;
+            }
+            fs::rename(&scratch_dir, &staging_dir)?;
+        }
+        let stage_manifest_path = staging_dir.join(MANIFEST_FILE_NAME);
+        write_json_file(&stage_manifest_path, &manifest)?;
+        verify_staged_chunks(&staging_dir, &manifest)?;
+        self.commit_staged_object(&StagedObject {
+            operation_id,
+            object_id,
+            manifest,
+            chunk_plan,
+        })
     }
 
     pub fn read_bytes(

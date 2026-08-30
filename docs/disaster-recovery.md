@@ -32,6 +32,16 @@
 4. If Telegram rejects the session, use `telegram-s3 auth logout` and log in
    again with a fresh code.
 
+## S3 Server Bootstrap Failure
+
+1. Run `telegram-s3 doctor` to check the shared bootstrap path.
+2. If doctor fails before the listener binds, inspect the Telegram session,
+   proxy settings, bucket rows, and recovery markers first.
+3. Fix the underlying object-format or Telegram transport issue before
+   retrying `telegram-s3 server`.
+4. A successful restart should preserve committed objects, keep staged work
+   invisible, and only make repaired data visible after reconciliation.
+
 ## Orphan Cleanup
 
 - Run garbage collection in dry-run mode first.

@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use telegram_s3::{
-    AppConfig, MetadataStore,
+    AppConfig, MetadataStore, S3Server,
     object_format::{ObjectFormatError, ObjectFormatService, ObjectFormatStatus},
     redact,
     telegram::{TelegramTransport, TelegramTransportError, TelegramTransportStatus},
@@ -132,6 +132,9 @@ async fn run_auth(command: AuthCommand) -> Result<(), String> {
 
 async fn run_doctor() -> Result<(), String> {
     let config = load_config()?;
+    let server = S3Server::bootstrap(&config)
+        .await
+        .map_err(|error| error.to_string())?;
     let object_format = open_object_format(&config)?;
     let object_status = object_format
         .bootstrap()
@@ -139,11 +142,8 @@ async fn run_doctor() -> Result<(), String> {
     let metadata_status = object_format
         .metadata_status()
         .map_err(render_object_format_error)?;
-    let transport = TelegramTransport::open(config)
-        .await
-        .map_err(render_transport_error)?;
-    let transport_status = transport.status().await.map_err(render_transport_error)?;
     println!("configuration looks structurally valid");
+    println!("s3 bind address: {}", server.address());
     println!(
         "metadata schema version: {}",
         metadata_status.schema_version
@@ -153,7 +153,6 @@ async fn run_doctor() -> Result<(), String> {
     println!("staged objects: {}", metadata_status.staged_objects);
     println!("recovery markers: {}", metadata_status.recovery_markers);
     print_object_format_status("object format", &object_status)?;
-    print_transport_status("telegram", &transport_status)?;
     Ok(())
 }
 
@@ -256,19 +255,15 @@ fn open_metadata_store(config: &AppConfig) -> Result<MetadataStore, String> {
 
 async fn run_server() -> Result<(), String> {
     let config = load_config()?;
-    let object_format = open_object_format(&config)?;
-    let object_status = object_format
-        .bootstrap()
-        .map_err(render_object_format_error)?;
-    let transport = TelegramTransport::open(config)
+    let server = S3Server::bootstrap(&config)
         .await
-        .map_err(render_transport_error)?;
-    let status = transport
-        .bootstrap()
-        .await
-        .map_err(render_transport_error)?;
-    print_object_format_status("object format bootstrap", &object_status)?;
-    print_transport_status("server bootstrap", &status)?;
+        .map_err(|error| error.to_string())?;
+    println!("listening on {}", server.address());
+    use std::io::Write;
+    std::io::stdout()
+        .flush()
+        .map_err(|error| error.to_string())?;
+    server.serve().await.map_err(|error| error.to_string())?;
     Ok(())
 }
 

@@ -8,18 +8,24 @@ description = "Telegram-backed S3-compatible object storage"
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
+futures = "0.3"
 grammers-client = { version = "0.10", features = ["proxy"] }
 grammers-mtsender = { version = "0.10", features = ["proxy"] }
 grammers-session = "0.10"
 grammers-tl-types = "0.10"
 hex = "0.4"
+http = "1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = "0.23"
+s3s = { git = "https://github.com/rustfs/s3s.git", rev = "9c4690d8e73fc8d184031a19b2c4539ebc77d180", version = "0.15.0", features = ["minio"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = "0.26"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "serde"] }
@@ -31,5 +37,8 @@ uuid = { version = "1", features = ["serde", "v4"] }
 webpki-roots = "0.26"
 
 [dev-dependencies]
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
+aws-sdk-s3 = "1"
 assert_cmd = "2"
 tempfile = "3"

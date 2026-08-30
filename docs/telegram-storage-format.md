@@ -12,8 +12,9 @@
 Phase 3 now implements the object-format service in this repository. Uploads
 are chunked, checksummed, and staged through the journal before they become
 visible, while startup reconciliation repairs complete staged uploads and
-quarantines orphaned staging or chunk data. The same manifest and chunk shape
-remains the contract for the eventual Telegram-backed transport layer.
+quarantines orphaned staging or chunk data. The RustFS-backed S3 server now
+consumes the same manifest and chunk shape for bucket CRUD, object CRUD, and
+range reads, so the layout is no longer just an internal placeholder.
 
 ## Design
 
@@ -102,7 +103,9 @@ The database tracks:
 - orphaned chunks
 - reconciliation state
 
-The index is a fast path, not the only source of truth.
+The index is a fast path, not the only source of truth. Bucket rows follow the
+same recovery rules as object manifests, so bucket visibility also depends on
+the metadata store and reconciliation path.
 
 ## Commit State
 

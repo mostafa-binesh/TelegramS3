@@ -13,6 +13,7 @@ TELEGRAM_STORAGE_CHAT_ID=<dedicated_private_channel_id>
 
 TELEGRAM_METADATA_PATH=/var/lib/telegram-s3/metadata.sqlite
 TELEGRAM_DATA_DIR=/var/lib/telegram-s3/data
+TELEGRAM_S3_BIND_ADDR=127.0.0.1:9000
 
 TELEGRAM_CHUNK_SIZE=1048576
 TELEGRAM_CONNECTION_TIMEOUT_SECS=30
@@ -43,11 +44,14 @@ RUSTFS_SECRET_KEY=<generate_secure_random_value>
 - object-format path: `TELEGRAM_DATA_DIR` now houses staged uploads,
   committed manifests, committed chunks, and quarantine artifacts during
   phase 3
+- S3 bind address: `TELEGRAM_S3_BIND_ADDR` controls where the RustFS-backed
+  `server` listener binds
 
 Defaults used by the current scaffold:
 
 - metadata path: `data/metadata.sqlite`
 - data dir: `data`
+- S3 bind addr: `127.0.0.1:9000`
 - chunk size: `1 MiB`
 - connection timeout: `30s`
 - request timeout: `30s`
@@ -92,9 +96,9 @@ Proxy selection rules:
 ## Validation Notes
 
 - `doctor` validates required credentials, runtime settings, the SQLite
-  metadata path, the object-format bootstrap state, and the Telegram transport
-  in live mode.
-- `server` performs the same bootstrap checks before starting request
-  processing.
+  metadata path, the object-format bootstrap state, the Telegram transport,
+  and the RustFS-backed S3 seam in live mode.
+- `server` performs the same bootstrap checks before binding the S3 listener
+  and starting request processing.
 - Session and metadata paths are checked for unsafe `..` traversal, symlinks,
   and overly permissive permissions when the platform exposes those checks.

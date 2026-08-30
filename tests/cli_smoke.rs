@@ -1,6 +1,7 @@
 use assert_cmd::prelude::*;
 use std::fs;
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
 fn command_for(tempdir: &TempDir) -> Command {
@@ -48,10 +49,10 @@ fn config_doctor_db_and_index_smoke_test() {
     assert!(config_stdout.contains("configuration looks structurally valid"));
 
     let migrate_stdout = run_and_capture(&tempdir, &["db", "migrate"]);
-    assert!(migrate_stdout.contains("database migrated to schema version 1"));
+    assert!(migrate_stdout.contains("database migrated to schema version 2"));
 
     let doctor_stdout = run_and_capture(&tempdir, &["doctor"]);
-    assert!(doctor_stdout.contains("metadata schema version: 1"));
+    assert!(doctor_stdout.contains("metadata schema version: 2"));
 
     let rebuild_stdout = run_and_capture(&tempdir, &["index", "rebuild"]);
     assert!(rebuild_stdout.contains("rebuild complete"));
@@ -60,5 +61,23 @@ fn config_doctor_db_and_index_smoke_test() {
     assert!(verify_stdout.contains("mismatched rows: 0"));
 
     let status_stdout = run_and_capture(&tempdir, &["db", "status"]);
-    assert!(status_stdout.contains("schema version: 1"));
+    assert!(status_stdout.contains("schema version: 2"));
+
+    let mut server_command = command_for(&tempdir);
+    server_command.arg("server");
+    server_command.stdout(Stdio::piped());
+    let mut child = server_command.spawn().expect("spawn server");
+    let stdout = child.stdout.take().expect("server stdout");
+    let reader = BufReader::new(stdout);
+    let mut saw_listening = false;
+    for line in reader.lines().take(50) {
+        let line = line.expect("server line");
+        if line.contains("listening on") {
+            saw_listening = true;
+            break;
+        }
+    }
+    assert!(saw_listening);
+    let _ = child.kill();
+    let _ = child.wait();
 }

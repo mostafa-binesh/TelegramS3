@@ -12,12 +12,15 @@ Current state:
   resolution, and a shared retry policy.
 - Phase 3 object format now covers chunk planning, checksum verification, and
   journal-backed reconciliation.
+- Phase 4 RustFS integration is complete: `server` now boots the RustFS-backed
+  S3 listener and routes CRUD through the Phase 3 object-format service, and
+  standard S3 smoke verification now passes.
 - RustFS upstream was inspected at `47a3f5ef0110ee5af04bbb761a8bb5ed99a9ce15`.
 - Telegram Drive upstream was inspected at `77518a93fbc8a8242f38e23e486a2d87d3f82fb2`.
 - The repo now includes a SQLite-backed metadata store, migrations, a
-  chunk-aware object-format service, and CLI smoke-test coverage around
-  `config check`, `doctor`, `db`, `index`, and the transport bootstrap/status/
-  logout flows.
+  chunk-aware object-format service, a RustFS-backed S3 server seam, and CLI
+  smoke-test coverage around `config check`, `doctor`, `db`, `index`, the
+  transport bootstrap/status/logout flows, and standard S3 CRUD/range flows.
 
 Key documents:
 
