@@ -68,7 +68,7 @@ Completed work:
 
 ## Phase 5 - Multipart and advanced compatibility
 
-- Status: in progress
+- Status: complete
 - Exit criteria:
   - multipart recovery is durable
   - compatibility matrix is updated
@@ -80,7 +80,8 @@ Completed work:
 - multipart initiate, upload-part, upload-part-copy, complete, abort, and list flows are wired through the S3 server seam
 - copy-object and version-aware listings now flow through the same object-format backend
 - checksum enforcement now runs through part uploads, chunk reads, and reconciliation
-- the roadmap and storage docs are being updated to reflect the shipped behavior
+- conditional requests now honor ETag and timestamp preconditions on read, write, copy, and delete paths
+- the roadmap and storage docs now reflect the shipped behavior
 
 ## Phase 6 - Production hardening
 

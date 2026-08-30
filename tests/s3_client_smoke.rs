@@ -119,6 +119,15 @@ async fn s3_crud_list_and_range_smoke_test() {
         .expect("head object");
     assert_eq!(head.content_length, Some(16));
 
+    let head_precondition = client
+        .head_object()
+        .bucket(&bucket)
+        .key(key)
+        .if_none_match("*")
+        .send()
+        .await;
+    assert!(head_precondition.is_err());
+
     let get = client
         .get_object()
         .bucket(&bucket)
@@ -139,6 +148,35 @@ async fn s3_crud_list_and_range_smoke_test() {
         .expect("range get");
     let range_bytes = range.body.collect().await.expect("collect").into_bytes();
     assert_eq!(range_bytes.as_ref(), b"phase");
+
+    let get_precondition = client
+        .get_object()
+        .bucket(&bucket)
+        .key(key)
+        .if_match("\"bogus\"")
+        .send()
+        .await;
+    assert!(get_precondition.is_err());
+
+    let put_precondition = client
+        .put_object()
+        .bucket(&bucket)
+        .key(key)
+        .if_none_match("*")
+        .body(ByteStream::from_static(b"blocked"))
+        .send()
+        .await;
+    assert!(put_precondition.is_err());
+
+    let copy_precondition = client
+        .copy_object()
+        .bucket(&bucket)
+        .key("copy-target.txt")
+        .copy_source(format!("{bucket}/{key}"))
+        .copy_source_if_match("\"bogus\"")
+        .send()
+        .await;
+    assert!(copy_precondition.is_err());
 
     let listed = client
         .list_objects_v2()

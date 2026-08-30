@@ -15,10 +15,11 @@ Current state:
 - Phase 4 RustFS integration is complete: `server` now boots the RustFS-backed
   S3 listener and routes CRUD through the Phase 3 object-format service, and
   standard S3 smoke verification now passes.
-- Phase 5 multipart and advanced compatibility is in progress: multipart
+- Phase 5 multipart and advanced compatibility is complete: multipart
   sessions, part uploads, completion, abort, version listings, and copy paths
   now flow through the same object-format backend, with checksum enforcement
-  and reconciliation keeping the object model honest.
+  and reconciliation keeping the object model honest. Conditional request
+  checks now apply to read, write, copy, and delete paths.
 - RustFS upstream was inspected at `47a3f5ef0110ee5af04bbb761a8bb5ed99a9ce15`.
 - Telegram Drive upstream was inspected at `77518a93fbc8a8242f38e23e486a2d87d3f82fb2`.
 - The repo now includes a SQLite-backed metadata store, migrations, a

@@ -17,8 +17,8 @@ use s3s::dto::{
     CompleteMultipartUploadOutput, CopyObjectInput, CopyObjectOutput, CopySource,
     CreateBucketInput, CreateBucketOutput, CreateMultipartUploadInput, CreateMultipartUploadOutput,
     DeleteBucketInput, DeleteBucketOutput, DeleteMarkerEntry, DeleteObjectInput,
-    DeleteObjectOutput, ETag, GetObjectInput, GetObjectOutput, HeadBucketInput, HeadBucketOutput,
-    HeadObjectInput, HeadObjectOutput, ListBucketsInput, ListBucketsOutput,
+    DeleteObjectOutput, ETag, ETagCondition, GetObjectInput, GetObjectOutput, HeadBucketInput,
+    HeadBucketOutput, HeadObjectInput, HeadObjectOutput, ListBucketsInput, ListBucketsOutput,
     ListMultipartUploadsInput, ListMultipartUploadsOutput, ListObjectVersionsInput,
     ListObjectVersionsOutput, ListObjectsV2Input, ListObjectsV2Output, ListPartsInput,
     ListPartsOutput, MultipartUpload, Object, ObjectStorageClass, ObjectVersion,
@@ -33,6 +33,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
+use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::time::{Duration, timeout};
@@ -239,6 +240,15 @@ impl S3 for TelegramS3Backend {
         {
             return Err(s3s::s3_error!(NoSuchBucket, "bucket does not exist"));
         }
+        let current_manifest = self
+            .object_format
+            .get_active_manifest(&input.bucket, &input.key)
+            .map_err(map_object_error)?;
+        enforce_write_conditionals(
+            input.if_match.as_ref(),
+            input.if_none_match.as_ref(),
+            current_manifest.as_ref(),
+        )?;
         let content_type = input
             .content_type
             .unwrap_or_else(|| "application/octet-stream".to_string());
@@ -322,6 +332,13 @@ impl S3 for TelegramS3Backend {
             .resolve_manifest(&source.bucket, &source.key, source.version_id.as_deref())
             .map_err(map_object_error)?
             .ok_or_else(|| s3s::s3_error!(NoSuchKey, "source object does not exist"))?;
+        enforce_copy_source_conditionals(
+            input.copy_source_if_match.as_ref(),
+            input.copy_source_if_none_match.as_ref(),
+            input.copy_source_if_modified_since.as_ref(),
+            input.copy_source_if_unmodified_since.as_ref(),
+            &source_manifest,
+        )?;
         let range = input
             .copy_source_range
             .as_ref()
@@ -395,6 +412,15 @@ impl S3 for TelegramS3Backend {
             .get_multipart_session(upload_id)
             .map_err(map_object_error)?
             .ok_or_else(|| s3s::s3_error!(NoSuchUpload, "multipart upload does not exist"))?;
+        let current_manifest = self
+            .object_format
+            .get_active_manifest(&input.bucket, &input.key)
+            .map_err(map_object_error)?;
+        enforce_write_conditionals(
+            input.if_match.as_ref(),
+            input.if_none_match.as_ref(),
+            current_manifest.as_ref(),
+        )?;
         let actual_parts = self
             .object_format
             .list_multipart_parts(upload_id)
@@ -514,6 +540,13 @@ impl S3 for TelegramS3Backend {
             .resolve_manifest(&source.bucket, &source.key, source.version_id.as_deref())
             .map_err(map_object_error)?
             .ok_or_else(|| s3s::s3_error!(NoSuchKey, "source object does not exist"))?;
+        enforce_copy_source_conditionals(
+            input.copy_source_if_match.as_ref(),
+            input.copy_source_if_none_match.as_ref(),
+            input.copy_source_if_modified_since.as_ref(),
+            input.copy_source_if_unmodified_since.as_ref(),
+            &manifest,
+        )?;
         let bytes = self
             .object_format
             .read_bytes(&manifest.bucket, &manifest.key, 0..manifest.content_length)
@@ -550,6 +583,13 @@ impl S3 for TelegramS3Backend {
         if manifest.commit_state != crate::manifest::CommitState::Committed {
             return Err(s3s::s3_error!(NoSuchKey, "object does not exist"));
         }
+        enforce_read_conditionals(
+            input.if_match.as_ref(),
+            input.if_none_match.as_ref(),
+            input.if_modified_since.as_ref(),
+            input.if_unmodified_since.as_ref(),
+            &manifest,
+        )?;
         let metadata: HashMap<_, _> = manifest
             .user_metadata
             .iter()
@@ -571,7 +611,6 @@ impl S3 for TelegramS3Backend {
         &self,
         req: S3Request<GetObjectInput>,
     ) -> S3Result<S3Response<GetObjectOutput>> {
-        let headers = req.headers.clone();
         let input = req.input;
         let manifest = self
             .resolve_manifest(&input.bucket, &input.key, input.version_id.as_deref())
@@ -580,6 +619,14 @@ impl S3 for TelegramS3Backend {
         if manifest.commit_state != crate::manifest::CommitState::Committed {
             return Err(s3s::s3_error!(NoSuchKey, "object does not exist"));
         }
+        enforce_read_conditionals(
+            input.if_match.as_ref(),
+            input.if_none_match.as_ref(),
+            input.if_modified_since.as_ref(),
+            input.if_unmodified_since.as_ref(),
+            &manifest,
+        )?;
+        let headers = req.headers.clone();
         let (range, content_range) = object_range(&headers, manifest.content_length)?;
         let spans = ObjectFormatService::plan_read(&manifest, range.clone())
             .map_err(map_object_error)?
@@ -699,12 +746,30 @@ impl S3 for TelegramS3Backend {
                 .resolve_manifest(&input.bucket, &input.key, Some(version_id))
                 .map_err(map_object_error)?
                 .ok_or_else(|| s3s::s3_error!(NoSuchKey, "object does not exist"))?;
+            enforce_delete_conditionals(
+                input.if_match.as_ref(),
+                input.if_match_last_modified_time.as_ref(),
+                input.if_match_size,
+                &manifest,
+            )?;
             Some(
                 self.object_format
                     .tombstone_manifest(manifest.object_id, "deleted via S3")
                     .map_err(map_object_error)?,
             )
         } else {
+            if let Some(manifest) = self
+                .object_format
+                .get_active_manifest(&input.bucket, &input.key)
+                .map_err(map_object_error)?
+            {
+                enforce_delete_conditionals(
+                    input.if_match.as_ref(),
+                    input.if_match_last_modified_time.as_ref(),
+                    input.if_match_size,
+                    &manifest,
+                )?;
+            }
             self.object_format
                 .delete_object(&input.bucket, &input.key)
                 .map_err(map_object_error)?
@@ -933,6 +998,171 @@ fn object_range(
         ));
     };
     Ok((start..end, Some(content_range)))
+}
+
+fn etag_condition_matches(condition: &ETagCondition, actual: &str) -> bool {
+    match condition {
+        ETagCondition::Any => true,
+        ETagCondition::ETag(etag) => {
+            etag.as_strong() == Some(actual) || etag.as_weak() == Some(actual)
+        }
+    }
+}
+
+fn enforce_read_conditionals(
+    if_match: Option<&ETagCondition>,
+    if_none_match: Option<&ETagCondition>,
+    if_modified_since: Option<&Timestamp>,
+    if_unmodified_since: Option<&Timestamp>,
+    manifest: &crate::manifest::ObjectManifest,
+) -> S3Result<()> {
+    let current_etag = manifest.checksum.whole_object.as_str();
+    if let Some(condition) = if_match {
+        if !etag_condition_matches(condition, current_etag) {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "if-match precondition failed"
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(condition) = if_unmodified_since {
+        let since: OffsetDateTime = condition.clone().into();
+        if manifest.created_at > since {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "if-unmodified-since precondition failed"
+            ));
+        }
+    }
+    if let Some(condition) = if_none_match {
+        if etag_condition_matches(condition, current_etag) {
+            return Err(s3s::s3_error!(NotModified, "object not modified"));
+        }
+    }
+    if let Some(condition) = if_modified_since {
+        let since: OffsetDateTime = condition.clone().into();
+        if manifest.created_at <= since {
+            return Err(s3s::s3_error!(NotModified, "object not modified"));
+        }
+    }
+    Ok(())
+}
+
+fn enforce_write_conditionals(
+    if_match: Option<&ETagCondition>,
+    if_none_match: Option<&ETagCondition>,
+    current_manifest: Option<&crate::manifest::ObjectManifest>,
+) -> S3Result<()> {
+    let Some(manifest) = current_manifest else {
+        if if_match.is_some() {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "if-match precondition failed"
+            ));
+        }
+        return Ok(());
+    };
+    let current_etag = manifest.checksum.whole_object.as_str();
+    if let Some(condition) = if_match {
+        if !etag_condition_matches(condition, current_etag) {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "if-match precondition failed"
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(condition) = if_none_match {
+        if etag_condition_matches(condition, current_etag) {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "if-none-match precondition failed"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn enforce_copy_source_conditionals(
+    if_match: Option<&ETagCondition>,
+    if_none_match: Option<&ETagCondition>,
+    if_modified_since: Option<&Timestamp>,
+    if_unmodified_since: Option<&Timestamp>,
+    manifest: &crate::manifest::ObjectManifest,
+) -> S3Result<()> {
+    let current_etag = manifest.checksum.whole_object.as_str();
+    if let Some(condition) = if_match {
+        if !etag_condition_matches(condition, current_etag) {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "copy-source if-match precondition failed"
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(condition) = if_unmodified_since {
+        let since: OffsetDateTime = condition.clone().into();
+        if manifest.created_at > since {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "copy-source if-unmodified-since precondition failed"
+            ));
+        }
+    }
+    if let Some(condition) = if_none_match {
+        if etag_condition_matches(condition, current_etag) {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "copy-source if-none-match precondition failed"
+            ));
+        }
+    }
+    if let Some(condition) = if_modified_since {
+        let since: OffsetDateTime = condition.clone().into();
+        if manifest.created_at <= since {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "copy-source if-modified-since precondition failed"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn enforce_delete_conditionals(
+    if_match: Option<&ETagCondition>,
+    if_match_last_modified_time: Option<&Timestamp>,
+    if_match_size: Option<i64>,
+    manifest: &crate::manifest::ObjectManifest,
+) -> S3Result<()> {
+    let current_etag = manifest.checksum.whole_object.as_str();
+    if let Some(condition) = if_match {
+        if !etag_condition_matches(condition, current_etag) {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "if-match precondition failed"
+            ));
+        }
+    }
+    if let Some(condition) = if_match_last_modified_time {
+        let expected: OffsetDateTime = condition.clone().into();
+        if manifest.created_at != expected {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "if-match-last-modified-time precondition failed"
+            ));
+        }
+    }
+    if let Some(condition) = if_match_size {
+        if manifest.content_length as i64 != condition {
+            return Err(s3s::s3_error!(
+                PreconditionFailed,
+                "if-match-size precondition failed"
+            ));
+        }
+    }
+    Ok(())
 }
 
 struct CopySourceRef {

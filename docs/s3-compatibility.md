@@ -23,7 +23,7 @@ available through `server`, and the standard S3 CRUD smoke test now passes.
 | Multipart completion | implemented | cargo check | Commits manifest atomically after staged parts are verified | Completion must reconcile staged parts | 5 |
 | Multipart abort | implemented | cargo check | Marks upload aborted and cleans up local state | Abort is local cleanup | 5 |
 | Multipart listing | implemented | cargo check | Lists live multipart sessions from the local journal/metadata | Telegram does not expose upload sessions natively | 5 |
-| Conditional requests | compatibility gap | none yet | Must be enforced in the adapter | Requires strong object-state checks | 5 |
+| Conditional requests | implemented | cargo test | GET/HEAD/PUT and copy/delete preconditions honor ETag and timestamp guards | Requires strong object-state checks | 5 |
 | Object versioning | implemented | cargo check | Version IDs are surfaced from manifests and version listings | Telegram lacks built-in versions | 5 |
 | Delete markers | implemented | cargo check | Tombstones are listed as delete markers and remain recoverable until cleanup | Must be modeled locally | 5 |
 | Object tags | compatibility gap | none yet | Must persist in manifest/index | Captions are not enough | 5 |
