@@ -85,7 +85,14 @@ Completed work:
 
 ## Phase 6 - Production hardening
 
-- Status: pending
+- Status: complete
 - Exit criteria:
   - encryption, repair, garbage collection, metrics, and deployment docs are complete
   - recovery drills and benchmark plan are in place
+
+Completed work:
+
+- adapter-bound envelope encryption is wired through the manifest and object format with metadata-recorded encryption state
+- repair and garbage collection now run against local metadata with dry-run support and conservative cleanup gating
+- `/healthz` and `/metrics` are served from a localhost-only admin listener separate from the S3 listener
+- the roadmap, operations docs, storage docs, disaster-recovery docs, and phase-6 ADR are aligned with shipped behavior

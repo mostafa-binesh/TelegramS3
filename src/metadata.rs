@@ -119,6 +119,12 @@ pub struct VerifyReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TombstonedManifestRecord {
+    pub manifest: ObjectManifest,
+    pub tombstoned_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalEntry {
     pub operation_id: Uuid,
     pub object_id: Uuid,
@@ -711,6 +717,36 @@ impl MetadataStore {
                     .validate()
                     .map_err(MetadataError::InvalidManifest)?;
                 manifests.push(manifest);
+            }
+            Ok(manifests)
+        })
+    }
+
+    pub fn list_tombstoned_manifests(
+        &self,
+    ) -> Result<Vec<TombstonedManifestRecord>, MetadataError> {
+        self.with_connection(|connection| {
+            let mut stmt = connection.prepare(
+                r#"
+                SELECT manifest_json, tombstoned_at
+                FROM object_manifests
+                WHERE commit_state = 'tombstoned'
+                ORDER BY tombstoned_at ASC, object_id ASC
+                "#,
+            )?;
+            let mut manifests = Vec::new();
+            for row in stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })? {
+                let (json, tombstoned_at) = row?;
+                let manifest = serde_json::from_str::<ObjectManifest>(&json)?;
+                manifest
+                    .validate()
+                    .map_err(MetadataError::InvalidManifest)?;
+                manifests.push(TombstonedManifestRecord {
+                    manifest,
+                    tombstoned_at: parse_rfc3339_timestamp(&tombstoned_at)?,
+                });
             }
             Ok(manifests)
         })

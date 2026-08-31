@@ -14,6 +14,7 @@ TELEGRAM_STORAGE_CHAT_ID=<dedicated_private_channel_id>
 TELEGRAM_METADATA_PATH=/var/lib/telegram-s3/metadata.sqlite
 TELEGRAM_DATA_DIR=/var/lib/telegram-s3/data
 TELEGRAM_S3_BIND_ADDR=127.0.0.1:9000
+TELEGRAM_ADMIN_BIND_ADDR=127.0.0.1:9001
 
 TELEGRAM_CHUNK_SIZE=1048576
 TELEGRAM_CONNECTION_TIMEOUT_SECS=30
@@ -46,12 +47,15 @@ RUSTFS_SECRET_KEY=<generate_secure_random_value>
   phase 3
 - S3 bind address: `TELEGRAM_S3_BIND_ADDR` controls where the RustFS-backed
   `server` listener binds
+- admin bind address: `TELEGRAM_ADMIN_BIND_ADDR` controls the loopback-only
+  health and metrics listener
 
 Defaults used by the current scaffold:
 
 - metadata path: `data/metadata.sqlite`
 - data dir: `data`
 - S3 bind addr: `127.0.0.1:9000`
+- admin bind addr: `127.0.0.1:9001`
 - chunk size: `1 MiB`
 - connection timeout: `30s`
 - request timeout: `30s`
@@ -97,8 +101,12 @@ Proxy selection rules:
 
 - `doctor` validates required credentials, runtime settings, the SQLite
   metadata path, the object-format bootstrap state, the Telegram transport,
-  and the RustFS-backed S3 seam in live mode.
+  the RustFS-backed S3 seam in live mode, and the loopback admin listener
+  address.
 - `server` performs the same bootstrap checks before binding the S3 listener
-  and starting request processing.
+  and starting request processing. It also binds the loopback admin listener
+  for `/healthz` and `/metrics`.
 - Session and metadata paths are checked for unsafe `..` traversal, symlinks,
   and overly permissive permissions when the platform exposes those checks.
+- `TELEGRAM_S3_MASTER_KEY` enables adapter-bound envelope encryption for chunk
+  payloads and manifest encryption metadata. If it is missing, startup fails.

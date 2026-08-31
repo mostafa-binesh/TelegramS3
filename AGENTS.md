@@ -71,6 +71,7 @@ Any storage change must include coverage for:
 Whenever behavior changes, update:
 
 - `README.md`
+- `ROADMAP.md` so phase status, exit criteria, and completed work match the shipped behavior
 - `docs/s3-compatibility.md`
 - `docs/telegram-storage-format.md`
 - `docs/disaster-recovery.md`
@@ -94,4 +95,3 @@ Whenever behavior changes, update:
 The MVP is done only when a standard S3 client can create a bucket, put an object,
 head it, get it, range-read it, list it, and delete it through a bounded,
 recoverable Telegram-backed store with documented limitations and passing tests.
-

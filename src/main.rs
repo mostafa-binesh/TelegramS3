@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use telegram_s3::{
     AppConfig, MetadataStore, S3Server,
+    object_format::GARBAGE_COLLECTION_RETENTION_SECONDS,
     object_format::{ObjectFormatError, ObjectFormatService, ObjectFormatStatus},
     redact,
     telegram::{TelegramTransport, TelegramTransportError, TelegramTransportStatus},
@@ -87,14 +88,8 @@ async fn main() {
         Command::Config { command } => run_config(command),
         Command::Index { command } => run_index(command),
         Command::Db { command } => run_db(command),
-        Command::Repair { dry_run } => {
-            println!("repair {}", if dry_run { "--dry-run" } else { "" });
-            Ok(())
-        }
-        Command::Gc { dry_run } => {
-            println!("gc {}", if dry_run { "--dry-run" } else { "" });
-            Ok(())
-        }
+        Command::Repair { dry_run } => run_repair(dry_run),
+        Command::Gc { dry_run } => run_gc(dry_run),
         Command::Upstream { command } => run_upstream(command),
     };
 
@@ -243,6 +238,70 @@ fn run_upstream(command: UpstreamCommand) -> Result<(), String> {
     }
 }
 
+fn run_repair(dry_run: bool) -> Result<(), String> {
+    let config = load_config()?;
+    let object_format = open_object_format(&config)?;
+    if dry_run {
+        let status = object_format.status().map_err(render_object_format_error)?;
+        println!("repair dry-run: no files changed");
+        println!("staged objects: {}", status.staged_objects);
+        println!(
+            "recovery-required objects: {}",
+            status.recovery_required_objects
+        );
+        println!("orphaned chunks: {}", status.orphaned_chunks);
+        println!("committed objects: {}", status.committed_objects);
+        return Ok(());
+    }
+
+    let report = object_format
+        .reconcile()
+        .map_err(render_object_format_error)?;
+    println!("repair complete");
+    println!("staged objects: {}", report.staged_objects);
+    println!("committed objects: {}", report.committed_objects);
+    println!(
+        "recovery-required objects: {}",
+        report.recovery_required_objects
+    );
+    println!("orphaned chunks: {}", report.orphaned_chunks);
+    println!("repaired objects: {}", report.repaired_objects);
+    println!("quarantined objects: {}", report.quarantined_objects);
+    let status = object_format.status().map_err(render_object_format_error)?;
+    if status.staged_objects > 0 || status.recovery_required_objects > 0 {
+        return Err("repair completed but recovery state remains".to_string());
+    }
+    Ok(())
+}
+
+fn run_gc(dry_run: bool) -> Result<(), String> {
+    let config = load_config()?;
+    let object_format = open_object_format(&config)?;
+    let report = object_format
+        .garbage_collect(
+            dry_run,
+            time::Duration::seconds(GARBAGE_COLLECTION_RETENTION_SECONDS),
+        )
+        .map_err(render_object_format_error)?;
+    if dry_run {
+        println!("gc dry-run: no files changed");
+    } else {
+        println!("gc complete");
+    }
+    println!("eligible objects: {}", report.eligible_objects);
+    println!("manifests removed: {}", report.manifests_removed);
+    println!(
+        "chunk directories removed: {}",
+        report.chunk_directories_removed
+    );
+    println!(
+        "quarantine entries removed: {}",
+        report.quarantine_entries_removed
+    );
+    println!("bytes removed: {}", report.bytes_removed);
+    Ok(())
+}
+
 fn load_config() -> Result<AppConfig, String> {
     let config = AppConfig::from_env();
     config.validate().map_err(|error| error.to_string())?;
@@ -257,11 +316,6 @@ async fn run_server() -> Result<(), String> {
     let config = load_config()?;
     let server = S3Server::bootstrap(&config)
         .await
-        .map_err(|error| error.to_string())?;
-    println!("listening on {}", server.address());
-    use std::io::Write;
-    std::io::stdout()
-        .flush()
         .map_err(|error| error.to_string())?;
     server.serve().await.map_err(|error| error.to_string())?;
     Ok(())

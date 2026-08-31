@@ -5,6 +5,7 @@ use crate::metadata::{
 };
 use crate::multipart::{MultipartCompletionPlan, MultipartPart, MultipartSession, MultipartState};
 use futures::StreamExt;
+use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use s3s::{Body, dto::StreamingBlob};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -13,12 +14,14 @@ use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use tokio::fs as async_fs;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 const CHECKSUM_ALGORITHM: &str = "sha256";
+const ENCRYPTION_FORMAT: &str = "chacha20poly1305-v1";
+pub const GARBAGE_COLLECTION_RETENTION_SECONDS: i64 = 7 * 24 * 60 * 60;
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const STAGING_ROOT: &str = "staging";
 const MANIFEST_ROOT: &str = "manifests";
@@ -67,6 +70,16 @@ pub struct ReconciliationReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GarbageCollectionReport {
+    pub dry_run: bool,
+    pub eligible_objects: u64,
+    pub manifests_removed: u64,
+    pub chunk_directories_removed: u64,
+    pub quarantine_entries_removed: u64,
+    pub bytes_removed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectFormatStatus {
     pub data_dir: PathBuf,
     pub chunk_size: u64,
@@ -82,6 +95,87 @@ pub struct StagedObject {
     pub object_id: Uuid,
     pub manifest: ObjectManifest,
     pub chunk_plan: ChunkPlan,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ObjectEncryption {
+    key: [u8; 32],
+    key_id: String,
+}
+
+impl ObjectEncryption {
+    fn from_master_key(master_key: &str) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(master_key.as_bytes());
+        let key_bytes = hasher.finalize();
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(&key_bytes);
+        let mut key_id_hasher = Sha256::new();
+        key_id_hasher.update(b"telegram-s3-encryption-key");
+        key_id_hasher.update(master_key.as_bytes());
+        let key_id = hex::encode(key_id_hasher.finalize());
+        Self { key, key_id }
+    }
+
+    fn chunk_key(&self, object_id: Uuid) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(self.key);
+        hasher.update(object_id.as_bytes());
+        let digest = hasher.finalize();
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(&digest);
+        key
+    }
+
+    fn nonce(&self, object_id: Uuid, order: u32) -> [u8; 12] {
+        let mut hasher = Sha256::new();
+        hasher.update(object_id.as_bytes());
+        hasher.update(order.to_le_bytes());
+        let digest = hasher.finalize();
+        let mut nonce = [0_u8; 12];
+        nonce.copy_from_slice(&digest[..12]);
+        nonce
+    }
+
+    fn encrypt_chunk(
+        &self,
+        object_id: Uuid,
+        order: u32,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, ObjectFormatError> {
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, &self.chunk_key(object_id))
+            .map_err(|_| ObjectFormatError::InvalidChecksum("invalid key".to_string()))?;
+        let cipher = LessSafeKey::new(unbound);
+        let nonce = Nonce::try_assume_unique_for_key(&self.nonce(object_id, order))
+            .map_err(|_| ObjectFormatError::InvalidChecksum("invalid nonce".to_string()))?;
+        let mut in_out = plaintext.to_vec();
+        cipher
+            .seal_in_place_append_tag(nonce, Aad::from(object_id.as_bytes()), &mut in_out)
+            .map_err(|_| ObjectFormatError::InvalidChecksum("encryption failed".to_string()))?;
+        Ok(in_out)
+    }
+
+    pub(crate) fn decrypt_chunk(
+        &self,
+        object_id: Uuid,
+        order: u32,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, ObjectFormatError> {
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, &self.chunk_key(object_id))
+            .map_err(|_| ObjectFormatError::InvalidChecksum("invalid key".to_string()))?;
+        let cipher = LessSafeKey::new(unbound);
+        let nonce = Nonce::try_assume_unique_for_key(&self.nonce(object_id, order))
+            .map_err(|_| ObjectFormatError::InvalidChecksum("invalid nonce".to_string()))?;
+        let mut in_out = ciphertext.to_vec();
+        let plaintext = cipher
+            .open_in_place(nonce, Aad::from(object_id.as_bytes()), &mut in_out)
+            .map_err(|_| ObjectFormatError::ChecksumMismatch {
+                scope: format!("chunk {}", order),
+                expected: "encrypted payload".to_string(),
+                actual: "decryption failed".to_string(),
+            })?;
+        Ok(plaintext.to_vec())
+    }
 }
 
 struct ManifestBuildArgs {
@@ -127,12 +221,17 @@ pub struct ObjectFormatService {
     data_dir: PathBuf,
     chunk_size: u64,
     storage_chat_id: String,
+    encryption: ObjectEncryption,
 }
 
 impl ObjectFormatService {
     pub fn open(config: &AppConfig) -> Result<Self, ObjectFormatError> {
         config.validate()?;
         let metadata = MetadataStore::open(config.metadata_path())?;
+        let master_key = config
+            .telegram_s3_master_key
+            .clone()
+            .ok_or_else(|| ObjectFormatError::InvalidPlan("missing master key".to_string()))?;
         let service = Self::new(
             metadata,
             config.data_dir(),
@@ -140,15 +239,17 @@ impl ObjectFormatService {
             config.telegram_storage_chat_id.clone().ok_or_else(|| {
                 ObjectFormatError::InvalidPlan("missing storage chat id".to_string())
             })?,
+            ObjectEncryption::from_master_key(&master_key),
         )?;
         Ok(service)
     }
 
-    pub fn new(
+    pub(crate) fn new(
         metadata: MetadataStore,
         data_dir: impl AsRef<Path>,
         chunk_size: u64,
         storage_chat_id: String,
+        encryption: ObjectEncryption,
     ) -> Result<Self, ObjectFormatError> {
         let data_dir = data_dir.as_ref().to_path_buf();
         fs::create_dir_all(data_dir.join(STAGING_ROOT))?;
@@ -161,6 +262,7 @@ impl ObjectFormatService {
             data_dir,
             chunk_size,
             storage_chat_id,
+            encryption,
         })
     }
 
@@ -307,7 +409,8 @@ impl ObjectFormatService {
             size = size
                 .checked_add(bytes.len() as u64)
                 .ok_or_else(|| ObjectFormatError::InvalidPlan("part size overflow".to_string()))?;
-            writer.write_all(&bytes).await?;
+            let encrypted = self.encrypt_chunk(upload_id, part_number, &bytes)?;
+            writer.write_all(&encrypted).await?;
         }
         writer.sync_all().await?;
         let checksum_value = hex::encode(hasher.finalize());
@@ -474,7 +577,7 @@ impl ObjectFormatService {
             .stage_manifest(OperationKind::Put, manifest.clone())?;
         let stage_manifest_path = staging_dir.join(MANIFEST_FILE_NAME);
         write_json_file(&stage_manifest_path, &manifest)?;
-        verify_staged_chunks(&staging_dir, &manifest)?;
+        verify_staged_chunks(&staging_dir, &manifest, &self.encryption)?;
         let committed = self.commit_staged_object(&StagedObject {
             operation_id,
             object_id,
@@ -618,7 +721,9 @@ impl ObjectFormatService {
             let chunk_checksum = sha256_hex(chunk_bytes);
             let chunk_path = scratch_dir.join(chunk_file_name(chunk_plan.chunks.len() as u32));
             let mut chunk_file = File::create(&chunk_path)?;
-            chunk_file.write_all(chunk_bytes)?;
+            let encrypted =
+                self.encrypt_chunk(object_id, chunk_plan.chunks.len() as u32, chunk_bytes)?;
+            chunk_file.write_all(&encrypted)?;
             chunk_file.sync_all()?;
 
             whole_hasher.update(chunk_bytes);
@@ -670,7 +775,7 @@ impl ObjectFormatService {
         }
         let stage_manifest_path = staging_dir.join(MANIFEST_FILE_NAME);
         write_json_file(&stage_manifest_path, &manifest)?;
-        verify_staged_chunks(&staging_dir, &manifest)?;
+        verify_staged_chunks(&staging_dir, &manifest, &self.encryption)?;
         Ok(StagedObject {
             operation_id,
             object_id,
@@ -755,7 +860,9 @@ impl ObjectFormatService {
             let chunk_checksum = sha256_hex(&chunk_bytes);
             let chunk_path = scratch_dir.join(chunk_file_name(chunk_plan.chunks.len() as u32));
             let mut chunk_file = async_fs::File::create(&chunk_path).await?;
-            chunk_file.write_all(&chunk_bytes).await?;
+            let encrypted =
+                self.encrypt_chunk(object_id, chunk_plan.chunks.len() as u32, &chunk_bytes)?;
+            chunk_file.write_all(&encrypted).await?;
             chunk_file.sync_all().await?;
 
             whole_hasher.update(&chunk_bytes);
@@ -807,7 +914,7 @@ impl ObjectFormatService {
         }
         let stage_manifest_path = staging_dir.join(MANIFEST_FILE_NAME);
         write_json_file(&stage_manifest_path, &manifest)?;
-        verify_staged_chunks(&staging_dir, &manifest)?;
+        verify_staged_chunks(&staging_dir, &manifest, &self.encryption)?;
         self.commit_staged_object(&StagedObject {
             operation_id,
             object_id,
@@ -864,29 +971,14 @@ impl ObjectFormatService {
                 });
             }
             let mut file = File::open(&path)?;
-            let mut checksum_hasher = Sha256::new();
-            let mut chunk_offset = 0_u64;
-            let mut buffer = [0_u8; 8192];
-            let start = span.offset_within_chunk;
-            let end = start + span.length;
-            loop {
-                let read = file.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                checksum_hasher.update(&buffer[..read]);
-                let buffer_start = chunk_offset;
-                let buffer_end = chunk_offset + read as u64;
-                let write_start = buffer_start.max(start);
-                let write_end = buffer_end.min(end);
-                if write_start < write_end {
-                    let slice_start = (write_start - buffer_start) as usize;
-                    let slice_end = (write_end - buffer_start) as usize;
-                    writer.write_all(&buffer[slice_start..slice_end])?;
-                }
-                chunk_offset = buffer_end;
-            }
-            let actual_checksum = hex::encode(checksum_hasher.finalize());
+            let mut ciphertext = Vec::new();
+            file.read_to_end(&mut ciphertext)?;
+            let plaintext = if manifest.encryption.enabled {
+                self.decrypt_chunk(manifest.object_id, chunk.order, &ciphertext)?
+            } else {
+                ciphertext
+            };
+            let actual_checksum = sha256_hex(&plaintext);
             if actual_checksum != chunk.checksum {
                 return Err(ObjectFormatError::ChecksumMismatch {
                     scope: format!("chunk {}", chunk.order),
@@ -894,6 +986,9 @@ impl ObjectFormatService {
                     actual: actual_checksum,
                 });
             }
+            let start = span.offset_within_chunk as usize;
+            let end = (span.offset_within_chunk + span.length) as usize;
+            writer.write_all(&plaintext[start..end])?;
         }
         Ok(())
     }
@@ -1040,6 +1135,56 @@ impl ObjectFormatService {
         })
     }
 
+    pub fn garbage_collect(
+        &self,
+        dry_run: bool,
+        retention: Duration,
+    ) -> Result<GarbageCollectionReport, ObjectFormatError> {
+        let cutoff = OffsetDateTime::now_utc() - retention;
+        let tombstoned_manifests = self.metadata.list_tombstoned_manifests()?;
+        let mut eligible_objects = 0_u64;
+        let mut manifests_removed = 0_u64;
+        let mut chunk_directories_removed = 0_u64;
+        let mut quarantine_entries_removed = 0_u64;
+        let mut bytes_removed = 0_u64;
+
+        for record in tombstoned_manifests {
+            if record.tombstoned_at > cutoff {
+                continue;
+            }
+            eligible_objects += 1;
+            let object_id = record.manifest.object_id;
+            let manifest_path = self.manifest_path(object_id);
+            if manifest_path.exists() {
+                bytes_removed = bytes_removed.saturating_add(fs::metadata(&manifest_path)?.len());
+                if !dry_run {
+                    fs::remove_file(&manifest_path)?;
+                }
+                manifests_removed += 1;
+            }
+
+            let chunk_dir = self.chunk_dir(object_id);
+            if chunk_dir.exists() {
+                bytes_removed = bytes_removed.saturating_add(self.directory_size(&chunk_dir)?);
+                if !dry_run {
+                    fs::remove_dir_all(&chunk_dir)?;
+                }
+                chunk_directories_removed += 1;
+            }
+
+            quarantine_entries_removed += self.cleanup_quarantine_entries(object_id, dry_run)?;
+        }
+
+        Ok(GarbageCollectionReport {
+            dry_run,
+            eligible_objects,
+            manifests_removed,
+            chunk_directories_removed,
+            quarantine_entries_removed,
+            bytes_removed,
+        })
+    }
+
     pub fn plan_read(
         manifest: &ObjectManifest,
         range: Range<u64>,
@@ -1132,7 +1277,12 @@ impl ObjectFormatService {
             let mut file = File::open(&path)?;
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)?;
-            if sha256_hex(&bytes) != chunk.checksum {
+            let plaintext = if manifest.encryption.enabled {
+                self.decrypt_chunk(manifest.object_id, chunk.order, &bytes)?
+            } else {
+                bytes
+            };
+            if sha256_hex(&plaintext) != chunk.checksum {
                 return Ok(false);
             }
         }
@@ -1160,7 +1310,12 @@ impl ObjectFormatService {
             let mut file = File::open(&path)?;
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)?;
-            if sha256_hex(&bytes) != chunk.checksum {
+            let plaintext = if manifest.encryption.enabled {
+                self.decrypt_chunk(manifest.object_id, chunk.order, &bytes)?
+            } else {
+                bytes
+            };
+            if sha256_hex(&plaintext) != chunk.checksum {
                 return Ok(false);
             }
         }
@@ -1216,6 +1371,69 @@ impl ObjectFormatService {
         Ok(())
     }
 
+    fn cleanup_quarantine_entries(
+        &self,
+        object_id: Uuid,
+        dry_run: bool,
+    ) -> Result<u64, ObjectFormatError> {
+        let quarantine_dir = self.quarantine_dir();
+        if !quarantine_dir.exists() {
+            return Ok(0);
+        }
+        let mut removed = 0_u64;
+        let object_id = object_id.to_string();
+        for entry in fs::read_dir(&quarantine_dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.contains(&object_id) {
+                continue;
+            }
+            removed += 1;
+            if dry_run {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                fs::remove_dir_all(entry.path())?;
+            } else {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(removed)
+    }
+
+    fn directory_size(&self, path: &Path) -> Result<u64, ObjectFormatError> {
+        let mut total = 0_u64;
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            } else if metadata.is_dir() {
+                total = total.saturating_add(self.directory_size(&entry.path())?);
+            }
+        }
+        Ok(total)
+    }
+
+    fn encrypt_chunk(
+        &self,
+        object_id: Uuid,
+        order: u32,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, ObjectFormatError> {
+        self.encryption.encrypt_chunk(object_id, order, plaintext)
+    }
+
+    pub(crate) fn decrypt_chunk(
+        &self,
+        object_id: Uuid,
+        order: u32,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, ObjectFormatError> {
+        self.encryption.decrypt_chunk(object_id, order, ciphertext)
+    }
+
     fn staging_dir(&self, operation_id: Uuid) -> PathBuf {
         self.data_dir
             .join(STAGING_ROOT)
@@ -1265,9 +1483,9 @@ impl ObjectFormatService {
                 whole_object: args.whole_checksum,
             },
             encryption: crate::manifest::EncryptionInfo {
-                enabled: false,
-                format: "none".to_string(),
-                key_id: None,
+                enabled: true,
+                format: ENCRYPTION_FORMAT.to_string(),
+                key_id: Some(self.encryption.key_id.clone()),
             },
             telegram: crate::manifest::TelegramLocation {
                 peer_id: self.storage_chat_id.clone(),
@@ -1282,6 +1500,7 @@ impl ObjectFormatService {
 fn verify_staged_chunks(
     staging_dir: &Path,
     manifest: &ObjectManifest,
+    encryption: &ObjectEncryption,
 ) -> Result<(), ObjectFormatError> {
     for chunk in &manifest.chunks {
         let path = staging_dir.join(chunk_file_name(chunk.order));
@@ -1294,7 +1513,12 @@ fn verify_staged_chunks(
         let mut file = File::open(&path)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        let actual_checksum = sha256_hex(&bytes);
+        let plaintext = if manifest.encryption.enabled {
+            encryption.decrypt_chunk(manifest.object_id, chunk.order, &bytes)?
+        } else {
+            bytes
+        };
+        let actual_checksum = sha256_hex(&plaintext);
         if actual_checksum != chunk.checksum {
             return Err(ObjectFormatError::ChecksumMismatch {
                 scope: format!("chunk {}", chunk.order),
@@ -1368,11 +1592,18 @@ fn update_hasher_from_path(hasher: &mut Sha256, path: &Path) -> Result<(), io::E
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use time::Duration;
 
     fn sample_service(tempdir: &TempDir) -> ObjectFormatService {
         let metadata = MetadataStore::open_in_memory().expect("metadata");
-        ObjectFormatService::new(metadata, tempdir.path(), 1024, "-1001234567890".to_string())
-            .expect("service")
+        ObjectFormatService::new(
+            metadata,
+            tempdir.path(),
+            1024,
+            "-1001234567890".to_string(),
+            ObjectEncryption::from_master_key("master-key"),
+        )
+        .expect("service")
     }
 
     #[test]
@@ -1415,6 +1646,7 @@ mod tests {
             tempdir.path().join("data"),
             8,
             "-1001234567890".to_string(),
+            ObjectEncryption::from_master_key("master-key"),
         )
         .expect("service");
 
@@ -1425,5 +1657,57 @@ mod tests {
         let report = service.reconcile().expect("reconcile");
         assert_eq!(report.repaired_objects, 1);
         assert_eq!(report.staged_objects, 0);
+    }
+
+    #[test]
+    fn encrypted_writes_round_trip_and_change_at_rest_bytes() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir);
+        let payload = b"hello encrypted world";
+
+        let manifest = service
+            .put_bytes("bucket", "encrypted.txt", "text/plain", payload)
+            .expect("put");
+
+        assert!(manifest.encryption.enabled);
+        assert_eq!(manifest.encryption.format, ENCRYPTION_FORMAT);
+        assert!(manifest.encryption.key_id.is_some());
+        assert_eq!(
+            service
+                .read_bytes("bucket", "encrypted.txt", 0..payload.len() as u64)
+                .expect("read"),
+            payload
+        );
+
+        let chunk_bytes = fs::read(service.chunk_path(manifest.object_id, 0)).expect("chunk");
+        assert_ne!(chunk_bytes, payload);
+    }
+
+    #[test]
+    fn garbage_collection_removes_aged_tombstoned_artifacts() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir);
+        let manifest = service
+            .put_bytes("bucket", "gc.txt", "text/plain", b"gc payload")
+            .expect("put");
+        let tombstoned = service
+            .tombstone_manifest(manifest.object_id, "cleanup test")
+            .expect("tombstone");
+        assert_eq!(tombstoned.commit_state, CommitState::Tombstoned);
+
+        let preview = service
+            .garbage_collect(true, Duration::seconds(0))
+            .expect("dry-run gc");
+        assert_eq!(preview.eligible_objects, 1);
+        assert_eq!(preview.manifests_removed, 1);
+        assert_eq!(preview.chunk_directories_removed, 1);
+
+        let report = service
+            .garbage_collect(false, Duration::seconds(0))
+            .expect("gc");
+        assert_eq!(report.eligible_objects, 1);
+        assert_eq!(report.manifests_removed, 1);
+        assert!(!service.manifest_file_path(manifest.object_id).exists());
+        assert!(!service.chunk_path(manifest.object_id, 0).exists());
     }
 }

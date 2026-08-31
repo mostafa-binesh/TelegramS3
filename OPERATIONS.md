@@ -22,20 +22,27 @@ settings reference.
 - `telegram-s3 config check`
 - `telegram-s3 index rebuild`
 - `telegram-s3 index verify`
+- `telegram-s3 repair --dry-run`
 - `telegram-s3 repair`
 - `telegram-s3 gc --dry-run`
 - `telegram-s3 gc`
 - `telegram-s3 upstream status`
+- `GET http://127.0.0.1:9001/healthz`
+- `GET http://127.0.0.1:9001/metrics`
 
 ## Backups and Recovery
 
 - Back up the local metadata database.
 - Preserve the Telegram session file and encryption keys separately.
 - Verify that a manifest-only recovery can rebuild the index.
+- Use `repair --dry-run` before `repair` when staged, recovery-required, or
+  orphaned rows need reconciliation.
+- Use `gc --dry-run` before `gc` to confirm only tombstoned data older than the
+  retention threshold will be removed.
 
 ## Upgrade and Rollback
 
 - Migrate the local database before a new server version starts serving traffic.
 - Keep old versions available until the new version passes health checks.
 - Never rotate secrets as an incidental upgrade step.
-
+- Verify both the S3 listener and the loopback admin listener after upgrade.

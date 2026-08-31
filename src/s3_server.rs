@@ -2,10 +2,11 @@ use crate::config::AppConfig;
 use crate::multipart::MultipartPartPlan;
 use crate::object_format::{ObjectFormatService, sha256_hex};
 use crate::redact;
-use crate::telegram::TelegramTransport;
+use crate::telegram::{TelegramTransport, TelegramTransportStatus};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream;
+use http::{StatusCode, header};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -85,6 +86,14 @@ impl TelegramS3Backend {
 #[derive(Clone, Debug)]
 struct AllowAllAccess;
 
+#[derive(Clone)]
+struct AdminState {
+    object_format: Arc<ObjectFormatService>,
+    transport_status: TelegramTransportStatus,
+    s3_addr: SocketAddr,
+    admin_addr: SocketAddr,
+}
+
 #[async_trait]
 impl s3s::access::S3Access for AllowAllAccess {
     async fn check(&self, _context: &mut s3s::access::S3AccessContext<'_>) -> S3Result<()> {
@@ -94,7 +103,10 @@ impl s3s::access::S3Access for AllowAllAccess {
 
 pub struct S3Server {
     addr: SocketAddr,
+    admin_addr: SocketAddr,
     service: S3Service,
+    object_format: Arc<ObjectFormatService>,
+    transport_status: TelegramTransportStatus,
 }
 
 impl S3Server {
@@ -104,6 +116,7 @@ impl S3Server {
         let transport_status = transport.bootstrap().await?;
         let object_format = Arc::new(ObjectFormatService::open(config)?);
         let object_status = object_format.bootstrap()?;
+        let admin_addr = config.admin_bind_addr()?;
 
         println!("object format bootstrap: {:?}", object_status);
         println!("telegram bootstrap: {:?}", transport_status.session_state);
@@ -112,7 +125,9 @@ impl S3Server {
             redact::redact_path(&transport_status.session_path.display().to_string())
         );
 
-        let backend = TelegramS3Backend { object_format };
+        let backend = TelegramS3Backend {
+            object_format: Arc::clone(&object_format),
+        };
         let mut builder = S3ServiceBuilder::new(backend);
         builder.set_auth(SimpleAuth::from_single(
             config.rustfs_access_key.clone().unwrap_or_default(),
@@ -122,7 +137,10 @@ impl S3Server {
         let service = builder.build();
         Ok(Self {
             addr: config.s3_bind_addr()?,
+            admin_addr,
             service,
+            object_format,
+            transport_status,
         })
     }
 
@@ -130,9 +148,23 @@ impl S3Server {
         self.addr
     }
 
+    pub fn admin_address(&self) -> SocketAddr {
+        self.admin_addr
+    }
+
     pub async fn serve(self) -> Result<(), S3ServerError> {
         let listener = TcpListener::bind(self.addr).await?;
+        println!("listening on {}", listener.local_addr()?);
+        let admin_listener = TcpListener::bind(self.admin_addr).await?;
+        let admin_addr = admin_listener.local_addr()?;
+        println!("admin listening on {}", admin_addr);
         let service = self.service.clone();
+        let admin_state = AdminState {
+            object_format: Arc::clone(&self.object_format),
+            transport_status: self.transport_status.clone(),
+            s3_addr: self.addr,
+            admin_addr,
+        };
         let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
@@ -141,6 +173,16 @@ impl S3Server {
                     let service = service.clone();
                     connections.spawn(async move {
                         let handler = service_fn(move |request| handle_request(request, service.clone()));
+                        let mut connection = http1::Builder::new();
+                        connection.keep_alive(false).timer(TokioTimer::new());
+                        let _ = connection.serve_connection(TokioIo::new(stream), handler).await;
+                    });
+                }
+                accepted = admin_listener.accept() => {
+                    let Ok((stream, _)) = accepted else { break };
+                    let admin_state = admin_state.clone();
+                    connections.spawn(async move {
+                        let handler = service_fn(move |request| handle_admin_request(request, admin_state.clone()));
                         let mut connection = http1::Builder::new();
                         connection.keep_alive(false).timer(TokioTimer::new());
                         let _ = connection.serve_connection(TokioIo::new(stream), handler).await;
@@ -160,13 +202,110 @@ async fn handle_request(
     request: hyper::Request<Incoming>,
     service: S3Service,
 ) -> Result<hyper::Response<Body>, Box<dyn Error + Send + Sync>> {
-    let response = timeout(
+    match timeout(
         Duration::from_secs(60),
         service.call(request.map(Body::from)),
     )
     .await
-    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "s3 request timed out"))??;
-    Ok(response)
+    {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) => {
+            eprintln!("s3 request failed: {error:?}");
+            Ok(text_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error\n".to_string(),
+                "text/plain; charset=utf-8",
+            ))
+        }
+        Err(_) => {
+            eprintln!("s3 request timed out");
+            Ok(text_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                "request timed out\n".to_string(),
+                "text/plain; charset=utf-8",
+            ))
+        }
+    }
+}
+
+async fn handle_admin_request(
+    request: hyper::Request<Incoming>,
+    state: AdminState,
+) -> Result<hyper::Response<Body>, Box<dyn Error + Send + Sync>> {
+    let path = request.uri().path();
+    match path {
+        "/healthz" => Ok(text_response(
+            StatusCode::OK,
+            format!(
+                "ok\ns3_addr={}\nadmin_addr={}\ntransport_session_state={:?}\n",
+                state.s3_addr, state.admin_addr, state.transport_status.session_state
+            ),
+            "text/plain; charset=utf-8",
+        )),
+        "/metrics" => {
+            let metadata_status = state.object_format.metadata_status()?;
+            let object_status = state.object_format.status()?;
+            let body = format!(
+                concat!(
+                    "# HELP telegram_s3_bootstrap_ok Bootstrap completion state\n",
+                    "# TYPE telegram_s3_bootstrap_ok gauge\n",
+                    "telegram_s3_bootstrap_ok 1\n",
+                    "# HELP telegram_s3_metadata_buckets Total visible buckets\n",
+                    "# TYPE telegram_s3_metadata_buckets gauge\n",
+                    "telegram_s3_metadata_buckets {}\n",
+                    "# HELP telegram_s3_metadata_committed_objects Total committed objects\n",
+                    "# TYPE telegram_s3_metadata_committed_objects gauge\n",
+                    "telegram_s3_metadata_committed_objects {}\n",
+                    "# HELP telegram_s3_metadata_staged_objects Total staged objects\n",
+                    "# TYPE telegram_s3_metadata_staged_objects gauge\n",
+                    "telegram_s3_metadata_staged_objects {}\n",
+                    "# HELP telegram_s3_metadata_recovery_markers Total recovery markers\n",
+                    "# TYPE telegram_s3_metadata_recovery_markers gauge\n",
+                    "telegram_s3_metadata_recovery_markers {}\n",
+                    "# HELP telegram_s3_object_format_recovery_required_objects Objects needing recovery\n",
+                    "# TYPE telegram_s3_object_format_recovery_required_objects gauge\n",
+                    "telegram_s3_object_format_recovery_required_objects {}\n",
+                    "# HELP telegram_s3_object_format_orphaned_chunks Orphaned chunk directories\n",
+                    "# TYPE telegram_s3_object_format_orphaned_chunks gauge\n",
+                    "telegram_s3_object_format_orphaned_chunks {}\n",
+                    "# HELP telegram_s3_transport_session_state Telegram session state snapshot\n",
+                    "# TYPE telegram_s3_transport_session_state gauge\n",
+                    "telegram_s3_transport_session_state{{state=\"{:?}\"}} 1\n"
+                ),
+                metadata_status.buckets,
+                metadata_status.committed_objects,
+                metadata_status.staged_objects,
+                metadata_status.recovery_markers,
+                object_status.recovery_required_objects,
+                object_status.orphaned_chunks,
+                state.transport_status.session_state,
+            );
+            Ok(text_response(
+                StatusCode::OK,
+                body,
+                "text/plain; version=0.0.4; charset=utf-8",
+            ))
+        }
+        _ => Ok(text_response(
+            StatusCode::NOT_FOUND,
+            "not found\n".to_string(),
+            "text/plain; charset=utf-8",
+        )),
+    }
+}
+
+fn text_response(
+    status: StatusCode,
+    body: String,
+    content_type: &'static str,
+) -> hyper::Response<Body> {
+    let mut response = hyper::Response::new(Body::from(body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static(content_type),
+    );
+    response
 }
 
 #[async_trait]
@@ -643,7 +782,14 @@ impl S3 for TelegramS3Backend {
             let chunk = tokio::fs::read(&chunk_path).await.map_err(|error| {
                 s3s::S3Error::with_message(S3ErrorCode::InternalError, error.to_string())
             })?;
-            let actual_checksum = sha256_hex(&chunk);
+            let plaintext = if manifest.encryption.enabled {
+                object_format
+                    .decrypt_chunk(manifest.object_id, span.order, &chunk)
+                    .map_err(map_object_error)?
+            } else {
+                chunk
+            };
+            let actual_checksum = sha256_hex(&plaintext);
             if actual_checksum != span.checksum {
                 return Err(s3s::S3Error::with_message(
                     S3ErrorCode::InternalError,
@@ -655,13 +801,13 @@ impl S3 for TelegramS3Backend {
             }
             let start = span.offset_within_chunk as usize;
             let end = start + span.length as usize;
-            if chunk.len() < end {
+            if plaintext.len() < end {
                 return Err(s3s::S3Error::with_message(
                     S3ErrorCode::InternalError,
                     "chunk shorter than planned span",
                 ));
             }
-            let actual = &chunk[start..end];
+            let actual = &plaintext[start..end];
             return Ok(S3Response::new(GetObjectOutput {
                 body: Some(StreamingBlob::from_bytes(Bytes::copy_from_slice(actual))),
                 content_length: Some((range.end - range.start) as i64),
@@ -676,6 +822,7 @@ impl S3 for TelegramS3Backend {
         }
         let object_format = Arc::clone(&self.object_format);
         let object_id = manifest.object_id;
+        let manifest_encryption_enabled = manifest.encryption.enabled;
         let body_stream = stream::unfold((0usize, spans, false), move |state| {
             let object_format = Arc::clone(&object_format);
             async move {
@@ -691,7 +838,24 @@ impl S3 for TelegramS3Backend {
                         return Some((Err::<Bytes, std::io::Error>(error), (index, spans, true)));
                     }
                 };
-                let actual_checksum = sha256_hex(&chunk);
+                let plaintext = if manifest_encryption_enabled {
+                    match object_format
+                        .decrypt_chunk(object_id, span.order, &chunk)
+                        .map_err(|error| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                        }) {
+                        Ok(plaintext) => plaintext,
+                        Err(error) => {
+                            return Some((
+                                Err::<Bytes, std::io::Error>(error),
+                                (index, spans, true),
+                            ));
+                        }
+                    }
+                } else {
+                    chunk
+                };
+                let actual_checksum = sha256_hex(&plaintext);
                 if actual_checksum != span.checksum {
                     return Some((
                         Err::<Bytes, std::io::Error>(std::io::Error::new(
@@ -706,7 +870,7 @@ impl S3 for TelegramS3Backend {
                 }
                 let start = span.offset_within_chunk as usize;
                 let end = start + span.length as usize;
-                if chunk.len() < end {
+                if plaintext.len() < end {
                     return Some((
                         Err::<Bytes, std::io::Error>(std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
@@ -715,7 +879,7 @@ impl S3 for TelegramS3Backend {
                         (index, spans, true),
                     ));
                 }
-                let actual = &chunk[start..end];
+                let actual = &plaintext[start..end];
                 Some((
                     Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(actual)),
                     (index + 1, spans, false),

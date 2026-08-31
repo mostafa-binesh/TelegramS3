@@ -151,6 +151,14 @@ impl ObjectManifest {
         if self.telegram.peer_id.trim().is_empty() {
             return Err("telegram.peer_id is required".to_string());
         }
+        if self.encryption.enabled {
+            if self.encryption.format.trim().is_empty() {
+                return Err("encryption.format is required when encryption is enabled".to_string());
+            }
+            if self.encryption.key_id.as_deref().is_none_or(str::is_empty) {
+                return Err("encryption.key_id is required when encryption is enabled".to_string());
+            }
+        }
         if self.chunks.is_empty() {
             if self.content_length != 0 {
                 return Err("non-empty content_length requires chunk references".to_string());

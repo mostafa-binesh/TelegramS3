@@ -32,6 +32,7 @@ fn command_for(tempdir: &TempDir) -> Command {
     command.env("TELEGRAM_TRANSFER_TIMEOUT_SECS", "900");
     command.env("TELEGRAM_RETRY_COUNT", "5");
     command.env("TELEGRAM_RETRY_BACKOFF_MS", "500");
+    command.env("TELEGRAM_ADMIN_BIND_ADDR", "127.0.0.1:0");
     command.env("TELEGRAM_TRANSPORT_RUNTIME", "mock");
     command
 }
@@ -64,11 +65,17 @@ fn auth_status_logout_doctor_and_server_bootstrap_smoke_test() {
     server_command.stdout(Stdio::piped());
     let mut child = server_command.spawn().expect("spawn server");
     let stdout = child.stdout.take().expect("server stdout");
-    let reader = BufReader::new(stdout);
+    let mut reader = BufReader::new(stdout);
     let mut saw_listening = false;
-    for line in reader.lines().take(50) {
-        let line = line.expect("server line");
-        if line.contains("listening on") {
+    let mut line = String::new();
+    for _ in 0..50 {
+        line.clear();
+        let bytes = reader.read_line(&mut line).expect("server line");
+        if bytes == 0 {
+            break;
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.starts_with("listening on ") {
             saw_listening = true;
             break;
         }

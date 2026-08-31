@@ -9,14 +9,15 @@ Telegram alone to answer read/write consistency questions.
 
 ## Schema Version
 
-- Current schema version: `2`
+- Current schema version: `3`
 - Version contract: migrations are applied on startup and are also available
   through the `telegram-s3 db migrate` command.
 - Startup behavior: the store opens the configured SQLite file, creates the
   schema if needed, rebuilds the active index, and records recovery markers for
   staged operations. The object-format bootstrap layer now uses the same store
   to reconcile staged uploads, recovery-required objects, quarantined orphans,
-  and bucket state before `doctor` or `server` report success.
+  tombstoned rows, and bucket state before `doctor` or `server` report
+  success.
 
 ## Tables
 
@@ -36,11 +37,14 @@ Telegram alone to answer read/write consistency questions.
   - fast-path bucket/key pointer to the currently visible committed object
 - `recovery_markers`
   - durable markers for staged or otherwise incomplete operations
+- `tombstoned_objects`
+  - historical tombstone records with cleanup timestamps for conservative GC
 
 The phase 3 object-format service also persists chunk and manifest documents
 under the configured data directory, using the metadata store as the
 authoritative fast path and recovery journal. The RustFS-backed S3 server now
-uses the same store for bucket visibility and CRUD routing.
+uses the same store for bucket visibility and CRUD routing, while phase 6 uses
+it to drive repair, tombstone retention, and garbage-collection eligibility.
 
 ## Write Path
 
@@ -65,6 +69,14 @@ visible until the new manifest commits.
   manifests and refreshes staging markers.
 - `telegram-s3 index verify` compares the active index against committed
   manifest rows and fails if mismatches remain.
+- `telegram-s3 repair --dry-run` reports staged, recovery-required, and
+  orphaned work without modifying the store.
+- `telegram-s3 repair` reconciles staged, recovery-required, and orphaned
+  objects back to a consistent local state.
+- `telegram-s3 gc --dry-run` reports which tombstoned objects are eligible for
+  cleanup.
+- `telegram-s3 gc` removes only tombstoned data that is safely past the
+  configured retention threshold.
 
 ## Notes
 

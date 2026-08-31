@@ -13,9 +13,10 @@ Phase 3 now implements the object-format service in this repository. Uploads
 are chunked, checksummed, and staged through the journal before they become
 visible, while startup reconciliation repairs complete staged uploads and
 quarantines orphaned staging or chunk data. Phase 5 extends that model with
-durable multipart sessions and version-aware object copies, so the layout is
-now shared by single PUTs, multipart completion, and the RustFS-backed S3
-surface.
+durable multipart sessions and version-aware object copies, and phase 6 adds
+adapter-bound envelope encryption plus recovery-aware repair and garbage
+collection around the same layout, so the structure is now shared by single
+PUTs, multipart completion, and the RustFS-backed S3 surface.
 
 ## Design
 
@@ -58,9 +59,9 @@ payload remotely. It must not depend on captions alone.
     "whole_object": "hex"
   },
   "encryption": {
-    "enabled": false,
-    "format": "none",
-    "key_id": null
+    "enabled": true,
+    "format": "chacha20poly1305-v1",
+    "key_id": "key-fingerprint-or-hash"
   },
   "telegram": {
     "peer_id": "channel-or-chat-id",
@@ -80,6 +81,16 @@ payload remotely. It must not depend on captions alone.
   ]
 }
 ```
+
+## Encryption Envelope
+
+- Chunk payloads are encrypted at rest with adapter-bound envelope encryption
+  keyed from `TELEGRAM_S3_MASTER_KEY`.
+- The manifest records whether encryption is enabled, which envelope format was
+  used, and a stable key fingerprint for operator visibility and recovery
+  checks.
+- Range reads decrypt only the required chunk spans, so the server does not
+  need to buffer whole objects in RAM.
 
 ## Chunk Documents
 

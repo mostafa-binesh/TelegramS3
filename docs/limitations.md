@@ -5,6 +5,8 @@
 - Telegram documents are capped at roughly 2 GiB.
 - Rate limits and flood waits are external and must be respected.
 - Connectivity may require a proxy in some environments.
+- Encryption is adapter-bound and keyed locally; there is no separate key
+  management service.
 
 ## S3 Semantics
 
@@ -17,4 +19,4 @@
 - The local database is part of the durability model.
 - Recovery is only as good as the manifests and backups kept.
 - The project must not be described as an unlimited or sole backup target.
-
+- Health and metrics are only exposed on the loopback admin listener.

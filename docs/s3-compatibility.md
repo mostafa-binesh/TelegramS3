@@ -30,11 +30,11 @@ available through `server`, and the standard S3 CRUD smoke test now passes.
 | Checksums | implemented | cargo test | Chunk and whole-object checksums are enforced during upload, read, and reconciliation | Telegram alone is not enough | 5 |
 | Presigned URLs | compatibility gap | none yet | Likely local capability URLs only | Telegram is not a URL signer | 5 |
 | Server-side copy | implemented | cargo check | Copy uses the local object-format backend and manifest reuse | Telegram copy may not preserve metadata exactly | 5 |
-| Lifecycle cleanup | planned | none yet | Needs background GC and tombstone reconciliation | Cleanup is deferred | 6 |
+| Lifecycle cleanup | implemented | cargo test | Garbage collection now removes only aged, tombstoned data after dry-run review | Cleanup is conservative and retention-based | 6 |
 | Batch delete | compatibility gap | none yet | Can be translated to per-object tombstones | Telegram does not batch object deletes | 6 |
 | Bucket policies | compatibility gap | none yet | Policy evaluation belongs above storage | Telegram is out of scope | 6 |
 | Retention/object lock | compatibility gap | none yet | Requires additional metadata and enforcement | Telegram cannot enforce S3 locks | 6 |
 | Event notifications | compatibility gap | none yet | Eventing is an upper layer concern | Telegram is not the notifier | 6 |
-| Encryption | planned | none yet | Adapter-bound encryption is possible | Range semantics become more expensive | 6 |
+| Encryption | implemented | cargo test | Adapter-bound envelope encryption is keyed from `TELEGRAM_S3_MASTER_KEY` and recorded in manifests | Range semantics are bounded by chunk decrypt/read | 6 |
 | Quotas | compatibility gap | none yet | Can be tracked locally | Telegram storage quotas are external | 6 |
-| Metrics/health | planned | none yet | Local service metrics are required | Telegram visibility is indirect | 6 |
+| Metrics/health | implemented | cargo test | Loopback-only `/healthz` and `/metrics` endpoints report bootstrap and recovery state | Admin traffic stays off the S3 listener | 6 |

@@ -23,6 +23,16 @@
 3. Resume only if the upload state is safe to continue.
 4. Otherwise roll back and clean up staging chunks or quarantined artifacts.
 
+## Repair and Garbage Collection
+
+1. Run `telegram-s3 repair --dry-run` first to see which staged, recovery-
+   required, or orphaned rows will be reconciled.
+2. Use `telegram-s3 repair` only after the dry-run shows the expected scope.
+3. Run `telegram-s3 gc --dry-run` before cleanup to confirm only tombstoned
+   objects older than the retention threshold are eligible.
+4. Run `telegram-s3 gc` only when the dry-run output matches the intended
+   cleanup scope.
+
 ## Interrupted Multipart Upload
 
 1. Check `telegram-s3 auth status` first if the session was refreshed around
@@ -51,13 +61,16 @@
 3. Fix the underlying object-format or Telegram transport issue before
    retrying `telegram-s3 server`.
 4. A successful restart should preserve committed objects, keep staged work
-   invisible, and only make repaired data visible after reconciliation.
+   invisible, only make repaired data visible after reconciliation, and bind
+   the loopback admin listener for `/healthz` and `/metrics`.
 
 ## Orphan Cleanup
 
 - Run garbage collection in dry-run mode first.
 - Never delete uncertain data without operator confirmation.
 - Keep an audit summary of the cleanup scope.
+- The live `gc` command only removes tombstoned data that is safely past the
+  retention threshold; uncertain data stays quarantined.
 
 ## Recovery Commands
 

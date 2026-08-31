@@ -30,6 +30,7 @@ pub struct AppConfig {
     pub rustfs_access_key: Option<String>,
     pub rustfs_secret_key: Option<String>,
     pub telegram_s3_bind_addr: Option<String>,
+    pub telegram_admin_bind_addr: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -79,6 +80,7 @@ impl AppConfig {
             rustfs_access_key: read("RUSTFS_ACCESS_KEY"),
             rustfs_secret_key: read("RUSTFS_SECRET_KEY"),
             telegram_s3_bind_addr: read("TELEGRAM_S3_BIND_ADDR"),
+            telegram_admin_bind_addr: read("TELEGRAM_ADMIN_BIND_ADDR"),
         }
     }
 
@@ -182,6 +184,17 @@ impl AppConfig {
         })
     }
 
+    pub fn admin_bind_addr(&self) -> Result<std::net::SocketAddr, ConfigError> {
+        let value = self
+            .telegram_admin_bind_addr
+            .as_deref()
+            .unwrap_or("127.0.0.1:9001");
+        value.parse().map_err(|_| ConfigError::Parse {
+            field: "TELEGRAM_ADMIN_BIND_ADDR",
+            value: value.to_string(),
+        })
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.telegram_api_id.as_deref().is_none_or(str::is_empty) {
             return Err(ConfigError::Missing("TELEGRAM_API_ID"));
@@ -229,6 +242,9 @@ impl AppConfig {
         )?;
         self.validate_path_setting("TELEGRAM_METADATA_PATH", &self.metadata_path(), false)?;
         self.validate_path_setting("TELEGRAM_DATA_DIR", &self.data_dir(), true)?;
+        if !self.admin_bind_addr()?.ip().is_loopback() {
+            return Err(ConfigError::Invalid("TELEGRAM_ADMIN_BIND_ADDR"));
+        }
 
         if let Some(proxy_url) = &self.telegram_proxy_url {
             if !proxy_url.is_empty()
