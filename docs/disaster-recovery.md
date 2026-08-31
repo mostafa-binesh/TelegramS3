@@ -44,6 +44,18 @@
 4. If the session files are gone but the local session row remains, clean up
    the multipart metadata and retry the upload from a fresh initiate call.
 
+## Docker Deployment Loss
+
+1. Stop the `telegram-s3` container before restoring state.
+2. Preserve the named metadata, data, and session volumes together if the
+   container is still healthy enough to inspect.
+3. Recreate the container from the same `docker-compose.yml` and `.env`
+   settings so the bind addresses and volume mounts remain consistent.
+4. If only the image is lost, rebuild it and reattach the preserved volumes.
+5. After restore, run `telegram-s3 doctor` or
+   `docker compose exec telegram-s3 telegram-s3 doctor` to confirm the
+   bootstrap path before returning traffic.
+
 ## Telegram Session Loss
 
 1. Keep the local metadata and data directories intact.

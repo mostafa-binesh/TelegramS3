@@ -30,6 +30,20 @@ settings reference.
 - `GET http://127.0.0.1:9001/healthz`
 - `GET http://127.0.0.1:9001/metrics`
 
+## Docker Deployment
+
+- Build the image with `docker compose build`.
+- Start the main service with `docker compose up -d`.
+- Run interactive Telegram login with `docker compose run --rm -it telegram-s3 auth login`.
+- Keep the deployment to the single `telegram-s3` service; bootstrap,
+  config validation, and foreground serving all happen inside that container.
+- Mount metadata, data, and session state through the named volumes defined in
+  `docker-compose.yml`.
+- The container publishes the S3 listener on host port `9000` and keeps the
+  admin listener loopback-only inside the container.
+- Check health from inside the container namespace with
+  `docker compose exec telegram-s3 curl -fsS http://127.0.0.1:9001/healthz`.
+
 ## Backups and Recovery
 
 - Back up the local metadata database.
@@ -39,6 +53,9 @@ settings reference.
   orphaned rows need reconciliation.
 - Use `gc --dry-run` before `gc` to confirm only tombstoned data older than the
   retention threshold will be removed.
+- If the server runs in Docker, back up the named metadata, data, and session
+  volumes together so the compose deployment can be recreated without losing
+  state.
 
 ## Upgrade and Rollback
 

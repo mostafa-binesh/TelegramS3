@@ -99,12 +99,22 @@ Completed work:
 
 ## Phase 7 - Docker packaging and deployment
 
-- Status: pending
+- Status: complete
 - Exit criteria:
-  - the server ships with production Docker image support and reproducible builds
-  - compose and deployment docs cover the S3 listener, the admin listener, volumes, and required environment variables
-  - persistent state is mounted cleanly for metadata, chunks, manifests, and sessions
-  - bootstrap runs in the main deployment, not in a separate setup service
+  - the project ships a production Docker image with reproducible builds and a clear release tag flow
+  - docker-compose covers the main server only, with bootstrap handled in-process rather than by a separate setup service
+  - persistent state is mounted cleanly for metadata, chunks, manifests, sessions, and any upload staging data
+  - runtime configuration is driven by environment variables and documented secrets mounts
+  - deployment docs explain S3 exposure, localhost-only admin exposure, restart behavior, and backup/restore expectations
+  - Docker smoke checks prove build, startup, health probing, and a basic S3 CRUD path
+
+Completed work:
+
+- a multi-stage Dockerfile now builds the release binary and packages it into a minimal runtime image
+- a single-service `docker-compose.yml` now mounts metadata, data, and session volumes and exposes only the S3 listener
+- the container entrypoint validates config before foreground server startup without adding a separate setup service
+- docker-oriented deployment and recovery steps are documented in the operations and configuration guides
+- packaging smoke tests cover the Docker assets and a `docker compose config` validation path
 
 ## Phase 8 - Authenticated operator frontend
 

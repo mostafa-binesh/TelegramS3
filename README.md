@@ -23,13 +23,17 @@ Current state:
 - Phase 6 production hardening is complete: adapter-bound envelope encryption,
   real repair and garbage-collection workflows, and localhost-only health and
   metrics endpoints are now part of the shipped server behavior.
+- Phase 7 Docker packaging is complete: the repo now ships a production
+  container image, a single-service compose file, persistent volumes, and a
+  container entrypoint that validates config before starting the server.
 - RustFS upstream was inspected at `47a3f5ef0110ee5af04bbb761a8bb5ed99a9ce15`.
 - Telegram Drive upstream was inspected at `77518a93fbc8a8242f38e23e486a2d87d3f82fb2`.
 - The repo now includes a SQLite-backed metadata store, migrations, a
   chunk-aware object-format service, adapter-bound envelope encryption, a
-  RustFS-backed S3 server seam, and CLI smoke-test coverage around `config
-  check`, `doctor`, `db`, `index`, `repair`, `gc --dry-run`, the transport
-  bootstrap/status/logout flows, and standard S3 CRUD/range flows.
+  RustFS-backed S3 server seam, Docker packaging assets, and CLI smoke-test
+  coverage around `config check`, `doctor`, `db`, `index`, `repair`,
+  `gc --dry-run`, the transport bootstrap/status/logout flows, and standard S3
+  CRUD/range flows.
 
 Key documents:
 
@@ -42,6 +46,7 @@ Key documents:
 - `docs/limitations.md`
 - `docs/adr/0001-rustfs-integration-strategy.md`
 - `docs/adr/0002-phase-6-hardening-boundaries.md`
+- `docs/adr/0004-docker-packaging-and-bootstrap-boundary.md`
 - `docs/metadata-store.md`
 
 The project intentionally treats Telegram as a constrained remote object store,

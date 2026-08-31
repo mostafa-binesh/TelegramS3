@@ -1,0 +1,13 @@
+target
+.git
+.github
+upstream
+cli-smoke-tmp
+downloaded.txt
+hello.txt
+*.sqlite
+*.db
+data
+.env
+.env.*
+node_modules

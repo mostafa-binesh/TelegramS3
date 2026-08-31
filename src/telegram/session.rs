@@ -1,4 +1,6 @@
 use grammers_session::storages::SqliteSession;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
@@ -31,6 +33,7 @@ impl TelegramSession {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
+        create_private_session_file(&path).await?;
         let storage = SqliteSession::open(&path)
             .await
             .map_err(|error| SessionError::Open(error.to_string()))?;
@@ -59,4 +62,33 @@ impl TelegramSession {
             SessionStatus::Missing
         }
     }
+}
+
+async fn create_private_session_file(path: &Path) -> Result<(), SessionError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+        let mut permissions = std::fs::metadata(path)
+            .map_err(|error| SessionError::Persist(error.to_string()))?
+            .permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(path, permissions)
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+    }
+    Ok(())
 }

@@ -49,6 +49,10 @@ RUSTFS_SECRET_KEY=<generate_secure_random_value>
   `server` listener binds
 - admin bind address: `TELEGRAM_ADMIN_BIND_ADDR` controls the loopback-only
   health and metrics listener
+- Docker deployments should mount `TELEGRAM_METADATA_PATH`,
+  `TELEGRAM_DATA_DIR`, and `TELEGRAM_SESSION_PATH` on persistent volumes and
+  set `TELEGRAM_S3_BIND_ADDR=0.0.0.0:9000` while leaving
+  `TELEGRAM_ADMIN_BIND_ADDR=127.0.0.1:9001`
 
 Defaults used by the current scaffold:
 
@@ -106,6 +110,9 @@ Proxy selection rules:
 - `server` performs the same bootstrap checks before binding the S3 listener
   and starting request processing. It also binds the loopback admin listener
   for `/healthz` and `/metrics`.
+- The Docker image uses the same `server` path for foreground startup; the
+  container entrypoint runs `config check` first and then starts the server in
+  the foreground.
 - Session and metadata paths are checked for unsafe `..` traversal, symlinks,
   and overly permissive permissions when the platform exposes those checks.
 - `TELEGRAM_S3_MASTER_KEY` enables adapter-bound envelope encryption for chunk

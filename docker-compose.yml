@@ -1,0 +1,50 @@
+services:
+  telegram-s3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: telegram-s3:local
+    init: true
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_PHONE_NUMBER: ${TELEGRAM_PHONE_NUMBER:-}
+      TELEGRAM_STORAGE_CHAT_ID: ${TELEGRAM_STORAGE_CHAT_ID:-}
+      TELEGRAM_METADATA_PATH: /var/lib/telegram-s3/metadata/metadata.sqlite
+      TELEGRAM_DATA_DIR: /var/lib/telegram-s3/data
+      TELEGRAM_SESSION_PATH: /var/lib/telegram-s3/session/telegram.session
+      TELEGRAM_S3_BIND_ADDR: 0.0.0.0:9000
+      TELEGRAM_ADMIN_BIND_ADDR: 127.0.0.1:9001
+      TELEGRAM_S3_MASTER_KEY: ${TELEGRAM_S3_MASTER_KEY:-}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-}
+      TELEGRAM_PROXY_MODE: ${TELEGRAM_PROXY_MODE:-auto}
+      TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
+      TELEGRAM_PROXY_USERNAME: ${TELEGRAM_PROXY_USERNAME:-}
+      TELEGRAM_PROXY_PASSWORD: ${TELEGRAM_PROXY_PASSWORD:-}
+      TELEGRAM_CHUNK_SIZE: ${TELEGRAM_CHUNK_SIZE:-}
+      TELEGRAM_CONNECTION_TIMEOUT_SECS: ${TELEGRAM_CONNECTION_TIMEOUT_SECS:-}
+      TELEGRAM_REQUEST_TIMEOUT_SECS: ${TELEGRAM_REQUEST_TIMEOUT_SECS:-}
+      TELEGRAM_TRANSFER_TIMEOUT_SECS: ${TELEGRAM_TRANSFER_TIMEOUT_SECS:-}
+      TELEGRAM_RETRY_COUNT: ${TELEGRAM_RETRY_COUNT:-}
+      TELEGRAM_RETRY_BACKOFF_MS: ${TELEGRAM_RETRY_BACKOFF_MS:-}
+      TELEGRAM_FLOOD_WAIT_RESPECT: ${TELEGRAM_FLOOD_WAIT_RESPECT:-true}
+    ports:
+      - "9000:9000"
+    volumes:
+      - telegram-s3-metadata:/var/lib/telegram-s3/metadata
+      - telegram-s3-data:/var/lib/telegram-s3/data
+      - telegram-s3-session:/var/lib/telegram-s3/session
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9001/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    stop_grace_period: 30s
+
+volumes:
+  telegram-s3-metadata:
+  telegram-s3-data:
+  telegram-s3-session:

@@ -3,6 +3,8 @@ use crate::multipart::{MultipartPart, MultipartSession, MultipartState};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -157,6 +159,7 @@ impl MetadataStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        create_private_metadata_file(&path)?;
 
         let connection = Connection::open(&path)?;
         connection.pragma_update(None, "foreign_keys", true)?;
@@ -1608,6 +1611,29 @@ fn manifest_json_with_state(
     let mut manifest = manifest.clone();
     manifest.commit_state = commit_state;
     Ok(serde_json::to_string(&manifest)?)
+}
+
+fn create_private_metadata_file(path: &Path) -> Result<(), MetadataError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)?;
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+    }
+    Ok(())
 }
 
 fn read_schema_version(connection: &Connection) -> Result<u32, MetadataError> {

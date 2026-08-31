@@ -8,7 +8,9 @@ use grammers_client::Client;
 use grammers_client::SignInError;
 use grammers_mtsender::SenderPool;
 use std::io::{self, Write};
-use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -140,11 +142,7 @@ impl TelegramTransport {
             if let Some(parent) = session_path.parent() {
                 tokio::fs::create_dir_all(parent).await.ok();
             }
-            let _ = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&session_path)
-                .await;
+            create_private_mock_session(&session_path).await?;
             None
         } else {
             Some(TelegramSession::open(&session_path).await?)
@@ -408,6 +406,30 @@ impl TelegramTransport {
             }
         }
     }
+}
+
+async fn create_private_mock_session(path: &Path) -> Result<(), io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)?;
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await?;
+    }
+    Ok(())
 }
 
 impl Drop for TelegramTransport {
