@@ -96,3 +96,32 @@ Completed work:
 - repair and garbage collection now run against local metadata with dry-run support and conservative cleanup gating
 - `/healthz` and `/metrics` are served from a localhost-only admin listener separate from the S3 listener
 - the roadmap, operations docs, storage docs, disaster-recovery docs, and phase-6 ADR are aligned with shipped behavior
+
+## Phase 7 - Docker packaging and deployment
+
+- Status: pending
+- Exit criteria:
+  - the server ships with production Docker image support and reproducible builds
+  - compose and deployment docs cover the S3 listener, the admin listener, volumes, and required environment variables
+  - persistent state is mounted cleanly for metadata, chunks, manifests, and sessions
+  - bootstrap runs in the main deployment, not in a separate setup service
+
+## Phase 8 - Authenticated operator frontend
+
+- Status: pending
+- Exit criteria:
+  - an embedded high-performance frontend provides storage overview, endpoint details, capacity, and bootstrap status
+  - the admin surface is protected by an authentication barrier before exposing operational data
+  - the account setup and Telegram onboarding flow live behind the same authenticated app instead of a separate docker-compose service
+  - the frontend can guide first-run setup for phone number, `.env` values, 2FA, and connection checks
+  - no sensitive state is exposed before authentication succeeds
+
+## Phase 9 - Multi-user control plane
+
+- Status: pending
+- Exit criteria:
+  - multiple operator accounts are supported with explicit authorization boundaries
+  - the authenticated frontend can distinguish per-user permissions and admin capabilities
+  - onboarding, recovery, and maintenance actions are auditable by user
+  - storage visibility and management actions remain consistent across concurrent users
+  - tenant or workspace boundaries are documented if the model introduces them
