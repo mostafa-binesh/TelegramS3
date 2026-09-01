@@ -67,29 +67,70 @@ After the workflow runs, the image is available from GHCR as:
 ghcr.io/<owner>/<repo>:latest
 ```
 
-You can also pin a release tag such as `ghcr.io/<owner>/<repo>:v0.1.0` or a
+You can also pin a release tag such as `ghcr.io/<owner>/<repo>:v0.4.0` or a
 SHA tag if you want a fixed image.
 
-To run it on a server:
+For releases, tag the repo with a semantic version like `v0.4.0`. The workflow
+will publish the tag itself plus semver-friendly image aliases, and it prints
+the final image tags at the end of the GitHub Actions run.
 
-```bash
-docker pull ghcr.io/<owner>/<repo>:latest
-docker run -d \
-  --name telegram-s3 \
-  -p 9000:9000 \
-  -e TELEGRAM_API_ID=... \
-  -e TELEGRAM_API_HASH=... \
-  -e TELEGRAM_PHONE_NUMBER=... \
-  -e TELEGRAM_STORAGE_CHAT_ID=... \
-  -e TELEGRAM_S3_MASTER_KEY=... \
-  -e TELEGRAM_ADMIN_BOOTSTRAP_SECRET=... \
-  -e RUSTFS_ACCESS_KEY=... \
-  -e RUSTFS_SECRET_KEY=... \
-  -v telegram-s3-metadata:/var/lib/telegram-s3/metadata \
-  -v telegram-s3-data:/var/lib/telegram-s3/data \
-  -v telegram-s3-session:/var/lib/telegram-s3/session \
-  ghcr.io/<owner>/<repo>:latest
+To run it on a server with Docker Compose:
+
+```yaml
+services:
+  telegram-s3:
+    image: ghcr.io/<owner>/<repo>:latest
+    init: true
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_PHONE_NUMBER: ${TELEGRAM_PHONE_NUMBER}
+      TELEGRAM_STORAGE_CHAT_ID: ${TELEGRAM_STORAGE_CHAT_ID}
+      TELEGRAM_METADATA_PATH: /var/lib/telegram-s3/metadata/metadata.sqlite
+      TELEGRAM_DATA_DIR: /var/lib/telegram-s3/data
+      TELEGRAM_SESSION_PATH: /var/lib/telegram-s3/session/telegram.session
+      TELEGRAM_S3_BIND_ADDR: 0.0.0.0:9000
+      TELEGRAM_ADMIN_BIND_ADDR: 127.0.0.1:9001
+      TELEGRAM_S3_MASTER_KEY: ${TELEGRAM_S3_MASTER_KEY}
+      TELEGRAM_ADMIN_BOOTSTRAP_SECRET: ${TELEGRAM_ADMIN_BOOTSTRAP_SECRET}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+      TELEGRAM_PROXY_MODE: ${TELEGRAM_PROXY_MODE:-auto}
+      TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
+      TELEGRAM_PROXY_USERNAME: ${TELEGRAM_PROXY_USERNAME:-}
+      TELEGRAM_PROXY_PASSWORD: ${TELEGRAM_PROXY_PASSWORD:-}
+      TELEGRAM_CHUNK_SIZE: ${TELEGRAM_CHUNK_SIZE:-}
+      TELEGRAM_CONNECTION_TIMEOUT_SECS: ${TELEGRAM_CONNECTION_TIMEOUT_SECS:-}
+      TELEGRAM_REQUEST_TIMEOUT_SECS: ${TELEGRAM_REQUEST_TIMEOUT_SECS:-}
+      TELEGRAM_TRANSFER_TIMEOUT_SECS: ${TELEGRAM_TRANSFER_TIMEOUT_SECS:-}
+      TELEGRAM_RETRY_COUNT: ${TELEGRAM_RETRY_COUNT:-}
+      TELEGRAM_RETRY_BACKOFF_MS: ${TELEGRAM_RETRY_BACKOFF_MS:-}
+      TELEGRAM_FLOOD_WAIT_RESPECT: ${TELEGRAM_FLOOD_WAIT_RESPECT:-true}
+    ports:
+      - "9000:9000"
+    volumes:
+      - telegram-s3-metadata:/var/lib/telegram-s3/metadata
+      - telegram-s3-data:/var/lib/telegram-s3/data
+      - telegram-s3-session:/var/lib/telegram-s3/session
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9001/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  telegram-s3-metadata:
+  telegram-s3-data:
+  telegram-s3-session:
 ```
 
-If you prefer Compose, replace the local `build:` block with the published
-`image:` reference and keep the same environment variables and volumes.
+After saving that as something like `docker-compose.prod.yml`, run:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+
+If you publish a release and want to pin it, replace `latest` with the version
+tag, for example `ghcr.io/<owner>/<repo>:v0.4.0`.
