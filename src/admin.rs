@@ -290,7 +290,16 @@ impl AdminUiState {
             };
             return match read_static_file(&file_path).await {
                 Ok(Some(response)) => response,
-                Ok(None) => json_error(StatusCode::NOT_FOUND, "asset not found"),
+                Ok(None) => {
+                    match read_static_asset_fallback(self.ui_dist_dir(), asset_path).await {
+                        Ok(Some(response)) => response,
+                        Ok(None) => json_error(StatusCode::NOT_FOUND, "asset not found"),
+                        Err(_) => json_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "admin ui assets unavailable",
+                        ),
+                    }
+                }
                 Err(_) => json_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "admin ui assets unavailable",
@@ -651,14 +660,17 @@ fn expired_cookie() -> String {
 }
 
 fn safe_join(base: &Path, relative: &str) -> Option<PathBuf> {
-    let candidate = base.join(relative);
-    let unsafe_path = candidate.components().any(|component| {
+    let unsafe_path = Path::new(relative).components().any(|component| {
         matches!(
             component,
             Component::ParentDir | Component::RootDir | Component::Prefix(_)
         )
     });
-    if unsafe_path { None } else { Some(candidate) }
+    if unsafe_path {
+        None
+    } else {
+        Some(base.join(relative))
+    }
 }
 
 async fn read_static_file(path: &Path) -> Result<Option<Response<Body>>, std::io::Error> {
@@ -683,6 +695,39 @@ async fn read_static_file(path: &Path) -> Result<Option<Response<Body>>, std::io
         ),
     );
     Ok(Some(response))
+}
+
+async fn read_static_asset_fallback(
+    base: &Path,
+    requested_asset: &str,
+) -> Result<Option<Response<Body>>, std::io::Error> {
+    let requested_extension = Path::new(requested_asset)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if requested_extension.is_empty() {
+        return Ok(None);
+    }
+
+    let assets_dir = base.join("assets");
+    let mut directory = match fs::read_dir(&assets_dir).await {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    while let Some(entry) = directory.next_entry().await? {
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| extension == requested_extension)
+        {
+            return read_static_file(&path).await;
+        }
+    }
+
+    Ok(None)
 }
 
 fn content_type(path: &Path) -> &'static str {

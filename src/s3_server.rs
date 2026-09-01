@@ -231,6 +231,11 @@ async fn handle_request(
     service: S3Service,
     admin_ui_state: Arc<AdminUiState>,
 ) -> Result<hyper::Response<Body>, Box<dyn Error + Send + Sync>> {
+    if request.uri().path() == "/favicon.ico" {
+        let mut response = hyper::Response::new(Body::from(Bytes::new()));
+        *response.status_mut() = StatusCode::NO_CONTENT;
+        return Ok(response);
+    }
     if AdminUiState::is_admin_route(request.uri().path()) {
         return Ok(admin_ui_state.handle_request(request).await);
     }
