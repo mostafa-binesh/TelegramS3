@@ -118,13 +118,21 @@ Completed work:
 
 ## Phase 8 - Authenticated operator frontend
 
-- Status: pending
+- Status: complete
 - Exit criteria:
   - an embedded high-performance frontend provides storage overview, endpoint details, capacity, and bootstrap status
   - the admin surface is protected by an authentication barrier before exposing operational data
   - the account setup and Telegram onboarding flow live behind the same authenticated app instead of a separate docker-compose service
   - the frontend can guide first-run setup for phone number, `.env` values, 2FA, and connection checks
   - no sensitive state is exposed before authentication succeeds
+
+Completed work:
+
+- the Rust server now serves an authenticated `/_admin` SPA and JSON API on the existing public listener
+- login uses an HTTP-only session cookie and a bootstrap secret gate for first access
+- the dashboard surfaces storage overview, endpoint details, capacity, bootstrap status, and Telegram readiness
+- the onboarding panel gives operators a guided checklist for phone number, `.env` values, 2FA, and connection checks
+- the Docker image builds the Svelte frontend in a dedicated build stage and copies the runtime assets into the single container
 
 ## Phase 9 - Multi-user control plane
 

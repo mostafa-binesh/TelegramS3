@@ -2,13 +2,28 @@ use assert_cmd::prelude::*;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
+
+fn prepare_admin_ui(tempdir: &TempDir) -> PathBuf {
+    let ui_dir = tempdir.path().join("ui");
+    let assets_dir = ui_dir.join("assets");
+    fs::create_dir_all(&assets_dir).expect("ui dir");
+    fs::write(
+        ui_dir.join("index.html"),
+        "<!doctype html><html><body>telegram-s3 admin</body></html>",
+    )
+    .expect("ui index");
+    fs::write(assets_dir.join("app.css"), "body{}").expect("ui asset");
+    ui_dir
+}
 
 fn command_for(tempdir: &TempDir) -> Command {
     let metadata_path = tempdir.path().join("metadata.sqlite");
     let session_path = tempdir.path().join("telegram.session");
     let data_dir = tempdir.path().join("data");
+    let ui_dir = prepare_admin_ui(tempdir);
     fs::create_dir_all(&data_dir).expect("data dir");
 
     let mut command = Command::cargo_bin("telegram-s3").expect("binary");
@@ -25,6 +40,8 @@ fn command_for(tempdir: &TempDir) -> Command {
     command.env("TELEGRAM_S3_MASTER_KEY", "master-key");
     command.env("RUSTFS_ACCESS_KEY", "access-key");
     command.env("RUSTFS_SECRET_KEY", "secret-key");
+    command.env("TELEGRAM_ADMIN_BOOTSTRAP_SECRET", "bootstrap-secret");
+    command.env("TELEGRAM_ADMIN_UI_DIST_DIR", ui_dir.display().to_string());
     command.env("TELEGRAM_PROXY_MODE", "auto");
     command.env("TELEGRAM_FLOOD_WAIT_RESPECT", "true");
     command.env("TELEGRAM_CHUNK_SIZE", "1048576");

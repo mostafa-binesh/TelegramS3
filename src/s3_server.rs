@@ -1,3 +1,4 @@
+use crate::admin::AdminUiState;
 use crate::config::AppConfig;
 use crate::multipart::MultipartPartPlan;
 use crate::object_format::{ObjectFormatService, sha256_hex};
@@ -51,6 +52,8 @@ pub enum S3ServerError {
     Io(#[from] std::io::Error),
     #[error("server not initialized")]
     NotInitialized,
+    #[error("admin ui assets missing: {0}")]
+    AdminUiMissing(String),
     #[error("s3 error: {0}")]
     S3(#[from] s3s::S3Error),
 }
@@ -107,6 +110,7 @@ pub struct S3Server {
     service: S3Service,
     object_format: Arc<ObjectFormatService>,
     transport_status: TelegramTransportStatus,
+    admin_ui_state: Arc<AdminUiState>,
 }
 
 impl S3Server {
@@ -117,6 +121,13 @@ impl S3Server {
         let object_format = Arc::new(ObjectFormatService::open(config)?);
         let object_status = object_format.bootstrap()?;
         let admin_addr = config.admin_bind_addr()?;
+        let admin_ui_dist_dir = config.admin_ui_dist_dir();
+        let admin_index = admin_ui_dist_dir.join("index.html");
+        if !admin_index.exists() {
+            return Err(S3ServerError::AdminUiMissing(
+                admin_index.display().to_string(),
+            ));
+        }
 
         println!("object format bootstrap: {:?}", object_status);
         println!("telegram bootstrap: {:?}", transport_status.session_state);
@@ -135,12 +146,25 @@ impl S3Server {
         ));
         builder.set_access(AllowAllAccess);
         let service = builder.build();
+        let admin_ui_state = Arc::new(AdminUiState::new(
+            config.clone(),
+            Arc::clone(&object_format),
+            transport_status.clone(),
+            config.s3_bind_addr()?,
+            admin_addr,
+            config
+                .telegram_admin_bootstrap_secret
+                .clone()
+                .unwrap_or_default(),
+            admin_ui_dist_dir,
+        ));
         Ok(Self {
             addr: config.s3_bind_addr()?,
             admin_addr,
             service,
             object_format,
             transport_status,
+            admin_ui_state,
         })
     }
 
@@ -159,6 +183,7 @@ impl S3Server {
         let admin_addr = admin_listener.local_addr()?;
         println!("admin listening on {}", admin_addr);
         let service = self.service.clone();
+        let admin_ui_state = Arc::clone(&self.admin_ui_state);
         let admin_state = AdminState {
             object_format: Arc::clone(&self.object_format),
             transport_status: self.transport_status.clone(),
@@ -171,8 +196,11 @@ impl S3Server {
                 accepted = listener.accept() => {
                     let Ok((stream, _)) = accepted else { break };
                     let service = service.clone();
+                    let admin_ui_state = Arc::clone(&admin_ui_state);
                     connections.spawn(async move {
-                        let handler = service_fn(move |request| handle_request(request, service.clone()));
+                        let handler = service_fn(move |request| {
+                            handle_request(request, service.clone(), Arc::clone(&admin_ui_state))
+                        });
                         let mut connection = http1::Builder::new();
                         connection.keep_alive(false).timer(TokioTimer::new());
                         let _ = connection.serve_connection(TokioIo::new(stream), handler).await;
@@ -201,7 +229,11 @@ impl S3Server {
 async fn handle_request(
     request: hyper::Request<Incoming>,
     service: S3Service,
+    admin_ui_state: Arc<AdminUiState>,
 ) -> Result<hyper::Response<Body>, Box<dyn Error + Send + Sync>> {
+    if AdminUiState::is_admin_route(request.uri().path()) {
+        return Ok(admin_ui_state.handle_request(request).await);
+    }
     match timeout(
         Duration::from_secs(60),
         service.call(request.map(Body::from)),
@@ -1037,7 +1069,7 @@ impl S3 for TelegramS3Backend {
             .filter(|manifest| manifest.bucket == input.bucket)
             .filter(|manifest| prefix.is_empty() || manifest.key.starts_with(&prefix))
             .collect::<Vec<_>>();
-        manifests.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        manifests.sort_by_key(|left| std::cmp::Reverse(left.created_at));
 
         let mut latest_key = HashMap::<String, String>::new();
         for manifest in &manifests {
@@ -1199,10 +1231,10 @@ fn enforce_read_conditionals(
             ));
         }
     }
-    if let Some(condition) = if_none_match {
-        if etag_condition_matches(condition, current_etag) {
-            return Err(s3s::s3_error!(NotModified, "object not modified"));
-        }
+    if let Some(condition) = if_none_match
+        && etag_condition_matches(condition, current_etag)
+    {
+        return Err(s3s::s3_error!(NotModified, "object not modified"));
     }
     if let Some(condition) = if_modified_since {
         let since: OffsetDateTime = condition.clone().into();
@@ -1237,13 +1269,13 @@ fn enforce_write_conditionals(
         }
         return Ok(());
     }
-    if let Some(condition) = if_none_match {
-        if etag_condition_matches(condition, current_etag) {
-            return Err(s3s::s3_error!(
-                PreconditionFailed,
-                "if-none-match precondition failed"
-            ));
-        }
+    if let Some(condition) = if_none_match
+        && etag_condition_matches(condition, current_etag)
+    {
+        return Err(s3s::s3_error!(
+            PreconditionFailed,
+            "if-none-match precondition failed"
+        ));
     }
     Ok(())
 }
@@ -1274,13 +1306,13 @@ fn enforce_copy_source_conditionals(
             ));
         }
     }
-    if let Some(condition) = if_none_match {
-        if etag_condition_matches(condition, current_etag) {
-            return Err(s3s::s3_error!(
-                PreconditionFailed,
-                "copy-source if-none-match precondition failed"
-            ));
-        }
+    if let Some(condition) = if_none_match
+        && etag_condition_matches(condition, current_etag)
+    {
+        return Err(s3s::s3_error!(
+            PreconditionFailed,
+            "copy-source if-none-match precondition failed"
+        ));
     }
     if let Some(condition) = if_modified_since {
         let since: OffsetDateTime = condition.clone().into();
@@ -1301,13 +1333,13 @@ fn enforce_delete_conditionals(
     manifest: &crate::manifest::ObjectManifest,
 ) -> S3Result<()> {
     let current_etag = manifest.checksum.whole_object.as_str();
-    if let Some(condition) = if_match {
-        if !etag_condition_matches(condition, current_etag) {
-            return Err(s3s::s3_error!(
-                PreconditionFailed,
-                "if-match precondition failed"
-            ));
-        }
+    if let Some(condition) = if_match
+        && !etag_condition_matches(condition, current_etag)
+    {
+        return Err(s3s::s3_error!(
+            PreconditionFailed,
+            "if-match precondition failed"
+        ));
     }
     if let Some(condition) = if_match_last_modified_time {
         let expected: OffsetDateTime = condition.clone().into();
@@ -1318,13 +1350,13 @@ fn enforce_delete_conditionals(
             ));
         }
     }
-    if let Some(condition) = if_match_size {
-        if manifest.content_length as i64 != condition {
-            return Err(s3s::s3_error!(
-                PreconditionFailed,
-                "if-match-size precondition failed"
-            ));
-        }
+    if let Some(condition) = if_match_size
+        && manifest.content_length as i64 != condition
+    {
+        return Err(s3s::s3_error!(
+            PreconditionFailed,
+            "if-match-size precondition failed"
+        ));
     }
     Ok(())
 }

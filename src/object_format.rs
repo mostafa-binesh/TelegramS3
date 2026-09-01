@@ -414,14 +414,14 @@ impl ObjectFormatService {
         }
         writer.sync_all().await?;
         let checksum_value = hex::encode(hasher.finalize());
-        if let Some(expected) = checksum {
-            if expected != checksum_value {
-                return Err(ObjectFormatError::ChecksumMismatch {
-                    scope: format!("multipart part {}", part_number),
-                    expected: expected.to_string(),
-                    actual: checksum_value,
-                });
-            }
+        if let Some(expected) = checksum
+            && expected != checksum_value
+        {
+            return Err(ObjectFormatError::ChecksumMismatch {
+                scope: format!("multipart part {}", part_number),
+                expected: expected.to_string(),
+                actual: checksum_value,
+            });
         }
         let part = MultipartPart {
             upload_id,
@@ -529,7 +529,7 @@ impl ObjectFormatService {
             }
 
             let destination_path = staging_dir.join(chunk_file_name(index as u32));
-            if let Err(_) = fs::hard_link(&source_path, &destination_path) {
+            if fs::hard_link(&source_path, &destination_path).is_err() {
                 fs::copy(&source_path, &destination_path)?;
             }
             update_hasher_from_path(&mut whole_hasher, &source_path)?;

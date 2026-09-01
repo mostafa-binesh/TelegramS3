@@ -29,6 +29,8 @@ pub struct AppConfig {
     pub telegram_s3_master_key: Option<String>,
     pub rustfs_access_key: Option<String>,
     pub rustfs_secret_key: Option<String>,
+    pub telegram_admin_bootstrap_secret: Option<String>,
+    pub telegram_admin_ui_dist_dir: Option<String>,
     pub telegram_s3_bind_addr: Option<String>,
     pub telegram_admin_bind_addr: Option<String>,
 }
@@ -79,6 +81,8 @@ impl AppConfig {
             telegram_s3_master_key: read("TELEGRAM_S3_MASTER_KEY"),
             rustfs_access_key: read("RUSTFS_ACCESS_KEY"),
             rustfs_secret_key: read("RUSTFS_SECRET_KEY"),
+            telegram_admin_bootstrap_secret: read("TELEGRAM_ADMIN_BOOTSTRAP_SECRET"),
+            telegram_admin_ui_dist_dir: read("TELEGRAM_ADMIN_UI_DIST_DIR"),
             telegram_s3_bind_addr: read("TELEGRAM_S3_BIND_ADDR"),
             telegram_admin_bind_addr: read("TELEGRAM_ADMIN_BIND_ADDR"),
         }
@@ -195,6 +199,13 @@ impl AppConfig {
         })
     }
 
+    pub fn admin_ui_dist_dir(&self) -> PathBuf {
+        self.telegram_admin_ui_dist_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("frontend/dist"))
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.telegram_api_id.as_deref().is_none_or(str::is_empty) {
             return Err(ConfigError::Missing("TELEGRAM_API_ID"));
@@ -228,6 +239,13 @@ impl AppConfig {
         }
         if self.rustfs_secret_key.as_deref().is_none_or(str::is_empty) {
             return Err(ConfigError::Missing("RUSTFS_SECRET_KEY"));
+        }
+        if self
+            .telegram_admin_bootstrap_secret
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            return Err(ConfigError::Missing("TELEGRAM_ADMIN_BOOTSTRAP_SECRET"));
         }
 
         self.validate_runtime_settings()?;

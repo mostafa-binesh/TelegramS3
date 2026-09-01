@@ -1668,9 +1668,9 @@ fn timestamp_now() -> Result<String, MetadataError> {
 }
 
 fn parse_rfc3339_timestamp(value: &str) -> Result<OffsetDateTime, MetadataError> {
-    Ok(OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
+    OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
         MetadataError::InvalidManifest(format!("invalid timestamp {value}: {error}"))
-    })?)
+    })
 }
 
 fn count_rows(connection: &Connection, sql: &str) -> Result<u64, MetadataError> {

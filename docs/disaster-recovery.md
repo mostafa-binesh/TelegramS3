@@ -55,6 +55,8 @@
 5. After restore, run `telegram-s3 doctor` or
    `docker compose exec telegram-s3 telegram-s3 doctor` to confirm the
    bootstrap path before returning traffic.
+6. Use the authenticated `/_admin` dashboard to recheck storage overview,
+   capacity, Telegram readiness, and bootstrap status before resuming writes.
 
 ## Telegram Session Loss
 
@@ -75,6 +77,8 @@
 4. A successful restart should preserve committed objects, keep staged work
    invisible, only make repaired data visible after reconciliation, and bind
    the loopback admin listener for `/healthz` and `/metrics`.
+5. The same restart should also keep the authenticated `/_admin` operator
+   frontend available for readiness and recovery checks.
 
 ## Orphan Cleanup
 

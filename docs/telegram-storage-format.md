@@ -18,6 +18,10 @@ adapter-bound envelope encryption plus recovery-aware repair and garbage
 collection around the same layout, so the structure is now shared by single
 PUTs, multipart completion, and the RustFS-backed S3 surface.
 
+The authenticated operator frontend introduced in phase 8 reads the same
+metadata and status surfaces for visibility, but it does not alter the storage
+layout or relax the recovery rules described here.
+
 ## Design
 
 Each object is represented by:

@@ -19,4 +19,6 @@
 - The local database is part of the durability model.
 - Recovery is only as good as the manifests and backups kept.
 - The project must not be described as an unlimited or sole backup target.
-- Health and metrics are only exposed on the loopback admin listener.
+- Health and metrics remain on the loopback admin listener, while the
+  authenticated operator frontend and JSON API are served from the public
+  listener under `/_admin`.

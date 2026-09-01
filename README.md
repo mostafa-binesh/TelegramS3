@@ -26,6 +26,9 @@ Current state:
 - Phase 7 Docker packaging is complete: the repo now ships a production
   container image, a single-service compose file, persistent volumes, and a
   container entrypoint that validates config before starting the server.
+- Phase 8 authenticated operator frontend is complete: the Rust server now
+  serves an authenticated `/_admin` SPA and JSON API with HTTP-only cookie
+  sessions, bootstrap-secret login, overview cards, and onboarding checks.
 - RustFS upstream was inspected at `47a3f5ef0110ee5af04bbb761a8bb5ed99a9ce15`.
 - Telegram Drive upstream was inspected at `77518a93fbc8a8242f38e23e486a2d87d3f82fb2`.
 - The repo now includes a SQLite-backed metadata store, migrations, a

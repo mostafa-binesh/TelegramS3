@@ -15,6 +15,8 @@ TELEGRAM_METADATA_PATH=/var/lib/telegram-s3/metadata.sqlite
 TELEGRAM_DATA_DIR=/var/lib/telegram-s3/data
 TELEGRAM_S3_BIND_ADDR=127.0.0.1:9000
 TELEGRAM_ADMIN_BIND_ADDR=127.0.0.1:9001
+TELEGRAM_ADMIN_BOOTSTRAP_SECRET=<generate_secure_random_value>
+TELEGRAM_ADMIN_UI_DIST_DIR=frontend/dist
 
 TELEGRAM_CHUNK_SIZE=1048576
 TELEGRAM_CONNECTION_TIMEOUT_SECS=30
@@ -49,10 +51,15 @@ RUSTFS_SECRET_KEY=<generate_secure_random_value>
   `server` listener binds
 - admin bind address: `TELEGRAM_ADMIN_BIND_ADDR` controls the loopback-only
   health and metrics listener
+- admin bootstrap secret: `TELEGRAM_ADMIN_BOOTSTRAP_SECRET` unlocks the
+  authenticated operator frontend and seeds the HTTP-only admin session cookie
+- admin UI dist dir: `TELEGRAM_ADMIN_UI_DIST_DIR` points at the built Svelte
+  assets served by the `/_admin` frontend path
 - Docker deployments should mount `TELEGRAM_METADATA_PATH`,
   `TELEGRAM_DATA_DIR`, and `TELEGRAM_SESSION_PATH` on persistent volumes and
   set `TELEGRAM_S3_BIND_ADDR=0.0.0.0:9000` while leaving
-  `TELEGRAM_ADMIN_BIND_ADDR=127.0.0.1:9001`
+  `TELEGRAM_ADMIN_BIND_ADDR=127.0.0.1:9001`; the admin frontend is served
+  from the same Rust process on the reserved `/_admin` path
 
 Defaults used by the current scaffold:
 
@@ -68,6 +75,7 @@ Defaults used by the current scaffold:
 - retry backoff: `500ms`
 - flood-wait respect: `true`
 - proxy mode: `auto`
+- admin UI dist dir: `frontend/dist`
 
 Proxy selection rules:
 
@@ -109,7 +117,8 @@ Proxy selection rules:
   address.
 - `server` performs the same bootstrap checks before binding the S3 listener
   and starting request processing. It also binds the loopback admin listener
-  for `/healthz` and `/metrics`.
+  for `/healthz` and `/metrics`, while the authenticated operator frontend is
+  served from the main listener under `/_admin`.
 - The Docker image uses the same `server` path for foreground startup; the
   container entrypoint runs `config check` first and then starts the server in
   the foreground.

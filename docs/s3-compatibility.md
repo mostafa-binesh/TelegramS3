@@ -4,6 +4,8 @@ Phase 3 has implemented the manifest/chunk object-format backend, and Phase 4
 now wires the RustFS-backed S3 server through that layer for the CRUD slice.
 The rows below track externally visible S3 API wiring; implemented entries are
 available through `server`, and the standard S3 CRUD smoke test now passes.
+The authenticated operator frontend and `/_admin` JSON API are operational
+surfaces, not S3 compatibility features, so they are documented separately.
 
 | API operation | Status | Test coverage | Compatibility notes | Telegram-specific limitation | Planned phase |
 | --- | --- | --- | --- | --- | --- |
@@ -38,3 +40,11 @@ available through `server`, and the standard S3 CRUD smoke test now passes.
 | Encryption | implemented | cargo test | Adapter-bound envelope encryption is keyed from `TELEGRAM_S3_MASTER_KEY` and recorded in manifests | Range semantics are bounded by chunk decrypt/read | 6 |
 | Quotas | compatibility gap | none yet | Can be tracked locally | Telegram storage quotas are external | 6 |
 | Metrics/health | implemented | cargo test | Loopback-only `/healthz` and `/metrics` endpoints report bootstrap and recovery state | Admin traffic stays off the S3 listener | 6 |
+
+## Operator UI
+
+- `/_admin` and `/_admin/api/*` are implemented as an authenticated operator
+  surface served by the same Rust process.
+- The admin session is cookie-based and protected by a bootstrap secret gate.
+- The operator dashboard reports storage overview, endpoint details, capacity,
+  Telegram readiness, and onboarding checks.
