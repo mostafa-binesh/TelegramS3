@@ -29,6 +29,9 @@ Current state:
 - Phase 8 authenticated operator frontend is complete: the Rust server now
   serves an authenticated `/_admin` SPA and JSON API with HTTP-only cookie
   sessions, bootstrap-secret login, overview cards, and onboarding checks.
+- GitHub Actions can now publish the Docker image to GHCR on pushes to `main`
+  and on version tags, so you can pull a ready-made image onto a server
+  without rebuilding locally.
 - RustFS upstream was inspected at `47a3f5ef0110ee5af04bbb761a8bb5ed99a9ce15`.
 - Telegram Drive upstream was inspected at `77518a93fbc8a8242f38e23e486a2d87d3f82fb2`.
 - The repo now includes a SQLite-backed metadata store, migrations, a
@@ -55,3 +58,38 @@ Key documents:
 The project intentionally treats Telegram as a constrained remote object store,
 not as an unlimited backup target. Local metadata, manifests, and recovery
 tooling are required.
+
+## Published Docker Image
+
+After the workflow runs, the image is available from GHCR as:
+
+```text
+ghcr.io/<owner>/<repo>:latest
+```
+
+You can also pin a release tag such as `ghcr.io/<owner>/<repo>:v0.1.0` or a
+SHA tag if you want a fixed image.
+
+To run it on a server:
+
+```bash
+docker pull ghcr.io/<owner>/<repo>:latest
+docker run -d \
+  --name telegram-s3 \
+  -p 9000:9000 \
+  -e TELEGRAM_API_ID=... \
+  -e TELEGRAM_API_HASH=... \
+  -e TELEGRAM_PHONE_NUMBER=... \
+  -e TELEGRAM_STORAGE_CHAT_ID=... \
+  -e TELEGRAM_S3_MASTER_KEY=... \
+  -e TELEGRAM_ADMIN_BOOTSTRAP_SECRET=... \
+  -e RUSTFS_ACCESS_KEY=... \
+  -e RUSTFS_SECRET_KEY=... \
+  -v telegram-s3-metadata:/var/lib/telegram-s3/metadata \
+  -v telegram-s3-data:/var/lib/telegram-s3/data \
+  -v telegram-s3-session:/var/lib/telegram-s3/session \
+  ghcr.io/<owner>/<repo>:latest
+```
+
+If you prefer Compose, replace the local `build:` block with the published
+`image:` reference and keep the same environment variables and volumes.
