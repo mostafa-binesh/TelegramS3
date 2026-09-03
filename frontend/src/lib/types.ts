@@ -1,54 +1,67 @@
+export interface UserInfo {
+  id: string;
+  username: string;
+  display_name: string;
+  role: 'admin' | 'superadmin';
+  disabled: boolean;
+}
+
 export interface SessionState {
   authenticated: boolean;
+  user?: UserInfo | null;
   issued_at?: string | null;
   expires_at?: string | null;
   csrf_token?: string | null;
 }
 
-export interface CheckItem {
-  label: string;
-  ok: boolean;
-  detail: string;
+export interface BucketInfo {
+  name: string;
+  created_at: string;
 }
 
-export interface BootstrapState {
-  ready: boolean;
-  authenticated: boolean;
-  session_state: string;
-  phone_number?: string | null;
-  proxy_mode: string;
-  proxy_url?: string | null;
-  checks: CheckItem[];
+export interface BucketsState {
+  buckets: BucketInfo[];
+}
+
+export interface ObjectEntry {
+  name: string;
+  key: string;
+  size: number;
+  last_modified: string;
+  etag: string;
+}
+
+export interface ObjectsState {
+  prefix: string;
+  folders: string[];
+  objects: ObjectEntry[];
+}
+
+export interface UsersState {
+  users: UserInfo[];
+}
+
+export interface StorageCard {
+  buckets: number;
+  committed_objects: number;
+  active_objects: number;
+  staged_objects: number;
+  recovery_markers: number;
+  chunk_size: number;
+  recovery_required_objects: number;
+  metadata_path?: string;
+  data_dir?: string;
 }
 
 export interface OverviewState {
-  checked_at: string;
-  session: Required<SessionState>;
-  endpoint: {
+  checked_at?: string;
+  session?: { authenticated: boolean; user?: UserInfo };
+  endpoint?: {
     s3_bind_addr: string;
     admin_bind_addr: string;
     admin_route_prefix: string;
   };
-  storage: {
-    metadata_path: string;
-    data_dir: string;
-    session_path: string;
-    buckets: number;
-    committed_objects: number;
-    active_objects: number;
-    staged_objects: number;
-    recovery_markers: number;
-  };
-  capacity: {
-    chunk_size: number;
-    recovery_required_objects: number;
-    orphaned_chunks: number;
-  };
-  telegram: {
-    session_state: string;
-    proxy_kind: string;
-    proxy_url?: string | null;
-    phone_number?: string | null;
-  };
-  bootstrap: BootstrapState;
+  storage?: StorageCard;
+  telegram?: { session_state: string; phone_number?: string | null };
+  checks?: { label: string; ok: boolean; detail: string }[];
 }

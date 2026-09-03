@@ -22,3 +22,13 @@
 - Health and metrics remain on the loopback admin listener, while the
   authenticated operator frontend and JSON API are served from the public
   listener under `/_admin`.
+- Operator accounts live in `metadata.sqlite`; losing it means re-provisioning
+  the first superuser with `telegram-s3 users create`. Password hashes are
+  not recoverable (argon2id + per-account salt) and there is no password-reset
+  email — recovery is CLI-admin only.
+- Every operator is admin-tier for now; the stored `role` is reserved for future
+  per-user/tenant scopes. All authenticated operators currently see the full
+  bucket/object surface.
+- The Phase-9 control-plane UI exposes a JSON bucket/folder browser. Bounded
+  binary upload/download-from-browser and the in-browser Telegram onboarding
+  wizard are enabled in the next slice (ADR-0006, ROADMAP Phase 9).

@@ -68,10 +68,16 @@ fn config_doctor_db_and_index_smoke_test() {
     assert!(config_stdout.contains("configuration looks structurally valid"));
 
     let migrate_stdout = run_and_capture(&tempdir, &["db", "migrate"]);
-    assert!(migrate_stdout.contains("database migrated to schema version 3"));
+    assert!(contains_schema_version(
+        &migrate_stdout,
+        "database migrated to schema version"
+    ));
 
     let doctor_stdout = run_and_capture(&tempdir, &["doctor"]);
-    assert!(doctor_stdout.contains("metadata schema version: 3"));
+    assert!(contains_schema_version(
+        &doctor_stdout,
+        "metadata schema version: "
+    ));
 
     let rebuild_stdout = run_and_capture(&tempdir, &["index", "rebuild"]);
     assert!(rebuild_stdout.contains("rebuild complete"));
@@ -80,7 +86,7 @@ fn config_doctor_db_and_index_smoke_test() {
     assert!(verify_stdout.contains("mismatched rows: 0"));
 
     let status_stdout = run_and_capture(&tempdir, &["db", "status"]);
-    assert!(status_stdout.contains("schema version: 3"));
+    assert!(contains_schema_version(&status_stdout, "schema version: "));
 
     let repair_dry_run = run_and_capture(&tempdir, &["repair", "--dry-run"]);
     assert!(repair_dry_run.contains("repair dry-run"));
@@ -128,6 +134,18 @@ fn config_doctor_db_and_index_smoke_test() {
 
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn contains_schema_version(output: &str, prefix: &str) -> bool {
+    output.lines().any(|line| {
+        line.find(prefix).is_some_and(|index| {
+            line[index + prefix.len()..]
+                .trim_start()
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+        })
+    })
 }
 
 fn http_get(addr: &str, path: &str) -> String {

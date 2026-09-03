@@ -129,17 +129,33 @@ Completed work:
 Completed work:
 
 - the Rust server now serves an authenticated `/_admin` SPA and JSON API on the existing public listener
-- login uses an HTTP-only session cookie and a bootstrap secret gate for first access
+- login originally used a bootstrap-secret gate; as of Phase 9 it is replaced by credential (username/password) sessions
 - the dashboard surfaces storage overview, endpoint details, capacity, bootstrap status, and Telegram readiness
 - the onboarding panel gives operators a guided checklist for phone number, `.env` values, 2FA, and connection checks
 - the Docker image builds the Svelte frontend in a dedicated build stage and copies the runtime assets into the single container
 
 ## Phase 9 - Multi-user control plane
 
-- Status: pending
+- Status: in progress (initial slice landed; see below for the next slice)
 - Exit criteria:
-  - multiple operator accounts are supported with explicit authorization boundaries
-  - the authenticated frontend can distinguish per-user permissions and admin capabilities
-  - onboarding, recovery, and maintenance actions are auditable by user
-  - storage visibility and management actions remain consistent across concurrent users
-  - tenant or workspace boundaries are documented if the model introduces them
+  - multiple operator accounts are supported as database-backed username/password records (no per-user `.env`)
+  - account management (add/list/delete/password change) is administered by a superadmin in-app
+  - guests/unauthenticated visitors to `/_admin` see only a login screen; every data API is gated
+  - login is rate-limited/locked out per account; sessions are bound to a user and revocable (password change / user delete / logout)
+  - the CLI can provision the first superuser while the server is down (`telegram-s3 users create`)
+  - boundaries are documented: all accounts are admin-tier today (`role` reserved for future per-user scopes/tenants)
+
+Completed work (initial slice):
+
+- real username + password accounts stored in `metadata.sqlite` (schema `v4`) with argon2id-hashed passwords (new `auth` module)
+- signed HTTP-only session cookies bound to a `admin_sessions` row; logout revokes that row; password change / user delete revoke all of that user's sessions via `token_version`
+- `/_admin/api/session` (whoami, guest-safe), `/session/login`, `/session/logout`, `/session/refresh`, with CSRF on mutating endpoints
+- user management API: `GET/POST /users`, `DELETE /users/{id}`, per-user password change; superadmin gets account CRUD
+- in-browser management UI: username/password sign-in, overview, operator list, and a (JSON) bucket/object browser with prefix folders + directory markers + file/folder delete
+- CLI `users` family (`create`, `list`, `password`, `delete`, `status`); first account is forced to superadmin and is provisionable while the server is down
+- login rate limiting / lockout (in-process per-IP + per-account buckets)
+- unit + integration smoke coverage for auth, migrations, user CRUD, and the credential login lifecycle
+
+Next slice (deferred, documented in ADR-0006 / README): bounded binary content streaming (upload/download/resumable range) over `_admin`, and the in-browser Telegram onboarding wizard behind a kept-alive single-account client. Both are isolated, non-blocking follow-ups to the control-plane core above.
+
+Rejected alternatives this phase (see `docs/adr/0006-...md`): keeping MinIO-time `TELEGRAM_ADMIN_BOOTSTRAP_SECRET` as a shared login secret; per-user `.env` accounts; a separate credentials SQLite file; `governor`-style thundering rate limiters; site-replication peering of Telegram S3 (documented unsupported).

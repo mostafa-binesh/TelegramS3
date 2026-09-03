@@ -51,8 +51,10 @@ RUSTFS_SECRET_KEY=<generate_secure_random_value>
   `server` listener binds
 - admin bind address: `TELEGRAM_ADMIN_BIND_ADDR` controls the loopback-only
   health and metrics listener
-- admin bootstrap secret: `TELEGRAM_ADMIN_BOOTSTRAP_SECRET` unlocks the
-  authenticated operator frontend and seeds the HTTP-only admin session cookie
+- admin cookie secret: `TELEGRAM_ADMIN_BOOTSTRAP_SECRET` no longer acts as a
+  login credential. When set it is used to derive the HMAC key that signs
+  `/_admin` session cookies. Operator *identities* come from `metadata.sqlite`
+  (`users`), not from the environment; see Operator accounts below.
 - admin UI dist dir: `TELEGRAM_ADMIN_UI_DIST_DIR` points at the built Svelte
   assets served by the `/_admin` frontend path
 - Docker deployments should mount `TELEGRAM_METADATA_PATH`,
@@ -85,6 +87,22 @@ Proxy selection rules:
   `https://` URLs through a local SOCKS5 listener.
 - proxy credentials can be provided separately or embedded in the URL, but the
   resolved configuration must be internally consistent.
+
+## Operator accounts
+
+Passwords/accounts are stored in `metadata.sqlite` (schema `4`), hashed with
+argon2id. There is no per-user `.env` entry.
+
+- **First operator (server down):** `telegram-s3 users create <username> --password <pw>`
+  seeds the superadmin. The first account is always forced to the `superadmin`
+  role. Pass an empty password parameter via `TG_ADMIN_PASSWORD` env to avoid a
+  shell-visible secret: `TG_ADMIN_PASSWORD=... telegram-s3 users create admin`.
+- **After boot:** an authenticated superadmin can add/remove operators in the
+  `/_admin` "Users" view, or use `telegram-s3 users list | status | password |
+  delete`.
+- Password changes revoke all of that user's sessions (`token_version` bump).
+  There is **no email/password-reset flow**; recovery is CLI-admin only.
+- Deleting the last remaining superadmin is refused.
 
 ## Required Runtime Settings
 

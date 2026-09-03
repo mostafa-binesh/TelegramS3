@@ -69,6 +69,25 @@ fn command_for(tempdir: &TempDir, bind_addr: &str) -> Command {
 #[tokio::test]
 async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     let tempdir = TempDir::new().expect("tempdir");
+
+    // Pair the CLI seed the way production would: create an operator account in
+    // the same metadata store the server will use, before it boots.
+    let mut cli = Command::cargo_bin("telegram-s3").expect("binary");
+    cli.env(
+        "TELEGRAM_METADATA_PATH",
+        tempdir.path().join("metadata.sqlite"),
+    );
+    cli.arg("users");
+    cli.arg("create");
+    cli.arg("admin");
+    cli.args(["--password", "correct-horse-battery-staple"]);
+    let cli_out = cli.output().expect("seed admin");
+    assert!(
+        cli_out.status.success(),
+        "seed failed: {}",
+        String::from_utf8_lossy(&cli_out.stderr)
+    );
+
     let bind_addr = free_bind_addr();
 
     let mut server_command = command_for(&tempdir, &bind_addr);
@@ -104,7 +123,7 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
         "POST",
         "/_admin/api/session/login",
         &[],
-        br#"{"bootstrap_secret":"bootstrap-secret"}"#,
+        br#"{"username":"admin","password":"correct-horse-battery-staple"}"#,
     )
     .await;
     assert_eq!(login.status, 200);
@@ -129,7 +148,23 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     .await;
     assert_eq!(overview.status, 200);
     assert!(overview.body.contains("\"endpoint\""));
-    assert!(overview.body.contains("\"bootstrap\""));
+    assert!(overview.body.contains("\"checks\""));
+
+    let users = http_request(
+        &client,
+        &bind_addr,
+        "GET",
+        "/_admin/api/users",
+        &[("Cookie", cookie_header.as_str())],
+        b"",
+    )
+    .await;
+    assert_eq!(users.status, 200);
+    assert!(users.body.contains("\"admin\""));
+
+    // Unauthenticated access to the management API must be rejected.
+    let unauth = http_request(&client, &bind_addr, "GET", "/_admin/api/users", &[], b"").await;
+    assert_eq!(unauth.status, 401);
 
     let refresh = http_request(
         &client,

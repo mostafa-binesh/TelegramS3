@@ -43,10 +43,20 @@
 - secret redaction
 - permission checks at startup
 - dry-run repair and garbage-collection modes
+- per-user argon2id password hashing, session cookies bound to a user with
+  per-session + per-user revocation, CSRF on mutating endpoints, and
+  rate-limited/lockout-protected login (Phase 9 `/_admin`)
 
 ## Residual Risks
 
 - Telegram is still a third-party service with rate limits and file-size limits.
 - Strong transactional semantics cannot be guaranteed end-to-end.
 - Recovery depends on keeping both local metadata and remote manifests healthy.
+- Operator session cookies are HttpOnly/`SameSite=Strict` but the `Secure` flag
+  must be enabled for production (see ADR-0006). Ensure the `/_admin` surface is
+  only reachable over TLS (e.g. the dokploy/proxy TLS terminator) and that the
+  cookie `Secure`-flag guidance is applied before exposing it beyond a trusted
+  loopback/test network.
+- All operators are admin-tier today; a lower-privilege non-admin role is not
+  yet enforced.
 

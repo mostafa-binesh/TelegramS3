@@ -36,3 +36,11 @@ the object-store contract or imply extra S3 semantics.
   remains available for Telegram login and recovery flows.
 - The S3 compatibility matrix stays focused on S3 behavior, while operator UI
   behavior is documented separately.
+
+## Superseded in part
+
+The session gate in this ADR (a shared bootstrap secret) was by nature
+single-operator. ADR-0006 replaces the *login credential* with database-backed
+username/password accounts and per-user revocable sessions; the concrete
+`/_admin` routing, Svelte+Vite SPA, and cookie/CSRF mechanics established here
+remain the foundation it builds on.

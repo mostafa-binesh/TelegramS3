@@ -45,6 +45,15 @@ surfaces, not S3 compatibility features, so they are documented separately.
 
 - `/_admin` and `/_admin/api/*` are implemented as an authenticated operator
   surface served by the same Rust process.
-- The admin session is cookie-based and protected by a bootstrap secret gate.
-- The operator dashboard reports storage overview, endpoint details, capacity,
-  Telegram readiness, and onboarding checks.
+- Login is credential-based: accounts are argon2id-hashed records in
+  `metadata.sqlite` (schema v4), not the environment. A guest/operator sees only
+  the sign-in screen; every management API requires a session bound to a user.
+- Login is rate-limited with per-account lockout; passwords/session state are
+  not stored in browser storage.
+- The dashboard reports storage overview, endpoint details, capacity, Telegram
+  readiness, operator accounts (superadmin-only add/remove), and a JSON
+  bucket/object browser (prefix folders + directory markers + delete). Binary
+  transfer and the Telegram onboarding wizard are the next slice (ADR-0006).
+- The operator UI is not part of the S3 compatibility contract; the `/_admin`
+  controller only reflects committed S3 object data through the same store as
+  the S3 server.

@@ -7,6 +7,7 @@ description = "Telegram-backed S3-compatible object storage"
 
 [dependencies]
 async-trait = "0.1"
+argon2 = "0.5"
 base64 = "0.22"
 bytes = "1"
 http-body-util = "0.1"
@@ -20,6 +21,7 @@ hex = "0.4"
 http = "1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "server", "tokio"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = "0.23"
 ring = "0.17"

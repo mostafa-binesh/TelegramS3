@@ -30,6 +30,19 @@ settings reference.
 - `GET http://127.0.0.1:9001/healthz`
 - `GET http://127.0.0.1:9001/metrics`
 
+## Operator accounts (control plane)
+
+- Provision the first superuser on a fresh database (runs while the server is
+  down or before first boot; the first account is always a superadmin):
+  `telegram-s3 users create admin --password '<long password>'`
+  For a scripted first boot, avoid a shell-visible secret with the environment:
+  `TG_ADMIN_PASSWORD='...' telegram-s3 users create admin`
+- `telegram-s3 users list`, `status <name>`, `password <name>` (revokes all
+  that user's sessions), and `delete <name>`.
+- After boot, add/remove operators from the `/_admin` **Users** view
+  (superadmin-only). Sign-in is username + password; guests only ever reach the
+  sign-in screen and login attempts are rate-limited.
+
 ## Docker Deployment
 
 - Build the image with `docker compose build`.

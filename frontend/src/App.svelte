@@ -1,37 +1,82 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import {
-    getBootstrapStatus,
+    createFolder,
+    createUser,
+    deleteUser,
     getOverview,
     getSession,
+    listBuckets,
+    listObjects,
+    listUsers,
     login,
     logout,
-    refreshSession,
-    runOnboardingCheck
+    removeObject
   } from './lib/api';
-  import type { BootstrapState, OverviewState, SessionState } from './lib/types';
+  import type {
+    BucketInfo,
+    ObjectEntry,
+    ObjectsState,
+    OverviewState,
+    SessionState,
+    UserInfo
+  } from './lib/types';
 
   let session: SessionState | null = null;
   let overview: OverviewState | null = null;
-  let bootstrap: BootstrapState | null = null;
-  let bootstrapSecret = '';
+  let view: 'overview' | 'users' | 'buckets' = 'overview';
   let loading = true;
   let busy = false;
   let message = '';
   let error = '';
 
-  const numberFormatter = new Intl.NumberFormat('en-US');
+  let username = '';
+  let password = '';
+  let loginError = '';
+
+  let users: UserInfo[] = [];
+  let newUsername = '';
+  let newDisplay = '';
+  let newPassword = '';
+  let newRole = 'admin';
+
+  let buckets: BucketInfo[] = [];
+  let selectedBucket = '';
+  let currentPrefix = '';
+  let listing: ObjectsState | null = null;
+  let newFolder = '';
 
   onMount(() => {
     void bootstrapApp();
   });
 
+  function normalizeError(cause: unknown) {
+    return cause instanceof Error ? cause.message : 'Unexpected failure';
+  }
+  function formatCount(value: number) {
+    return new Intl.NumberFormat('en-US').format(value);
+  }
+  function formatBytes(value: number) {
+    if (!value) return '0 B';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let size = value;
+    let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) {
+      size /= 1024;
+      unit += 1;
+    }
+    return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+  }
+  function crumbs() {
+    return currentPrefix.split('/').filter(Boolean);
+  }
+
   async function bootstrapApp() {
     loading = true;
     error = '';
     try {
-      [session, bootstrap] = await Promise.all([getSession(), getBootstrapStatus()]);
-      if (session.authenticated) {
+      session = await getSession();
+      if (session?.authenticated) {
         overview = await getOverview();
       } else {
         overview = null;
@@ -45,33 +90,16 @@
 
   async function handleLogin() {
     busy = true;
-    error = '';
+    loginError = '';
     message = '';
     try {
-      session = await login(bootstrapSecret.trim());
-      bootstrapSecret = '';
+      session = await login(username.trim(), password);
+      username = '';
+      password = '';
       overview = await getOverview();
-      bootstrap = await getBootstrapStatus();
-      message = 'Operator session established.';
+      message = `Signed in as ${session?.user?.username}.`;
     } catch (cause) {
-      error = normalizeError(cause);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function handleRefresh() {
-    if (!session?.csrf_token) return;
-    busy = true;
-    error = '';
-    message = '';
-    try {
-      session = await refreshSession(session.csrf_token);
-      overview = await getOverview();
-      bootstrap = await getBootstrapStatus();
-      message = 'Session refreshed.';
-    } catch (cause) {
-      error = normalizeError(cause);
+      loginError = normalizeError(cause);
     } finally {
       busy = false;
     }
@@ -81,12 +109,14 @@
     if (!session?.csrf_token) return;
     busy = true;
     error = '';
-    message = '';
     try {
       session = await logout(session.csrf_token);
       overview = null;
-      bootstrap = await getBootstrapStatus();
-      message = 'Logged out successfully.';
+      users = [];
+      buckets = [];
+      listing = null;
+      view = 'overview';
+      message = 'Signed out.';
     } catch (cause) {
       error = normalizeError(cause);
     } finally {
@@ -94,15 +124,38 @@
     }
   }
 
-  async function handleRecheck() {
-    if (!session?.csrf_token) return;
+  async function switchView(next: 'overview' | 'users' | 'buckets') {
+    view = next;
+    error = '';
+    if (next === 'users') await refreshUsers();
+    if (next === 'buckets') await refreshBuckets();
+  }
+
+  async function refreshUsers() {
+    const csrf = session?.csrf_token;
+    try {
+      const res = await listUsers(csrf);
+      users = res.users ?? [];
+    } catch (cause) {
+      error = normalizeError(cause);
+    }
+  }
+
+  async function makeUser() {
     busy = true;
     error = '';
-    message = '';
     try {
-      bootstrap = await runOnboardingCheck(session.csrf_token);
-      overview = await getOverview();
-      message = 'Setup checks refreshed.';
+      await createUser(session?.csrf_token, {
+        username: newUsername,
+        password: newPassword,
+        display_name: newDisplay,
+        role: newRole
+      });
+      newUsername = '';
+      newDisplay = '';
+      newPassword = '';
+      message = 'User added.';
+      await refreshUsers();
     } catch (cause) {
       error = normalizeError(cause);
     } finally {
@@ -110,42 +163,111 @@
     }
   }
 
-  function normalizeError(cause: unknown) {
-    return cause instanceof Error ? cause.message : 'Unexpected failure';
-  }
-
-  function formatCount(value: number) {
-    return numberFormatter.format(value);
-  }
-
-  function formatBytes(value: number) {
-    if (!value) return '0 B';
-    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-    let size = value;
-    let unit = 0;
-    while (size >= 1024 && unit < units.length - 1) {
-      size /= 1024;
-      unit += 1;
+  async function dropUser(id: string) {
+    busy = true;
+    error = '';
+    try {
+      await deleteUser(session?.csrf_token, id);
+      message = 'User removed.';
+      await refreshUsers();
+    } catch (cause) {
+      error = normalizeError(cause);
+    } finally {
+      busy = false;
     }
-    return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+  }
+
+  async function refreshBuckets() {
+    const csrf = session?.csrf_token;
+    try {
+      const res = await listBuckets(csrf);
+      buckets = res.buckets ?? [];
+    } catch (cause) {
+      error = normalizeError(cause);
+    }
+  }
+
+  async function openBucket(name: string) {
+    selectedBucket = name;
+    currentPrefix = '';
+    view = 'buckets';
+    await refreshObjects();
+  }
+
+  async function exitBucket() {
+    selectedBucket = '';
+    currentPrefix = '';
+    listing = null;
+  }
+
+  async function refreshObjects() {
+    if (!selectedBucket) return;
+    const csrf = session?.csrf_token;
+    try {
+      listing = await listObjects(csrf, selectedBucket, currentPrefix);
+    } catch (cause) {
+      error = normalizeError(cause);
+    }
+  }
+
+  function enterFolder(name: string) {
+    currentPrefix = `${currentPrefix}${name}/`;
+    void refreshObjects();
+  }
+
+  function gotoCrumb(i: number) {
+    const parts = currentPrefix.split('/').filter(Boolean).slice(0, i);
+    currentPrefix = parts.map((p) => p + '/').join('');
+    void refreshObjects();
+  }
+
+  async function makeFolder() {
+    const name = newFolder.trim();
+    if (!name || !selectedBucket) return;
+    busy = true;
+    error = '';
+    try {
+      await createFolder(session?.csrf_token, selectedBucket, `${currentPrefix}${name}/`);
+      newFolder = '';
+      message = 'Folder created.';
+      await refreshObjects();
+    } catch (cause) {
+      error = normalizeError(cause);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function removeKey(obj: ObjectEntry | string) {
+    const key = typeof obj === 'string' ? `${currentPrefix}${obj}/` : obj.key;
+    busy = true;
+    error = '';
+    try {
+      await removeObject(session?.csrf_token, selectedBucket, key);
+      message = 'Deleted.';
+      await refreshObjects();
+    } catch (cause) {
+      error = normalizeError(cause);
+    } finally {
+      busy = false;
+    }
   }
 </script>
 
 <svelte:head>
-  <title>Telegram S3 Admin</title>
+  <title>Telegram S3 — Management</title>
 </svelte:head>
 
 <main class="shell">
   <section class="hero">
     <div class="hero-copy">
-      <p class="eyebrow">Authenticated operator console</p>
-      <h1>Telegram-backed storage, visible at a glance.</h1>
+      <p class="eyebrow">Authenticated management console</p>
+      <h1>Telegram-backed storage.</h1>
       <p class="lede">
-        Keep the storage overview, bootstrap checks, and Telegram readiness behind
-        one browser-gated surface without adding another runtime container.
+        Manage operator accounts and browse buckets behind a per-user login. Object
+        transfer and the in-browser Telegram onboarding wizard are the next slice.
       </p>
     </div>
-
     <div class="hero-panel">
       <div class="panel-row">
         <span class="panel-label">Session</span>
@@ -154,193 +276,287 @@
         </span>
       </div>
       <div class="panel-row">
-        <span class="panel-label">Bootstrap</span>
-        <span class:badge-ok={bootstrap?.ready} class:badge-warn={!bootstrap?.ready} class="badge">
-          {bootstrap?.ready ? 'Ready' : 'Needs attention'}
-        </span>
-      </div>
-      <div class="panel-row">
-        <span class="panel-label">Telegram</span>
-        <span class="panel-value">{bootstrap?.session_state ?? 'unknown'}</span>
+        <span class="panel-label">Signed in as</span>
+        <span class="panel-value">{session?.user?.username ?? '—'}</span>
       </div>
     </div>
   </section>
 
   {#if loading}
-    <section class="card surface">
-      <p>Loading admin status…</p>
-    </section>
+    <section class="card surface"><p>Loading…</p></section>
   {:else if !session?.authenticated}
     <section class="login-grid">
       <div class="card surface intro-card">
-        <p class="card-label">First-run access</p>
-        <h2>Unlock the operator console</h2>
+        <p class="card-label">Operator access</p>
+        <h2>Sign in to manage storage</h2>
         <p>
-          Use the bootstrap secret configured in the environment to enroll the
-          first operator session. The Telegram login itself still happens through
-          the existing server-side auth flow.
+          Accounts live in the local metadata store and are added by an existing
+          superadmin or via the <code>telegram-s3 users</code> CLI. Guests only see
+          this screen.
         </p>
-
-        <ol class="setup-steps">
-          <li>Confirm the phone number and required `.env` values.</li>
-          <li>Complete Telegram login, including 2FA if the account requires it.</li>
-          <li>Return here and run the connection checks again.</li>
-        </ol>
-
         <div class="callout">
-          <strong>What this panel checks</strong>
+          <strong>Security notes</strong>
           <ul>
-            {#each bootstrap?.checks ?? [] as check}
-              <li class:check-fail={!check.ok}>{check.label}: {check.detail}</li>
-            {/each}
+            <li>All management APIs require a signed-in session.</li>
+            <li>Login attempts are rate-limited and locked out after repeated failures.</li>
           </ul>
         </div>
       </div>
 
       <form class="card form-card surface" on:submit|preventDefault={handleLogin}>
         <label>
-          <span>Bootstrap secret</span>
-          <input
-            bind:value={bootstrapSecret}
-            type="password"
-            autocomplete="current-password"
-            placeholder="Enter the admin bootstrap secret"
-          />
+          <span>Username</span>
+          <input bind:value={username} type="text" autocomplete="username" />
         </label>
-
-        <button class="primary" type="submit" disabled={busy || !bootstrapSecret.trim()}>
-          {busy ? 'Signing in…' : 'Sign in'}
-        </button>
+        <label>
+          <span>Password</span>
+          <input bind:value={password} type="password" autocomplete="current-password" />
+        </label>
+        {#if loginError}
+          <p class="fine-print error-hint">{loginError}</p>
+        {/if}
+        <button class="primary" type="submit" disabled={busy}>Sign in</button>
         <p class="fine-print">
-          Keep this secret off browser storage. The session cookie remains
-          HTTP-only and path-scoped to <code>/_admin</code>.
+          The session cookie is HTTP-only and scoped to <code>/_admin</code>.
         </p>
       </form>
     </section>
   {:else}
     <section class="toolbar card surface">
       <div>
-        <p class="card-label">Session expires</p>
-        <strong>{session.expires_at ?? 'unknown'}</strong>
+        <p class="card-label">Operator</p>
+        <strong>{session.user?.username}</strong>
       </div>
       <div class="toolbar-actions">
-        <button on:click={handleRecheck} disabled={busy}>Recheck onboarding</button>
-        <button on:click={handleRefresh} disabled={busy}>Refresh session</button>
+        <button class:active={view === 'overview'} on:click={() => (view = 'overview')}>Overview</button>
+        <button class:active={view === 'buckets'} on:click={() => switchView('buckets')}>Buckets</button>
+        <button class:active={view === 'users'} on:click={() => switchView('users')}>Users</button>
         <button class="ghost" on:click={handleLogout} disabled={busy}>Logout</button>
       </div>
     </section>
 
-    <section class="cards">
-      <article class="card metric">
-        <p class="card-label">Buckets</p>
-        <strong>{formatCount(overview?.storage.buckets ?? 0)}</strong>
-      </article>
-      <article class="card metric">
-        <p class="card-label">Committed objects</p>
-        <strong>{formatCount(overview?.storage.committed_objects ?? 0)}</strong>
-      </article>
-      <article class="card metric">
-        <p class="card-label">Staged objects</p>
-        <strong>{formatCount(overview?.storage.staged_objects ?? 0)}</strong>
-      </article>
-      <article class="card metric">
-        <p class="card-label">Recovery markers</p>
-        <strong>{formatCount(overview?.storage.recovery_markers ?? 0)}</strong>
-      </article>
-    </section>
+    {#if view === 'overview'}
+      <section class="cards">
+        <article class="card metric">
+          <p class="card-label">Buckets</p>
+          <strong>{formatCount(overview?.storage?.buckets ?? 0)}</strong>
+        </article>
+        <article class="card metric">
+          <p class="card-label">Committed</p>
+          <strong>{formatCount(overview?.storage?.committed_objects ?? 0)}</strong>
+        </article>
+        <article class="card metric">
+          <p class="card-label">Active</p>
+          <strong>{formatCount(overview?.storage?.active_objects ?? 0)}</strong>
+        </article>
+        <article class="card metric">
+          <p class="card-label">Recovery</p>
+          <strong>{formatCount(overview?.storage?.recovery_markers ?? 0)}</strong>
+        </article>
+      </section>
+      <section class="layout">
+        <article class="card surface">
+          <p class="card-label">Endpoints</p>
+          <dl class="kv">
+            <div><dt>S3 listener</dt><dd>{overview?.endpoint?.s3_bind_addr}</dd></div>
+            <div><dt>Admin listener</dt><dd>{overview?.endpoint?.admin_bind_addr}</dd></div>
+            <div><dt>Admin route</dt><dd>{overview?.endpoint?.admin_route_prefix}</dd></div>
+          </dl>
+        </article>
+        <article class="card surface">
+          <p class="card-label">Readiness</p>
+          <ul class="checks">
+            {#each overview?.checks ?? [] as check}
+              <li class:check-ok={check.ok} class:check-fail={!check.ok}>
+                <span>{check.label}</span>
+                <small>{check.detail}</small>
+              </li>
+            {/each}
+          </ul>
+        </article>
+      </section>
+    {:else if view === 'buckets'}
+      <section class="card surface">
+        <p class="card-label">File browser</p>
+        {#if !selectedBucket}
+          <h2>Choose a bucket</h2>
+          <ul class="checks">
+            {#each buckets as bucket}
+              <li>
+                <button type="button" class="btn-link" on:click={() => openBucket(bucket.name)}>
+                  {bucket.name}
+                  <small>— created {bucket.created_at}</small>
+                </button>
+              </li>
+            {/each}
+            {#if buckets.length === 0}
+              <li class="fine-print">No buckets yet — create one with an S3 client.</li>
+            {/if}
+          </ul>
+        {:else}
+          <div class="crumb-row">
+            <button class="btn-link" on:click={exitBucket}>Bucket: {selectedBucket}</button>
+            <span class="crumb-sep">/</span>
+            {#each crumbs() as crumb, i (crumb + i)}
+              <button class="btn-link" on:click={() => gotoCrumb(i)}>{crumb}</button><span class="crumb-sep">/</span>
+            {/each}
+          </div>
+          <div class="row-inline">
+            <input bind:value={newFolder} placeholder="new folder" />
+            <button class="primary" disabled={busy || !newFolder.trim()} on:click={makeFolder}>New folder</button>
+          </div>
+          <table class="kv-table">
+            <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+            <tbody>
+              {#each listing?.folders ?? [] as folder}
+                <tr>
+                  <td><button class="btn-link" on:click={() => enterFolder(folder)}>{folder}/</button></td>
+                  <td class="muted">folder</td>
+                  <td class="muted">—</td>
+                  <td><button class="ghost" on:click={() => removeKey(folder)}>Delete</button></td>
+                </tr>
+              {/each}
+              {#each listing?.objects ?? [] as obj}
+                <tr>
+                  <td>{obj.name}</td>
+                  <td>{formatBytes(obj.size)}</td>
+                  <td>{obj.last_modified}</td>
+                  <td><button class="ghost" on:click={() => removeKey(obj)}>Delete</button></td>
+                </tr>
+              {/each}
+              {#if listing && listing.folders.length === 0 && listing.objects.length === 0}
+                <tr><td colspan="4" class="muted">Empty folder.</td></tr>
+              {/if}
+            </tbody>
+          </table>
+          <p class="fine-print">
+            Content upload/download arrives in the next slice; for now list,
+            navigate and manage folders and objects via the S3 data plane.
+          </p>
+        {/if}
+      </section>
+    {:else if view === 'users'}
+      <section class="card surface">
+        <p class="card-label">Operators</p>
+        <h2>Accounts</h2>
+        <table class="kv-table">
+          <thead><tr><th>Username</th><th>Role</th><th>State</th><th></th></tr></thead>
+          <tbody>
+            {#each users as user}
+              <tr>
+                <td>{user.username}{#if user.display_name} <small>({user.display_name})</small>{/if}</td>
+                <td>{user.role}</td>
+                <td>{user.disabled ? 'disabled' : 'enabled'}</td>
+                <td><button class="ghost" on:click={() => dropUser(user.id)} disabled={busy}>Remove</button></td>
+              </tr>
+            {/each}
+            {#if users.length === 0}
+              <tr><td colspan="4" class="muted">No operator accounts.</td></tr>
+            {/if}
+          </tbody>
+        </table>
 
-    <section class="layout">
-      <article class="card surface">
-        <p class="card-label">Endpoint details</p>
-        <h2>Runtime listeners</h2>
-        <dl class="kv">
-          <div>
-            <dt>S3 listener</dt>
-            <dd>{overview?.endpoint.s3_bind_addr}</dd>
+        <div class="form-card surface nested-form">
+          <p class="card-label">Add account</p>
+          <div class="grid-2">
+            <label>
+              <span>Username</span>
+              <input bind:value={newUsername} autocomplete="off" />
+            </label>
+            <label>
+              <span>Display name</span>
+              <input bind:value={newDisplay} autocomplete="off" />
+            </label>
+            <label>
+              <span>Password (12+ chars)</span>
+              <input bind:value={newPassword} type="password" autocomplete="new-password" />
+            </label>
+            <label>
+              <span>Role</span>
+              <select bind:value={newRole}>
+                <option value="admin">admin</option>
+                <option value="superadmin">superadmin</option>
+              </select>
+            </label>
           </div>
-          <div>
-            <dt>Admin listener</dt>
-            <dd>{overview?.endpoint.admin_bind_addr}</dd>
-          </div>
-          <div>
-            <dt>Admin route</dt>
-            <dd>{overview?.endpoint.admin_route_prefix}</dd>
-          </div>
-          <div>
-            <dt>Updated</dt>
-            <dd>{overview?.checked_at}</dd>
-          </div>
-        </dl>
-      </article>
-
-      <article class="card surface">
-        <p class="card-label">Capacity</p>
-        <h2>Storage envelope</h2>
-        <dl class="kv">
-          <div>
-            <dt>Chunk size</dt>
-            <dd>{formatBytes(overview?.capacity.chunk_size ?? 0)}</dd>
-          </div>
-          <div>
-            <dt>Recovery-required objects</dt>
-            <dd>{formatCount(overview?.capacity.recovery_required_objects ?? 0)}</dd>
-          </div>
-          <div>
-            <dt>Orphaned chunks</dt>
-            <dd>{formatCount(overview?.capacity.orphaned_chunks ?? 0)}</dd>
-          </div>
-          <div>
-            <dt>Data dir</dt>
-            <dd>{overview?.storage.data_dir}</dd>
-          </div>
-        </dl>
-      </article>
-    </section>
-
-    <section class="layout">
-      <article class="card surface">
-        <p class="card-label">Telegram</p>
-        <h2>Transport health</h2>
-        <dl class="kv">
-          <div>
-            <dt>Session state</dt>
-            <dd>{overview?.telegram.session_state}</dd>
-          </div>
-          <div>
-            <dt>Proxy mode</dt>
-            <dd>{bootstrap?.proxy_mode}</dd>
-          </div>
-          <div>
-            <dt>Proxy URL</dt>
-            <dd>{bootstrap?.proxy_url ?? overview?.telegram.proxy_url ?? 'none'}</dd>
-          </div>
-          <div>
-            <dt>Phone number</dt>
-            <dd>{overview?.telegram.phone_number ?? bootstrap?.phone_number ?? 'not set'}</dd>
-          </div>
-        </dl>
-      </article>
-
-      <article class="card surface">
-        <p class="card-label">Bootstrap checks</p>
-        <h2>First-run readiness</h2>
-        <ul class="checks">
-          {#each bootstrap?.checks ?? [] as check}
-            <li class:check-ok={check.ok} class:check-fail={!check.ok}>
-              <span>{check.label}</span>
-              <small>{check.detail}</small>
-            </li>
-          {/each}
-        </ul>
-      </article>
-    </section>
+          <button class="primary" on:click={makeUser} disabled={busy || !newUsername || !newPassword}>
+            Add user
+          </button>
+        </div>
+      </section>
+    {/if}
   {/if}
 
   {#if message}
     <section class="toast success">{message}</section>
   {/if}
-
   {#if error}
     <section class="toast error">{error}</section>
   {/if}
 </main>
+
+<style>
+  .active {
+    font-weight: 700;
+    text-decoration: underline;
+  }
+  .error-hint {
+    color: var(--danger, #b00020);
+  }
+  .row-inline {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 12px 0;
+  }
+  .row-inline input {
+    flex: 1;
+  }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin: 10px 0;
+  }
+  .nested-form {
+    margin-top: 16px;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .kv-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+  }
+  .kv-table th,
+  .kv-table td {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid color-mix(in srgb, var(--text, #172033) 14%, transparent);
+  }
+  .btn-link {
+    background: none;
+    border: none;
+    color: var(--accent, #0d7a6d);
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+    font: inherit;
+  }
+  .crumb-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .crumb-sep {
+    margin: 0 2px;
+    color: var(--text, #172033);
+    opacity: 0.4;
+  }
+  .muted {
+    color: var(--text, #172033);
+    opacity: 0.5;
+  }
+</style>

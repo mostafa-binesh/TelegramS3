@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Error)]
 pub enum MetadataError {
@@ -1187,6 +1187,279 @@ impl MetadataStore {
     }
 }
 
+// ---- Auth / operator-account storage (phase 9). Rows live in the same single-writer
+// metadata.sqlite so a backup/restore of the store already covers user + session state. ----
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbUser {
+    pub id: String,
+    pub username: String,
+    pub password_hash: String,
+    pub role: String,
+    pub display_name: String,
+    pub disabled: bool,
+    pub token_version: i64,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbSession {
+    pub cookie_id: String,
+    pub user_id: String,
+    pub token_version: i64,
+    pub issued_at: OffsetDateTime,
+    pub expires_at: OffsetDateTime,
+    pub created_ip: Option<String>,
+    pub revoked_at: Option<OffsetDateTime>,
+}
+
+fn row_user(
+    connection: &Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::ToSql],
+) -> Result<Option<DbUser>, MetadataError> {
+    let mut stmt = connection.prepare(sql)?;
+    let mut rows = stmt.query(params)?;
+    let row = match rows.next()? {
+        Some(row) => row,
+        None => return Ok(None),
+    };
+    Ok(Some(read_user_row(row)?))
+}
+
+fn read_user_row(row: &rusqlite::Row<'_>) -> Result<DbUser, MetadataError> {
+    Ok(DbUser {
+        id: row.get(0)?,
+        username: row.get(1)?,
+        password_hash: row.get(2)?,
+        role: row.get(3)?,
+        display_name: row.get(4)?,
+        disabled: row.get::<_, i64>(5)? != 0,
+        token_version: row.get(6)?,
+        created_at: parse_timestamp(&row.get::<_, String>(7)?, 7)?,
+        updated_at: parse_timestamp(&row.get::<_, String>(8)?, 8)?,
+    })
+}
+
+fn parse_timestamp(value: &str, index: usize) -> Result<OffsetDateTime, MetadataError> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+        .map_err(MetadataError::Sqlite)
+}
+
+impl MetadataStore {
+    pub fn create_user(
+        &self,
+        id: &str,
+        username: &str,
+        password_hash: &str,
+        role: &str,
+        display_name: &str,
+    ) -> Result<DbUser, MetadataError> {
+        let now = timestamp_now()?;
+        self.with_connection(|connection| {
+            connection.execute(
+                r#"
+                INSERT INTO users (
+                    id, username, password_hash, role, display_name,
+                    disabled, token_version, created_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?6)
+                "#,
+                params![id, username, password_hash, role, display_name, now],
+            )?;
+            Ok(())
+        })?;
+        self.get_user(username)?
+            .ok_or_else(|| MetadataError::InvalidManifest("created user not readable".to_string()))
+    }
+
+    pub fn get_user(&self, username: &str) -> Result<Option<DbUser>, MetadataError> {
+        self.with_connection(|connection| {
+            row_user(
+                connection,
+                "SELECT id, username, password_hash, role, display_name, disabled, token_version, created_at, updated_at
+                 FROM users WHERE username = ?1",
+                &[&username],
+            )
+        })
+    }
+
+    pub fn get_user_by_id(&self, id: &str) -> Result<Option<DbUser>, MetadataError> {
+        self.with_connection(|connection| {
+            row_user(
+                connection,
+                "SELECT id, username, password_hash, role, display_name, disabled, token_version, created_at, updated_at
+                 FROM users WHERE id = ?1",
+                &[&id],
+            )
+        })
+    }
+
+    pub fn list_users(&self) -> Result<Vec<DbUser>, MetadataError> {
+        self.with_connection(|connection| {
+            let mut stmt = connection.prepare(
+                "SELECT id, username, password_hash, role, display_name, disabled, token_version, created_at, updated_at
+                 FROM users ORDER BY username ASC",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                out.push(read_user_row(row)?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn user_count(&self) -> Result<u64, MetadataError> {
+        self.with_connection(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, u64>(0))?)
+        })
+    }
+
+    pub fn delete_user(&self, id: &str) -> Result<(), MetadataError> {
+        self.with_connection(|connection| {
+            connection.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+            Ok(())
+        })
+    }
+
+    pub fn set_user_password(&self, id: &str, password_hash: &str) -> Result<(), MetadataError> {
+        let now = timestamp_now()?;
+        self.with_connection(|connection| {
+            connection.execute(
+                r#"
+                UPDATE users
+                SET password_hash = ?2, token_version = token_version + 1, updated_at = ?3
+                WHERE id = ?1
+                "#,
+                params![id, password_hash, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn set_user_disabled(&self, id: &str, disabled: bool) -> Result<(), MetadataError> {
+        let now = timestamp_now()?;
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE users SET disabled = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, disabled, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn current_token_version(&self, id: &str) -> Result<i64, MetadataError> {
+        self.with_connection(|connection| {
+            let version = connection
+                .query_row(
+                    "SELECT token_version FROM users WHERE id = ?1",
+                    params![id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            Ok(version)
+        })
+    }
+
+    pub fn insert_session(&self, session: &DbSession) -> Result<(), MetadataError> {
+        let (issued_at, expires_at) = (session.issued_at, session.expires_at);
+        self.with_connection(|connection| {
+            connection.execute(
+                r#"
+                INSERT INTO admin_sessions (
+                    cookie_id, user_id, token_version, issued_at, expires_at, created_ip, revoked_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+                "#,
+                params![
+                    session.cookie_id,
+                    session.user_id,
+                    session.token_version,
+                    issued_at
+                        .format(&Rfc3339)
+                        .map_err(MetadataError::TimeFormat)?,
+                    expires_at
+                        .format(&Rfc3339)
+                        .map_err(MetadataError::TimeFormat)?,
+                    session.created_ip,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn get_session(&self, cookie_id: &str) -> Result<Option<DbSession>, MetadataError> {
+        self.with_connection(|connection| {
+            let mut stmt = connection.prepare(
+                r#"
+                SELECT cookie_id, user_id, token_version, issued_at, expires_at, created_ip, revoked_at
+                FROM admin_sessions WHERE cookie_id = ?1
+                "#,
+            )?;
+            let mut rows = stmt.query(params![cookie_id])?;
+            let row = match rows.next()? {
+                Some(row) => row,
+                None => return Ok(None),
+            };
+            let revoked_at: Option<String> = row.get(6)?;
+            Ok(Some(DbSession {
+                cookie_id: row.get(0)?,
+                user_id: row.get(1)?,
+                token_version: row.get(2)?,
+                issued_at: parse_timestamp(&row.get::<_, String>(3)?, 3)?,
+                expires_at: parse_timestamp(&row.get::<_, String>(4)?, 4)?,
+                created_ip: row.get(5)?,
+                revoked_at: match revoked_at {
+                    Some(value) => Some(parse_timestamp(&value, 6)?),
+                    None => None,
+                },
+            }))
+        })
+    }
+
+    pub fn revoke_session(&self, cookie_id: &str) -> Result<(), MetadataError> {
+        let now = timestamp_now()?;
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE admin_sessions SET revoked_at = ?2 WHERE cookie_id = ?1 AND revoked_at IS NULL",
+                params![cookie_id, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn revoke_user_sessions(&self, user_id: &str) -> Result<(), MetadataError> {
+        let now = timestamp_now()?;
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE admin_sessions SET revoked_at = ?2 WHERE user_id = ?1 AND revoked_at IS NULL",
+                params![user_id, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn sweep_sessions(&self, cutoff: OffsetDateTime) -> Result<u64, MetadataError> {
+        self.with_connection(|connection| {
+            let n = connection.execute(
+                "DELETE FROM admin_sessions WHERE revoked_at IS NOT NULL AND revoked_at < ?1",
+                params![cutoff.format(&Rfc3339).map_err(MetadataError::TimeFormat)?],
+            )?;
+            Ok(n as u64)
+        })
+    }
+}
+
 fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     let current_version = read_schema_version(connection)?;
     if current_version > SCHEMA_VERSION {
@@ -1303,6 +1576,33 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
 
         CREATE INDEX IF NOT EXISTS idx_multipart_parts_upload
             ON multipart_parts(upload_id, part_number);
+
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'admin',
+            display_name TEXT NOT NULL DEFAULT '',
+            disabled INTEGER NOT NULL DEFAULT 0,
+            token_version INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+
+        CREATE TABLE IF NOT EXISTS admin_sessions (
+            cookie_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            token_version INTEGER NOT NULL,
+            issued_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_ip TEXT,
+            revoked_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(user_id);
         "#,
     )?;
     tx.execute(
@@ -1861,5 +2161,99 @@ mod tests {
         let store = MetadataStore::open(&path).expect("open");
         assert_eq!(store.schema_version().expect("schema"), SCHEMA_VERSION);
         assert_eq!(store.status().expect("status").active_objects, 0);
+    }
+
+    #[test]
+    fn users_roundtrip_and_case_preservation() {
+        let store = MetadataStore::open_in_memory().expect("open");
+        let user = store
+            .create_user(
+                "u1",
+                "admin",
+                "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0cw$hashhashhashhashhashhashhashhashhashhash",
+                "superadmin",
+                "Op One",
+            )
+            .expect("create");
+        assert_eq!(user.role, "superadmin");
+        let fetched = store.get_user("admin").expect("get").expect("exists");
+        assert_eq!(fetched.id, "u1");
+        assert!(!fetched.password_hash.is_empty());
+        assert_eq!(store.user_count().expect("count"), 1);
+
+        let listed = store.list_users().expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].username, "admin");
+
+        let missing = store.get_user("nobody").expect("get");
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn password_change_bumps_token_version_and_revokes() {
+        let store = MetadataStore::open_in_memory().expect("open");
+        let user = store
+            .create_user("u1", "bob", "old-hash-line", "admin", "")
+            .expect("create");
+        assert_eq!(user.token_version, 0);
+
+        let now = OffsetDateTime::now_utc();
+        store
+            .insert_session(&DbSession {
+                cookie_id: "c1".to_string(),
+                user_id: user.id.clone(),
+                token_version: 0,
+                issued_at: now,
+                expires_at: now + time::Duration::seconds(3600),
+                created_ip: None,
+                revoked_at: None,
+            })
+            .expect("session");
+
+        store
+            .set_user_password(&user.id, "new-hash-line")
+            .expect("password");
+        let bumped = store.get_user_by_id("u1").expect("get").expect("present");
+        assert_eq!(bumped.token_version, 1);
+
+        // Explicit revocation marks the row.
+        store.revoke_session("c1").expect("revoke");
+        let session = store.get_session("c1").expect("get").expect("present");
+        assert!(session.revoked_at.is_some());
+    }
+
+    #[test]
+    fn deleting_user_cascades_sessions() {
+        let store = MetadataStore::open_in_memory().expect("open");
+        let user = store
+            .create_user("u9", "carol", "hash", "admin", "")
+            .expect("create");
+        let now = OffsetDateTime::now_utc();
+        store
+            .insert_session(&DbSession {
+                cookie_id: "c2".to_string(),
+                user_id: user.id.clone(),
+                token_version: 0,
+                issued_at: now,
+                expires_at: now + time::Duration::seconds(3600),
+                created_ip: None,
+                revoked_at: None,
+            })
+            .expect("session");
+        store.delete_user(&user.id).expect("delete");
+        assert!(store.get_session("c2").expect("session").is_none());
+        assert_eq!(store.user_count().expect("count"), 0);
+    }
+
+    #[test]
+    fn auth_tables_created_and_migrate_is_idempotent() {
+        let store = MetadataStore::open_in_memory().expect("open");
+        assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+        // Re-running migrate is a no-op and leaves everything intact.
+        store.migrate().expect("migrate");
+        assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+        store
+            .create_user("uA", "dave", "hash", "admin", "")
+            .expect("create after migrate");
     }
 }

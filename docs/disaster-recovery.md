@@ -8,6 +8,13 @@
 4. Rebuild the local index with `telegram-s3 index rebuild`.
 5. Verify object counts and checksum samples with `telegram-s3 index verify`.
 
+> The same `metadata.sqlite` now also stores operator accounts and session
+> tombstones (schema v4). A backup/restore of that file restores both object
+> state and who can sign in. If accounts are lost, re-provision the first
+> operator with `telegram-s3 users create <username> --password <pw>` (the first
+> account becomes the superadmin). Password hashes are argon2id + per-account
+> salt and are not recoverable from the file alone.
+
 ## Telegram Manifest Lost
 
 1. Mark the object corrupt or unrecoverable.

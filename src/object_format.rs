@@ -270,6 +270,11 @@ impl ObjectFormatService {
         Ok(self.metadata.status()?)
     }
 
+    /// Reach the shared SQLite store (single writer) for operator/auth tables.
+    pub fn metadata_store(&self) -> &MetadataStore {
+        &self.metadata
+    }
+
     pub fn list_manifests(&self) -> Result<Vec<ObjectManifest>, ObjectFormatError> {
         Ok(self.metadata.list_manifests()?)
     }

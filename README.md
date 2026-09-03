@@ -28,7 +28,15 @@ Current state:
   container entrypoint that validates config before starting the server.
 - Phase 8 authenticated operator frontend is complete: the Rust server now
   serves an authenticated `/_admin` SPA and JSON API with HTTP-only cookie
-  sessions, bootstrap-secret login, overview cards, and onboarding checks.
+  sessions, overview cards, and onboarding checks.
+- Phase 9 multi-user control plane (initial slice) is in progress: operator
+  accounts are argon2id-hashed in `metadata.sqlite` (schema `4`) and managed
+  in-app or via the `telegram-s3 users` CLI (no per-user `.env`); sessions are
+  bound to a user and revocable; login is rate-limited; and guests only ever see
+  a sign-in screen. A username/password browser UI covers the overview, operator
+  management, and a bucket/object (folder) browser. Deferred Phase-9 follow-ups:
+  bounded binary content streaming and the in-browser Telegram onboarding
+  wizard. See `docs/adr/0006-multiuser-control-plane.md`.
 - GitHub Actions can now publish the Docker image to GHCR on pushes to `main`
   and on version tags, so you can pull a ready-made image onto a server
   without rebuilding locally.
@@ -53,6 +61,7 @@ Key documents:
 - `docs/adr/0001-rustfs-integration-strategy.md`
 - `docs/adr/0002-phase-6-hardening-boundaries.md`
 - `docs/adr/0004-docker-packaging-and-bootstrap-boundary.md`
+- `docs/adr/0006-multiuser-control-plane.md`
 - `docs/metadata-store.md`
 
 The project intentionally treats Telegram as a constrained remote object store,
