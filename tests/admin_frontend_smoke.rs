@@ -162,6 +162,47 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     assert_eq!(users.status, 200);
     assert!(users.body.contains("\"admin\""));
 
+    let create_bucket = http_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/buckets",
+        &[
+            ("Cookie", cookie_header.as_str()),
+            ("X-CSRF-Token", csrf.as_str()),
+        ],
+        br#"{"name":"ui-created"}"#,
+    )
+    .await;
+    assert_eq!(create_bucket.status, 201);
+    assert!(create_bucket.body.contains("\"name\":\"ui-created\""));
+
+    let buckets = http_request(
+        &client,
+        &bind_addr,
+        "GET",
+        "/_admin/api/buckets",
+        &[("Cookie", cookie_header.as_str())],
+        b"",
+    )
+    .await;
+    assert_eq!(buckets.status, 200);
+    assert!(buckets.body.contains("\"ui-created\""));
+
+    let delete_bucket = http_request(
+        &client,
+        &bind_addr,
+        "DELETE",
+        "/_admin/api/buckets/ui-created",
+        &[
+            ("Cookie", cookie_header.as_str()),
+            ("X-CSRF-Token", csrf.as_str()),
+        ],
+        b"",
+    )
+    .await;
+    assert_eq!(delete_bucket.status, 200);
+
     // Unauthenticated access to the management API must be rejected.
     let unauth = http_request(&client, &bind_addr, "GET", "/_admin/api/users", &[], b"").await;
     assert_eq!(unauth.status, 401);

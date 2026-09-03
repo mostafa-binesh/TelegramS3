@@ -63,7 +63,8 @@
    `docker compose exec telegram-s3 telegram-s3 doctor` to confirm the
    bootstrap path before returning traffic.
 6. Use the authenticated `/_admin` dashboard to recheck storage overview,
-   capacity, Telegram readiness, and bootstrap status before resuming writes.
+   capacity, Telegram readiness, bucket visibility (including buckets created
+   from the UI), and bootstrap status before resuming writes.
 
 ## Telegram Session Loss
 

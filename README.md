@@ -50,8 +50,8 @@ committed chunk files on local durable storage; the Telegram transport layer
 - **Bounded memory everywhere** — uploads and downloads stream chunk-by-chunk;
   no whole-object RAM buffering (an explicit project invariant).
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
-  operator account management, bucket/object browser with per-file upload and
-  ranged download, and the Telegram setup wizard.
+  operator account management, in-app bucket creation, bucket/object browser
+  with per-file upload and ranged download, and the Telegram setup wizard.
 - **Operational tooling** — a `telegram-s3` CLI (`users`, `config check`,
   `doctor`, `db`, `index`, `repair`, `gc --dry-run`), loopback-only health and
   metrics endpoints, and a production Docker image published to GHCR.
@@ -136,7 +136,7 @@ recovery procedures.
 The published image is `ghcr.io/mostafa-binesh/telegrams3`
 (built on every push to `main` and on `v*` tags; see
 [.github/workflows/publish-docker-image.yml](.github/workflows/publish-docker-image.yml)).
-Pinning a version tag such as `v0.4.0` is recommended for production.
+Pinning a version tag such as `v0.4.2` is recommended for production.
 
 ```bash
 export TELEGRAM_API_ID=123456          # from my.telegram.org
@@ -159,7 +159,7 @@ docker run -d --name telegram-s3 \
   -v telegram-s3-metadata:/var/lib/telegram-s3/metadata \
   -v telegram-s3-data:/var/lib/telegram-s3/data \
   -v telegram-s3-session:/var/lib/telegram-s3/session \
-  ghcr.io/mostafa-binesh/telegrams3:latest
+  ghcr.io/mostafa-binesh/telegrams3:v0.4.2
 ```
 
 Or with the bundled [docker-compose.yml](docker-compose.yml) (local build):
@@ -183,8 +183,9 @@ server is down. See [docs/configuration.md](docs/configuration.md).
 
 Open <http://localhost:9000/_admin>, sign in with the account above, and use the
 in-browser **Telegram onboarding wizard** (phone → code → cloud password when
-required) to authorize the Telegram session the store runs on. The readiness
-panel flips once the session is authorized.
+required) to authorize the single Telegram session the store runs on. Operator
+accounts in the "Operators" tab are separate from that Telegram login. The
+readiness panel flips once the session is authorized.
 
 ### 4. Use it as S3
 
@@ -265,7 +266,8 @@ See [SECURITY.md](SECURITY.md), [THREAT_MODEL.md](THREAT_MODEL.md), and
 `/_admin` is an authenticated Svelte single-page app served by the Rust server
 on the public listener. It provides a storage overview, endpoint and capacity
 details, Telegram readiness, operator account management (superadmin-only),
-and a bucket/object browser with per-file upload and full/range download —
+in-app bucket creation, and a bucket/object browser with per-file upload and
+full/range download -
 streamed through the same bounded, checksum-verified chunk paths as the S3 data
 plane. Guests see only the sign-in screen; every management and content API is
 gated behind a user-bound session with CSRF protection.

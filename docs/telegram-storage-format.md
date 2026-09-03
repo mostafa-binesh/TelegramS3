@@ -113,7 +113,7 @@ repo, that behavior is implemented by the versioned metadata store described in
 
 The database tracks:
 
-- bucket rows
+- bucket rows (created through the S3 API or the authenticated `/_admin` UI)
 - committed objects
 - staging uploads
 - tombstones

@@ -51,16 +51,18 @@ surfaces, not S3 compatibility features, so they are documented separately.
 - Login is rate-limited with per-account lockout; passwords/session state are
   not stored in browser storage.
 - The dashboard reports storage overview, endpoint details, capacity, Telegram
-  readiness, operator accounts (superadmin-only add/remove), and a
-  bucket/object browser (prefix folders + directory markers + delete + per-file
-  **upload/download**). Binary content is streamed through the same chunk writer
-  and the shared bounded reader as the S3 data plane: uploads are
+  readiness, operator accounts (superadmin-only add/remove), in-app bucket
+  creation, and a bucket/object browser (prefix folders + directory markers +
+  delete + per-file **upload/download**). Binary content is streamed through
+  the same chunk writer and the shared bounded reader as the S3 data plane:
+  uploads are
   `POST /_admin/api/objects/content?bucket&key`, downloads are
   `GET`/`HEAD` with an optional `Range` (`206`/`Content-Range`).
 - The operator UI hosts an in-browser **Telegram onboarding wizard**
   (`/telegram/wizard/{state,begin,submit-code,submit-password,cancel}`) that
   drives the real single-account login (phone → code → cloud password when
-  required) behind the authenticated, CSRF-protected session.
+  required) behind the authenticated, CSRF-protected session. This authorizes
+  the storage account for the server, not an operator record in the dashboard.
 - Bulk/folder download or server-side ZIP is **not** available at this level
   (avoiding whole-object RAM buffering) and is an explicit future item.
 - The operator UI is not part of the S3 compatibility contract; the `/_admin`

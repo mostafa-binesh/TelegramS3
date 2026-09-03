@@ -94,6 +94,19 @@ export function listBuckets(csrf?: string | null) {
   return requestJson<BucketsState>('/buckets', csrf);
 }
 
+export function createBucket(csrf?: string | null, name = '') {
+  return requestJson<{ name: string; created_at: string }>('/buckets', csrf, {
+    method: 'POST',
+    body: { name }
+  });
+}
+
+export function deleteBucket(csrf?: string | null, name = '') {
+  return requestJson<{ ok?: boolean }>(`/buckets/${encodeURIComponent(name)}`, csrf, {
+    method: 'DELETE'
+  });
+}
+
 export function listObjects(
   csrf: string | null | undefined,
   bucket: string,

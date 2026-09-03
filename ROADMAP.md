@@ -151,7 +151,7 @@ Completed work (initial slice):
 - signed HTTP-only session cookies bound to a `admin_sessions` row; logout revokes that row; password change / user delete revoke all of that user's sessions via `token_version`
 - `/_admin/api/session` (whoami, guest-safe), `/session/login`, `/session/logout`, `/session/refresh`, with CSRF on mutating endpoints
 - user management API: `GET/POST /users`, `DELETE /users/{id}`, per-user password change; superadmin gets account CRUD
-- in-browser management UI: username/password sign-in, overview, operator list, and a (JSON) bucket/object browser with prefix folders + directory markers + file/folder delete
+- in-browser management UI: username/password sign-in, overview, operator list, in-app bucket creation, and a (JSON) bucket/object browser with prefix folders + directory markers + file/folder delete
 - CLI `users` family (`create`, `list`, `password`, `delete`, `status`); first account is forced to superadmin and is provisionable while the server is down
 - login rate limiting / lockout (in-process per-IP + per-account buckets)
 - unit + integration smoke coverage for auth, migrations, user CRUD, and the credential login lifecycle
@@ -164,7 +164,7 @@ Completed work (content streaming + wizard increment):
 - full + ranged download answering over the same authenticated surface: `GET`/`HEAD /_admin/api/objects/content` with range requests returning `206` + `Content-Range`, correct `ETag`/`Content-Length`/`Content-Disposition`
 - both the S3 `get_object` and the admin download now feed a single shared chunk reader (`ObjectFormatService::read_spans_to_stream`), so byte-for-byte S3 output is preserved and memory stays bounded per chunk
 - in-browser Telegram onboarding wizard behind a kept-alive single-account client: authenticated `/telegram/wizard/{state,begin,submit-code,submit-password,cancel}` with a staged, single-in-flight driver (second begin → `409`), mock-runtime test path, and 2FA (cloud-password) stage surfaced only when Telegram asks for it
-- the Svelte UI gains per-file upload + progress, per-row Download, and a three-step Telegram set-up flow; readiness panel flips once authorised
+- the Svelte UI gains per-file upload + progress, per-row Download, in-app bucket creation, and a three-step Telegram set-up flow; readiness panel flips once authorised
 
 Remaining Phase-9 follow-ups (explicitly out of this increment, see ADR-0006 / ROADMAP): bulk/folder download or server-side ZIP (no whole-RAM buffering), drag-in of nested directory trees, browser resumable-multipart upload negotiation, and moving object bytes on/off Telegram in earnest (the data plane still reads/writes committed local chunk files; `telegram_document_id` is `local:`).
 

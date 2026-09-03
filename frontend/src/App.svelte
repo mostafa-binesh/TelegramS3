@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import {
+    createBucket,
     createFolder,
     createUser,
+    deleteBucket,
     deleteUser,
     getOverview,
     getSession,
@@ -44,14 +46,14 @@
   let newRole = 'admin';
 
   let buckets: BucketInfo[] = [];
+  let newBucket = '';
   let selectedBucket = '';
   let currentPrefix = '';
   let listing: ObjectsState | null = null;
   let newFolder = '';
 
-  // Telegram setup entry (Overview, gated on backend readiness).
   let showWizard = false;
-  let wizardDismissed = false;
+  $: canManageOperators = session?.user?.role === 'superadmin';
 
   function telegramNeedsSetup(): boolean {
     const auth = (overview?.checks ?? []).find((check) => check.label === 'Telegram auth');
@@ -124,7 +126,6 @@
   }
 
   async function refreshOverview() {
-    const csrf = session?.csrf_token;
     try {
       overview = await getOverview();
     } catch (cause) {
@@ -143,7 +144,6 @@
       buckets = [];
       listing = null;
       showWizard = false;
-      wizardDismissed = false;
       view = 'overview';
       message = 'Signed out.';
     } catch (cause) {
@@ -159,7 +159,6 @@
 
   async function handleWizardAuthorized() {
     showWizard = false;
-    wizardDismissed = true;
     message = 'Telegram account authorized.';
     await refreshOverview();
   }
@@ -169,7 +168,10 @@
     error = '';
     if (next === 'overview') await refreshOverview();
     if (next === 'users') await refreshUsers();
-    if (next === 'buckets') await refreshBuckets();
+    if (next === 'buckets') {
+      await refreshBuckets();
+      if (selectedBucket) await refreshObjects();
+    }
   }
 
   async function refreshUsers() {
@@ -251,6 +253,44 @@
     }
   }
 
+  async function makeBucket() {
+    const name = newBucket.trim();
+    if (!name) return;
+    busy = true;
+    error = '';
+    try {
+      await createBucket(session?.csrf_token, name);
+      newBucket = '';
+      message = 'Bucket created.';
+      await refreshBuckets();
+      await refreshOverview();
+      await openBucket(name);
+    } catch (cause) {
+      error = normalizeError(cause);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function dropBucket(name: string) {
+    if (!confirm(`Delete bucket "${name}"? It must already be empty.`)) return;
+    busy = true;
+    error = '';
+    try {
+      await deleteBucket(session?.csrf_token, name);
+      if (selectedBucket === name) {
+        await exitBucket();
+      }
+      message = 'Bucket deleted.';
+      await refreshBuckets();
+      await refreshOverview();
+    } catch (cause) {
+      error = normalizeError(cause);
+    } finally {
+      busy = false;
+    }
+  }
+
   function enterFolder(name: string) {
     currentPrefix = `${currentPrefix}${name}/`;
     void refreshObjects();
@@ -305,8 +345,8 @@
       <p class="eyebrow">Authenticated management console</p>
       <h1>Telegram-backed storage.</h1>
       <p class="lede">
-        Manage operator accounts and browse buckets behind a per-user login. Object
-        transfer and the in-browser Telegram onboarding wizard are the next slice.
+        Authorize the Telegram storage account, manage operator access, and browse
+        buckets and objects behind a signed-in admin session.
       </p>
     </div>
     <div class="hero-panel">
@@ -371,43 +411,49 @@
       <div class="toolbar-actions">
         <button class:active={view === 'overview'} on:click={() => switchView('overview')}>Overview</button>
         <button class:active={view === 'buckets'} on:click={() => switchView('buckets')}>Buckets</button>
-        <button class:active={view === 'users'} on:click={() => switchView('users')}>Users</button>
+        <button class:active={view === 'users'} on:click={() => switchView('users')}>Operators</button>
         <button class="ghost" on:click={handleLogout} disabled={busy}>Logout</button>
       </div>
     </section>
 
     {#if view === 'overview'}
-      {#if telegramNeedsSetup() && !wizardDismissed}
-        {#if !showWizard}
-          <article class="card surface tg-callout">
-            <div class="tg-banner">
-              <div class="tg-copy">
-                <p class="card-label">Telegram</p>
-                <h2>Authorize the Telegram account used for storage</h2>
-                <p>
-                  Before objects can be written, sign in once so the store can talk to the
-                  storage chat that backs it. This is a short wizard from the Overview page —
-                  no terminal access required.
-                </p>
-              </div>
-              <div class="tg-actions">
-                <button class="primary" type="button" on:click={() => toggleWizard(true)}>
-                  Set up Telegram login
-                </button>
-                <button class="ghost" type="button" on:click={() => (wizardDismissed = true)}>
-                  Dismiss
-                </button>
-              </div>
-            </div>
-          </article>
-        {:else}
-          <TelegramWizard
-            csrf={session?.csrf_token}
-            prefillPhone={undefined}
-            onDone={handleWizardAuthorized}
-          />
-          <button class="ghost" type="button" on:click={() => toggleWizard(false)}>Close wizard</button>
-        {/if}
+      <article class="card surface tg-callout">
+        <div class="tg-banner">
+          <div class="tg-copy">
+            <p class="card-label">Telegram</p>
+            <h2>
+              {telegramNeedsSetup()
+                ? 'Authorize the Telegram account used for storage'
+                : 'Telegram storage account is authorized'}
+            </h2>
+            <p>
+              This wizard signs in the single Telegram account that backs storage for the
+              whole server. Operator accounts are separate and live in the Operators tab.
+            </p>
+            <p class="fine-print">
+              Current session: {overview?.telegram?.session_state ?? 'Unknown'}
+              {#if overview?.telegram?.phone_number}
+                {' '}for {overview.telegram.phone_number}
+              {/if}
+            </p>
+          </div>
+          <div class="tg-actions">
+            <button class="primary" type="button" on:click={() => toggleWizard(true)}>
+              {telegramNeedsSetup() ? 'Set up Telegram login' : 'Reauthorize Telegram'}
+            </button>
+            <button class="ghost" type="button" on:click={() => switchView('users')}>
+              Manage operators
+            </button>
+          </div>
+        </div>
+      </article>
+      {#if showWizard}
+        <TelegramWizard
+          csrf={session?.csrf_token}
+          prefillPhone={overview?.telegram?.phone_number ?? undefined}
+          onDone={handleWizardAuthorized}
+        />
+        <button class="ghost" type="button" on:click={() => toggleWizard(false)}>Close wizard</button>
       {/if}
       <section class="cards">
         <article class="card metric">
@@ -450,20 +496,47 @@
       </section>
     {:else if view === 'buckets'}
       <section class="card surface">
-        <p class="card-label">File browser</p>
+        <div class="section-head">
+          <div>
+            <p class="card-label">Buckets and files</p>
+            <h2>{selectedBucket ? selectedBucket : 'Choose or create a bucket'}</h2>
+          </div>
+          <div class="toolbar-actions">
+            <button class="ghost" type="button" on:click={refreshBuckets} disabled={busy}>Refresh</button>
+            {#if selectedBucket}
+              <button class="ghost" type="button" on:click={() => dropBucket(selectedBucket)} disabled={busy}>
+                Delete empty bucket
+              </button>
+            {/if}
+          </div>
+        </div>
         {#if !selectedBucket}
-          <h2>Choose a bucket</h2>
+          <form class="row-inline" on:submit|preventDefault={makeBucket}>
+            <input bind:value={newBucket} placeholder="new bucket name" />
+            <button class="primary" type="submit" disabled={busy || !newBucket.trim()}>
+              Create bucket
+            </button>
+          </form>
+          <p class="fine-print">
+            The browser only shows existing buckets. Create one here or through any S3
+            client, then open it to browse files.
+          </p>
           <ul class="checks">
             {#each buckets as bucket}
               <li>
-                <button type="button" class="btn-link" on:click={() => openBucket(bucket.name)}>
-                  {bucket.name}
-                  <small>— created {bucket.created_at}</small>
-                </button>
+                <div class="bucket-row">
+                  <button type="button" class="btn-link" on:click={() => openBucket(bucket.name)}>
+                    {bucket.name}
+                    <small>- created {bucket.created_at}</small>
+                  </button>
+                  <button class="ghost" type="button" on:click={() => dropBucket(bucket.name)} disabled={busy}>
+                    Delete
+                  </button>
+                </div>
               </li>
             {/each}
             {#if buckets.length === 0}
-              <li class="fine-print">No buckets yet — create one with an S3 client.</li>
+              <li class="fine-print">No buckets yet. Create one above to start the file browser.</li>
             {/if}
           </ul>
         {:else}
@@ -526,6 +599,10 @@
       <section class="card surface">
         <p class="card-label">Operators</p>
         <h2>Accounts</h2>
+        <p class="fine-print">
+          These are dashboard operator accounts, not Telegram contacts. The Telegram
+          storage login lives on the Overview page.
+        </p>
         <table class="kv-table">
           <thead><tr><th>Username</th><th>Role</th><th>State</th><th></th></tr></thead>
           <tbody>
@@ -534,7 +611,11 @@
                 <td>{user.username}{#if user.display_name} <small>({user.display_name})</small>{/if}</td>
                 <td>{user.role}</td>
                 <td>{user.disabled ? 'disabled' : 'enabled'}</td>
-                <td><button class="ghost" on:click={() => dropUser(user.id)} disabled={busy}>Remove</button></td>
+                <td>
+                  {#if canManageOperators}
+                    <button class="ghost" on:click={() => dropUser(user.id)} disabled={busy}>Remove</button>
+                  {/if}
+                </td>
               </tr>
             {/each}
             {#if users.length === 0}
@@ -543,32 +624,36 @@
           </tbody>
         </table>
 
-        <div class="form-card surface nested-form">
+        <div class="nested-form">
           <p class="card-label">Add account</p>
-          <div class="grid-2">
-            <label>
-              <span>Username</span>
-              <input bind:value={newUsername} autocomplete="off" />
-            </label>
-            <label>
-              <span>Display name</span>
-              <input bind:value={newDisplay} autocomplete="off" />
-            </label>
-            <label>
-              <span>Password (12+ chars)</span>
-              <input bind:value={newPassword} type="password" autocomplete="new-password" />
-            </label>
-            <label>
-              <span>Role</span>
-              <select bind:value={newRole}>
-                <option value="admin">admin</option>
-                <option value="superadmin">superadmin</option>
-              </select>
-            </label>
-          </div>
-          <button class="primary" on:click={makeUser} disabled={busy || !newUsername || !newPassword}>
-            Add user
-          </button>
+          {#if canManageOperators}
+            <div class="grid-2">
+              <label>
+                <span>Username</span>
+                <input bind:value={newUsername} autocomplete="off" />
+              </label>
+              <label>
+                <span>Display name</span>
+                <input bind:value={newDisplay} autocomplete="off" />
+              </label>
+              <label>
+                <span>Password (12+ chars)</span>
+                <input bind:value={newPassword} type="password" autocomplete="new-password" />
+              </label>
+              <label>
+                <span>Role</span>
+                <select bind:value={newRole}>
+                  <option value="admin">admin</option>
+                  <option value="superadmin">superadmin</option>
+                </select>
+              </label>
+            </div>
+            <button class="primary" on:click={makeUser} disabled={busy || !newUsername || !newPassword}>
+              Add operator
+            </button>
+          {:else}
+            <p class="fine-print">Only superadmins can add or remove operator accounts.</p>
+          {/if}
         </div>
       </section>
     {/if}
@@ -594,6 +679,7 @@
     display: flex;
     gap: 8px;
     align-items: center;
+    flex-wrap: wrap;
     margin: 12px 0;
   }
   .row-inline input {
@@ -607,8 +693,8 @@
   }
   .nested-form {
     margin-top: 16px;
-    padding-left: 0;
-    padding-right: 0;
+    padding-top: 16px;
+    border-top: 1px solid color-mix(in srgb, var(--text, #172033) 10%, transparent);
   }
   .kv-table {
     width: 100%;
@@ -662,6 +748,23 @@
   }
   .row-download:hover {
     text-decoration: underline;
+  }
+  .section-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .section-head h2 {
+    margin: 0.25rem 0 0;
+  }
+  .bucket-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
   }
   .tg-callout {
     margin-bottom: 1rem;

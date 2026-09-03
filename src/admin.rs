@@ -7,10 +7,11 @@
 //! invalidated globally on password change / user disable via `token_version`.
 //!
 //! Phase-9 core scope: login / logout / refresh / whoami, user CRUD, and the
-//! JSON file-management surface (buckets + prefix/folder listing + zero-byte
-//! directory markers + tombstones). Binary content streaming (upload/download)
-//! and the in-browser Telegram onboarding wizard are designed next and are not
-//! yet wired here (see ADR-0006 / ROADMAP).
+//! JSON file-management surface (bucket create/list/delete-empty +
+//! prefix/folder listing + zero-byte directory markers + tombstones). Binary
+//! content streaming (upload/download) and the in-browser Telegram onboarding
+//! wizard are now wired here as the landed follow-up increment (see ADR-0006 /
+//! ROADMAP).
 
 use crate::auth::{self, AuthError, LoginLimiter};
 use crate::config::AppConfig;
@@ -129,6 +130,12 @@ struct ChangePasswordRequest {
 struct CreateFolderRequest {
     bucket: String,
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CreateBucketRequest {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,6 +342,8 @@ impl AdminUiState {
                 self.handle_delete_user(p, &principal)
             }
             (Method::GET, "buckets") => self.handle_list_buckets(),
+            (Method::POST, "buckets") => self.handle_create_bucket(request).await,
+            (Method::DELETE, p) if p.starts_with("buckets/") => self.handle_delete_bucket(p),
             (Method::GET, "objects") => self.handle_list_objects(request),
             (Method::POST, "objects/folder") => {
                 self.handle_create_folder(request, &principal).await
@@ -678,6 +687,38 @@ impl AdminUiState {
             })
             .collect::<Vec<_>>();
         json_response(StatusCode::OK, serde_json::json!({ "buckets": wire }))
+    }
+
+    async fn handle_create_bucket(&self, request: Request<Incoming>) -> Response<Body> {
+        let CreateBucketRequest { name } = match read_json::<CreateBucketRequest>(request).await {
+            Ok(body) => body,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid bucket payload"),
+        };
+        let bucket = name.trim();
+        if bucket.is_empty() {
+            return json_error(StatusCode::BAD_REQUEST, "bucket name is required");
+        }
+        match self.object_format.create_bucket(bucket) {
+            Ok(created) => json_response(
+                StatusCode::CREATED,
+                BucketEntryWire {
+                    name: created.name,
+                    created_at: rfc3339(created.created_at),
+                },
+            ),
+            Err(error) => bucket_error_response(&error),
+        }
+    }
+
+    fn handle_delete_bucket(&self, id_path: &str) -> Response<Body> {
+        let bucket = id_path.trim_start_matches("buckets/");
+        if bucket.is_empty() {
+            return json_error(StatusCode::BAD_REQUEST, "bucket name is required");
+        }
+        match self.object_format.delete_bucket(bucket) {
+            Ok(()) => json_response(StatusCode::OK, serde_json::json!({ "ok": true })),
+            Err(error) => bucket_error_response(&error),
+        }
     }
 
     fn handle_list_objects(&self, request: Request<Incoming>) -> Response<Body> {
@@ -1577,6 +1618,30 @@ fn auth_error_response(error: &AuthError) -> Response<Body> {
         response.headers_mut().insert("retry-after", value);
     }
     response
+}
+
+fn bucket_error_response(error: &crate::object_format::ObjectFormatError) -> Response<Body> {
+    match error {
+        crate::object_format::ObjectFormatError::Metadata(
+            crate::metadata::MetadataError::BucketAlreadyExists(name),
+        ) => json_error(
+            StatusCode::CONFLICT,
+            &format!("bucket already exists: {name}"),
+        ),
+        crate::object_format::ObjectFormatError::Metadata(
+            crate::metadata::MetadataError::BucketNotFound(name),
+        ) => json_error(StatusCode::NOT_FOUND, &format!("bucket not found: {name}")),
+        crate::object_format::ObjectFormatError::Metadata(
+            crate::metadata::MetadataError::BucketNotEmpty(name),
+        ) => json_error(StatusCode::CONFLICT, &format!("bucket not empty: {name}")),
+        crate::object_format::ObjectFormatError::Metadata(
+            crate::metadata::MetadataError::InvalidManifest(message),
+        )
+        | crate::object_format::ObjectFormatError::InvalidPlan(message) => {
+            json_error(StatusCode::BAD_REQUEST, message)
+        }
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
 }
 
 fn internal_auth(message: String) -> AuthError {
