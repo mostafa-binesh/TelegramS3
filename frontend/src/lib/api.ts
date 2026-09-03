@@ -1,9 +1,11 @@
 import type {
   BucketsState,
+  FileUploadResult,
   ObjectsState,
   OverviewState,
   SessionState,
-  UsersState
+  UsersState,
+  WizardState
 } from './types';
 
 const API_PREFIX = '/_admin/api';
@@ -115,4 +117,87 @@ export function removeObject(csrf?: string | null, bucket = '', key = '') {
     method: 'POST',
     body: { bucket, key }
   });
+}
+
+/** Absolute path for a content download/upload targeted at the given object key. */
+export function contentUrl(bucket: string, key: string) {
+  const qp = new URLSearchParams({ bucket, key });
+  return `${API_PREFIX}/objects/content?${qp.toString()}`;
+}
+
+/**
+ * Upload raw file bytes to a bucket key with per-second progress reporting.
+ * The body is sent verbatim (not JSON) and the CSRF token rides the header.
+ */
+export async function uploadObject(
+  bucket: string,
+  key: string,
+  file: Blob,
+  csrf?: string | null,
+  onProgress?: (sent: number, total: number) => void
+): Promise<FileUploadResult> {
+  const total = file.size;
+  return new Promise<FileUploadResult>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', contentUrl(bucket, key));
+    xhr.responseType = 'json';
+    xhr.withCredentials = true;
+    if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
+    if (onProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(event.loaded, total);
+      };
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const body = xhr.response as Partial<FileUploadResult> | null;
+        if (body && typeof body.size === 'number' && body.etag && body.version_id) {
+          resolve(body as FileUploadResult);
+        } else {
+          reject(new Error('upload succeeded but returned an unexpected payload'));
+        }
+      } else {
+        let message = `upload failed with ${xhr.status}`;
+        try {
+          const body = xhr.response as { error?: string };
+          if (body?.error) message = body.error;
+        } catch {
+          // fall back to HTTP status message
+        }
+        reject(new Error(message));
+      }
+    };
+    xhr.onerror = () => reject(new Error('upload request failed'));
+    xhr.onabort = () => reject(new Error('upload aborted'));
+    xhr.send(file);
+  });
+}
+
+export function getWizardState(csrf?: string | null) {
+  return requestJson<WizardState>('/telegram/wizard/state', csrf);
+}
+
+export function wizardBegin(phone: string | undefined, csrf?: string | null) {
+  return requestJson<WizardState>('/telegram/wizard/begin', csrf, {
+    method: 'POST',
+    body: phone === undefined ? {} : { phone }
+  });
+}
+
+export function wizardSubmitCode(code: string, csrf?: string | null) {
+  return requestJson<WizardState>('/telegram/wizard/submit-code', csrf, {
+    method: 'POST',
+    body: { code }
+  });
+}
+
+export function wizardSubmitPassword(password: string, csrf?: string | null) {
+  return requestJson<WizardState>('/telegram/wizard/submit-password', csrf, {
+    method: 'POST',
+    body: { password }
+  });
+}
+
+export function wizardCancel(csrf?: string | null) {
+  return requestJson<{ ok: boolean }>('/telegram/wizard/cancel', csrf, { method: 'POST' });
 }

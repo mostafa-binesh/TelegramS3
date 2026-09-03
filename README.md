@@ -29,14 +29,15 @@ Current state:
 - Phase 8 authenticated operator frontend is complete: the Rust server now
   serves an authenticated `/_admin` SPA and JSON API with HTTP-only cookie
   sessions, overview cards, and onboarding checks.
-- Phase 9 multi-user control plane (initial slice) is in progress: operator
-  accounts are argon2id-hashed in `metadata.sqlite` (schema `4`) and managed
-  in-app or via the `telegram-s3 users` CLI (no per-user `.env`); sessions are
-  bound to a user and revocable; login is rate-limited; and guests only ever see
-  a sign-in screen. A username/password browser UI covers the overview, operator
-  management, and a bucket/object (folder) browser. Deferred Phase-9 follow-ups:
-  bounded binary content streaming and the in-browser Telegram onboarding
-  wizard. See `docs/adr/0006-multiuser-control-plane.md`.
+- Phase 9 multi-user control plane is now in progress with the bounded-content
+  streaming and Telegram-wizard increment landed: operator accounts are
+  argon2id-hashed in `metadata.sqlite` (schema `4`) and managed in-app or via
+  the `telegram-s3 users` CLI (no per-user `.env`); sessions are bound to a user
+  and revocable; login is rate-limited; and guests only ever see a sign-in
+  screen. The browser UI covers overview, operator management, a bucket/object
+  browser, per-file bounded **upload/download** (full + range), and an
+  in-browser **Telegram onboarding wizard**. See
+  `docs/adr/0006-multiuser-control-plane.md`.
 - GitHub Actions can now publish the Docker image to GHCR on pushes to `main`
   and on version tags, so you can pull a ready-made image onto a server
   without rebuilding locally.

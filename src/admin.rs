@@ -18,7 +18,10 @@ use crate::manifest::ObjectManifest;
 use crate::metadata::MetadataStore;
 use crate::object_format::ObjectFormatService;
 use crate::redact::{redact_path, redact_phone_number};
-use crate::telegram::{SessionState, TelegramTransportStatus};
+use crate::telegram::{
+    LoginDriverError, LoginStage, SessionState, TelegramLoginDriver, TelegramTransport,
+    TelegramTransportStatus,
+};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use http::header::{self, HeaderValue};
@@ -28,6 +31,7 @@ use hyper::body::Incoming;
 use hyper::{Request, Response};
 use ring::hmac;
 use s3s::Body;
+use s3s::dto::StreamingBlob;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
@@ -48,7 +52,13 @@ const ADMIN_CSRF_HEADER: &str = "x-csrf-token";
 pub struct AdminUiState {
     config: AppConfig,
     object_format: Arc<ObjectFormatService>,
-    transport_status: TelegramTransportStatus,
+    /// Live/last-known Telegram transport status, writable so a successful
+    /// in-browser onboarding wizard flips the panel to authorised.
+    transport_status: Arc<std::sync::RwLock<TelegramTransportStatus>>,
+    /// Live transport kept only while an onboarding wizard is open.
+    wizard_transport: Arc<tokio::sync::Mutex<Option<Arc<TelegramTransport>>>>,
+    /// Process-wide, single in-flight onboarding flow state.
+    wizard_driver: Arc<tokio::sync::Mutex<TelegramLoginDriver>>,
     s3_addr: SocketAddr,
     admin_addr: SocketAddr,
     cookie_secret: String,
@@ -206,7 +216,9 @@ impl AdminUiState {
         Self {
             config,
             object_format,
-            transport_status,
+            transport_status: Arc::new(std::sync::RwLock::new(transport_status)),
+            wizard_transport: Arc::new(tokio::sync::Mutex::new(None)),
+            wizard_driver: Arc::new(tokio::sync::Mutex::new(TelegramLoginDriver::new())),
             s3_addr,
             admin_addr,
             cookie_secret,
@@ -232,6 +244,29 @@ impl AdminUiState {
             return self.handle_api(request).await;
         }
         self.handle_static(request).await
+    }
+
+    fn telegram_status_snapshot(&self) -> TelegramTransportStatus {
+        self.transport_status
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| self.transport_status_fallback())
+    }
+
+    /// Value used only if the status lock is poisoned (never expected in practice).
+    fn transport_status_fallback(&self) -> TelegramTransportStatus {
+        TelegramTransportStatus {
+            session_path: std::path::PathBuf::new(),
+            proxy_kind: crate::telegram::ProxyTransportKind::Direct,
+            proxy_url: None,
+            session_state: SessionState::Unauthorized,
+        }
+    }
+
+    fn set_telegram_status(&self, status: TelegramTransportStatus) {
+        if let Ok(mut guard) = self.transport_status.write() {
+            *guard = status;
+        }
     }
 
     fn store(&self) -> &MetadataStore {
@@ -307,6 +342,20 @@ impl AdminUiState {
             (Method::POST, "objects/delete") => {
                 self.handle_delete_object(request, &principal).await
             }
+            (Method::POST, "objects/content") => {
+                self.handle_upload_content(request, &principal).await
+            }
+            (Method::GET, "objects/content") => self.handle_content(request, &principal, false),
+            (Method::HEAD, "objects/content") => self.handle_content(request, &principal, true),
+            (Method::GET, "telegram/wizard/state") => self.wizard_state(&principal).await,
+            (Method::POST, "telegram/wizard/begin") => self.wizard_begin(request, &principal).await,
+            (Method::POST, "telegram/wizard/submit-code") => {
+                self.wizard_submit_code(request, &principal).await
+            }
+            (Method::POST, "telegram/wizard/submit-password") => {
+                self.wizard_submit_password(request, &principal).await
+            }
+            (Method::POST, "telegram/wizard/cancel") => self.wizard_cancel(&principal).await,
             _ => json_error(StatusCode::NOT_FOUND, "not found"),
         }
     }
@@ -748,6 +797,369 @@ impl AdminUiState {
         }
     }
 
+    /// Stream a file's bytes back to the browser, full or ranged (bounded RAM).
+    ///
+    /// Shares the exact chunk reader the S3 `get_object` path uses, so the
+    /// bytes and checksum verification are identical. HEAD returns headers only.
+    /// A directory path without a zero-byte marker has no object → 404.
+    fn handle_content(
+        &self,
+        request: Request<Incoming>,
+        _principal: &ResolvedPrincipal,
+        is_head: bool,
+    ) -> Response<Body> {
+        let params = parse_list_params(request.uri().query().unwrap_or(""));
+        let bucket = match params.get("bucket") {
+            Some(value) if !value.is_empty() => value.clone(),
+            _ => return json_error(StatusCode::BAD_REQUEST, "bucket is required"),
+        };
+        let key = match params.get("key") {
+            Some(value) if !value.is_empty() => value.clone(),
+            _ => return json_error(StatusCode::BAD_REQUEST, "key is required"),
+        };
+        if !is_safe_object_key(&key) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "key must be a non-empty, relative, plain file path",
+            );
+        }
+        let manifest = match self.object_format.get_active_manifest(&bucket, &key) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => return json_error(StatusCode::NOT_FOUND, "object not found"),
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        };
+        if manifest.commit_state != crate::manifest::CommitState::Committed {
+            return json_error(StatusCode::NOT_FOUND, "object not found");
+        }
+        let (range, content_range) =
+            match parse_content_range(request.headers(), manifest.content_length) {
+                Ok(parsed) => parsed,
+                Err(unsatisfiable_length) => {
+                    let mut response =
+                        json_error(StatusCode::RANGE_NOT_SATISFIABLE, "range not satisfiable");
+                    if let Ok(value) =
+                        HeaderValue::from_str(&format!("bytes */{unsatisfiable_length}"))
+                    {
+                        response.headers_mut().insert(header::CONTENT_RANGE, value);
+                    }
+                    return response;
+                }
+            };
+        let (status, content_length) = if content_range.is_some() {
+            (StatusCode::PARTIAL_CONTENT, range.end - range.start)
+        } else if range.start == 0 && range.end == manifest.content_length {
+            (StatusCode::OK, manifest.content_length)
+        } else {
+            // A well-formed range that merely asked for the whole file edges
+            // (e.g. "bytes=0-") still answers 200 without a Content-Range.
+            (StatusCode::OK, range.end - range.start)
+        };
+        let spans = match ObjectFormatService::plan_read(&manifest, range) {
+            Ok(plan) => plan.chunks,
+            Err(_) => {
+                return json_error(StatusCode::RANGE_NOT_SATISFIABLE, "range not satisfiable");
+            }
+        };
+        let mut response = if is_head || spans.is_empty() {
+            Response::new(Body::empty())
+        } else {
+            let stream = ObjectFormatService::read_spans_to_stream(
+                Arc::clone(&self.object_format),
+                &manifest,
+                spans,
+            );
+            Response::new(Body::from(StreamingBlob::wrap(stream)))
+        };
+        *response.status_mut() = status;
+        if let Ok(value) = HeaderValue::from_str(&content_length.to_string()) {
+            response.headers_mut().insert(header::CONTENT_LENGTH, value);
+        }
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(&manifest.content_type)
+                .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+        );
+        if let Ok(value) = HeaderValue::from_str(&manifest.checksum.whole_object) {
+            response.headers_mut().insert(header::ETAG, value);
+        }
+        let disposition = content_disposition(&basename_key(&key));
+        if let Ok(value) = HeaderValue::from_str(&disposition) {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_DISPOSITION, value);
+        }
+        if let Some(value) = content_range
+            && let Ok(header_value) = HeaderValue::from_str(&value)
+        {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_RANGE, header_value);
+        }
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+    }
+
+    // ---- telegram wizard ----------------------------------------------------
+
+    async fn wizard_state(&self, _principal: &ResolvedPrincipal) -> Response<Body> {
+        let driver = self.wizard_driver.lock().await;
+        let snapshot = driver.snapshot();
+        let authorized = driver.is_authorized()
+            || matches!(
+                self.telegram_status_snapshot().session_state,
+                SessionState::Authorized | SessionState::Reused
+            );
+        json_response(
+            StatusCode::OK,
+            wizard_wire(snapshot.stage, authorized, snapshot.owner.as_deref(), None),
+        )
+    }
+
+    async fn wizard_begin(
+        &self,
+        request: Request<Incoming>,
+        principal: &ResolvedPrincipal,
+    ) -> Response<Body> {
+        let mut driver = self.wizard_driver.lock().await;
+        if driver.is_authorized() {
+            return json_response(
+                StatusCode::OK,
+                wizard_wire(
+                    LoginStage::Authorized,
+                    true,
+                    None,
+                    Some("already authorized"),
+                ),
+            );
+        }
+        if driver.is_busy() {
+            let snapshot = driver.snapshot();
+            let hint = snapshot.owner.unwrap_or_default();
+            let mut response = json_error(
+                StatusCode::CONFLICT,
+                "another Telegram login is already in progress",
+            );
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            );
+            let _ = hint;
+            return response;
+        }
+        let phone = read_wizard_begin_request(request)
+            .await
+            .and_then(|body| body.phone)
+            .or_else(|| self.config.telegram_phone_number.clone());
+        let transport = match self.wizard_transport_lock(&driver).await {
+            Ok(transport) => transport,
+            Err(response) => return response,
+        };
+        let owner = &principal.user.username;
+        match driver.begin(&transport, phone, owner).await {
+            Ok(step) => {
+                if driver.is_authorized() {
+                    self.finalize_wizard_success(&transport).await;
+                }
+                json_response(
+                    StatusCode::OK,
+                    wizard_wire(
+                        step.stage,
+                        driver.is_authorized(),
+                        None,
+                        Some(&step.message),
+                    ),
+                )
+            }
+            Err(error) => driver_error_response(&error),
+        }
+    }
+
+    async fn wizard_submit_code(
+        &self,
+        request: Request<Incoming>,
+        _principal: &ResolvedPrincipal,
+    ) -> Response<Body> {
+        let code = read_wizard_code_request(request).await;
+        let mut driver = self.wizard_driver.lock().await;
+        let transport = match self.current_wizard_transport().await {
+            Some(transport) => transport,
+            None => {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "no Telegram login in progress; begin one first",
+                );
+            }
+        };
+        let Some(code) = code else {
+            return driver_error_response(&LoginDriverError::MissingCode);
+        };
+        match driver.submit_code(&transport, &code).await {
+            Ok(step) => {
+                if driver.is_authorized() {
+                    self.finalize_wizard_success(&transport).await;
+                }
+                json_response(
+                    StatusCode::OK,
+                    wizard_wire(
+                        step.stage,
+                        driver.is_authorized(),
+                        None,
+                        Some(&step.message),
+                    ),
+                )
+            }
+            Err(error) => driver_error_response(&error),
+        }
+    }
+
+    async fn wizard_submit_password(
+        &self,
+        request: Request<Incoming>,
+        _principal: &ResolvedPrincipal,
+    ) -> Response<Body> {
+        let password = read_wizard_password_request(request).await;
+        let mut driver = self.wizard_driver.lock().await;
+        let transport = match self.current_wizard_transport().await {
+            Some(transport) => transport,
+            None => {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "no Telegram login in progress; begin one first",
+                );
+            }
+        };
+        let Some(password) = password else {
+            return driver_error_response(&LoginDriverError::MissingPassword);
+        };
+        match driver.submit_password(&transport, &password).await {
+            Ok(step) => {
+                if driver.is_authorized() {
+                    self.finalize_wizard_success(&transport).await;
+                }
+                json_response(
+                    StatusCode::OK,
+                    wizard_wire(
+                        step.stage,
+                        driver.is_authorized(),
+                        None,
+                        Some(&step.message),
+                    ),
+                )
+            }
+            Err(error) => driver_error_response(&error),
+        }
+    }
+
+    async fn wizard_cancel(&self, _principal: &ResolvedPrincipal) -> Response<Body> {
+        let mut driver = self.wizard_driver.lock().await;
+        driver.cancel();
+        // Drop the kept-alive transport now that nothing in the flow needs it.
+        *self.wizard_transport.lock().await = None;
+        json_response(StatusCode::OK, serde_json::json!({ "ok": true }))
+    }
+
+    /// After a successful phone/code/password login, reflect the now-authorised
+    /// session in the stored status and stop keeping the transport alive.
+    async fn finalize_wizard_success(&self, transport: &TelegramTransport) {
+        if let Ok(status) = transport.status().await {
+            self.set_telegram_status(status);
+        }
+        *self.wizard_transport.lock().await = None;
+    }
+
+    /// Return the currently stored wizard transport, if one is live.
+    async fn current_wizard_transport(&self) -> Option<Arc<TelegramTransport>> {
+        self.wizard_transport.lock().await.clone()
+    }
+
+    /// Ensure a transport exists for the wizard, opening+retaining one lazily if
+    /// the operator has started a flow while Telegram was not already available.
+    #[allow(clippy::result_large_err)]
+    async fn wizard_transport_lock(
+        &self,
+        _driver: &tokio::sync::MutexGuard<'_, TelegramLoginDriver>,
+    ) -> Result<Arc<TelegramTransport>, Response<Body>> {
+        let mut slot = self.wizard_transport.lock().await;
+        if let Some(existing) = slot.as_ref() {
+            return Ok(Arc::clone(existing));
+        }
+        match TelegramTransport::open(self.config.clone()).await {
+            Ok(transport) => {
+                let transport = Arc::new(transport);
+                *slot = Some(Arc::clone(&transport));
+                Ok(transport)
+            }
+            Err(error) => Err(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to open Telegram transport: {error}"),
+            )),
+        }
+    }
+
+    // ---- binary content write (upload) ---------------------------------------
+
+    /// Stream a single file's bytes into the store, chunk-by-chunk (bounded RAM).
+    /// Transport bridge only: reuses the S3 data-plane writer with the raw request
+    /// body as the inbound stream. The key may be a full path (`dir/sub/name.ext`).
+    async fn handle_upload_content(
+        &self,
+        request: Request<Incoming>,
+        _principal: &ResolvedPrincipal,
+    ) -> Response<Body> {
+        let bucket = request
+            .uri()
+            .query()
+            .map(parse_list_params)
+            .and_then(|mut query| query.remove("bucket"))
+            .filter(|value| !value.is_empty());
+        let Some(bucket) = bucket else {
+            return json_error(StatusCode::BAD_REQUEST, "bucket is required");
+        };
+        if !matches!(self.object_format.bucket_exists(&bucket), Ok(true)) {
+            return json_error(StatusCode::NOT_FOUND, "bucket not found");
+        }
+        let key = request
+            .uri()
+            .query()
+            .map(parse_list_params)
+            .and_then(|mut query| query.remove("key"))
+            .unwrap_or_default();
+        if !is_safe_object_key(&key) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "key must be a non-empty, relative, plain file path",
+            );
+        }
+        let content_type = request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let body = body_to_streaming_blob(request.into_body());
+        let manifest = match self
+            .object_format
+            .put_stream(&bucket, &key, &content_type, Some(body))
+            .await
+        {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        };
+        json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "size": manifest.content_length,
+                "etag": manifest.checksum.whole_object,
+                "version_id": manifest.object_id,
+            }),
+        )
+    }
+
     fn handle_overview(&self, principal: &ResolvedPrincipal) -> Response<Body> {
         let metadata_status = self
             .object_format
@@ -757,9 +1169,9 @@ impl AdminUiState {
             .object_format
             .status()
             .unwrap_or_else(|_| empty_object());
-        let state_ref = &self.transport_status.session_state;
-        let session_state_debug = format!("{state_ref:?}");
-        let session_usable = telegram_session_usable(state_ref.clone());
+        let session_state = self.telegram_status_snapshot().session_state;
+        let session_state_debug = format!("{session_state:?}");
+        let session_usable = telegram_session_usable(session_state.clone());
         let telegram = TelegramStateWire {
             session_state: session_state_debug.clone(),
             phone_number: self
@@ -876,6 +1288,201 @@ fn telegram_session_usable(state: SessionState) -> bool {
     matches!(state, SessionState::Authorized | SessionState::Reused)
 }
 
+// ---- binary content + telegram wizard helpers ------------------------------
+
+/// Parse an optional HTTP `Range: bytes=…` header against a known content
+/// length. Returns `(exclusive Range, optional `Content-Range` value)` on a
+/// satisfiable request, or `Err(content_length)` when the requested range does
+/// not overlap the object (used to answer `416`).
+fn parse_content_range(
+    headers: &http::HeaderMap,
+    content_length: u64,
+) -> Result<(std::ops::Range<u64>, Option<String>), u64> {
+    let value = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok());
+    let Some(value) = value else {
+        return Ok((0..content_length, None));
+    };
+    let value = match value.strip_prefix("bytes=") {
+        Some(value) => value,
+        None => return Err(content_length),
+    };
+    let Some((start_text, end_text)) = value.split_once('-') else {
+        return Err(content_length);
+    };
+    if content_length == 0 {
+        return Err(content_length);
+    }
+    let (start, end) = if start_text.is_empty() {
+        // Suffix range `bytes=-N`: last N bytes.
+        let suffix = match end_text.parse::<u64>() {
+            Ok(value) => value.min(content_length),
+            Err(_) => return Err(content_length),
+        };
+        let start = content_length.saturating_sub(suffix);
+        (start, content_length)
+    } else {
+        let start = match start_text.parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => return Err(content_length),
+        };
+        let end = if end_text.is_empty() {
+            content_length
+        } else {
+            match end_text.parse::<u64>() {
+                Ok(value) => value.saturating_add(1).min(content_length),
+                Err(_) => return Err(content_length),
+            }
+        };
+        (start, end)
+    };
+    if start >= end || start >= content_length {
+        return Err(content_length);
+    }
+    let content_range = format!("bytes {}-{}/{}", start, end - 1, content_length);
+    Ok((start..end, Some(content_range)))
+}
+
+/// `Content-Disposition: attachment; filename="…"` with an ASCII fallback and
+/// RFC 5987 percent-encoding for non-ASCII names.
+fn content_disposition(basename: &str) -> String {
+    if basename.is_ascii() && !basename.contains(['"', '\\', '\r', '\n']) {
+        return format!("attachment; filename=\"{basename}\"");
+    }
+    let encoded = percent_encode_filename(basename);
+    format!("attachment; filename=\"download\"; filename*=UTF-8''{encoded}")
+}
+
+fn percent_encode_filename(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn wizard_wire(
+    stage: LoginStage,
+    authorized: bool,
+    owner: Option<&str>,
+    message: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "phase": login_stage_name(&stage),
+        "needs_2fa": stage == LoginStage::TwoFa,
+        "authorized": authorized,
+        "owner": owner,
+        "message": message,
+    })
+}
+
+fn login_stage_name(stage: &LoginStage) -> &'static str {
+    match stage {
+        LoginStage::Idle => "idle",
+        LoginStage::Code => "code",
+        LoginStage::TwoFa => "two_fa",
+        LoginStage::Authorized => "authorized",
+    }
+}
+
+fn driver_error_response(error: &LoginDriverError) -> Response<Body> {
+    let (status, message) = match error {
+        LoginDriverError::Occupied { stage, owner } => {
+            let hint = owner.as_deref().unwrap_or("another operator");
+            (
+                StatusCode::CONFLICT,
+                format!(
+                    "a Telegram login by {hint} is already in progress at {:?}",
+                    login_stage_name(stage)
+                ),
+            )
+        }
+        LoginDriverError::MissingPhone => (
+            StatusCode::BAD_REQUEST,
+            "a phone number is required".to_string(),
+        ),
+        LoginDriverError::MissingCode => (
+            StatusCode::BAD_REQUEST,
+            "the confirmation code is required".to_string(),
+        ),
+        LoginDriverError::MissingPassword => (
+            StatusCode::BAD_REQUEST,
+            "the cloud password is required".to_string(),
+        ),
+        LoginDriverError::InvalidCode => (
+            StatusCode::BAD_REQUEST,
+            "that confirmation code is not valid".to_string(),
+        ),
+        LoginDriverError::ExpiredCode => (
+            StatusCode::GONE,
+            "that confirmation code has expired".to_string(),
+        ),
+        LoginDriverError::WrongPassword => (
+            StatusCode::BAD_REQUEST,
+            "that cloud password is not correct".to_string(),
+        ),
+        LoginDriverError::SignUpRequired => (
+            StatusCode::BAD_REQUEST,
+            "this account requires sign-up using Telegram's official app".to_string(),
+        ),
+        LoginDriverError::Unauthorized(detail) => (
+            StatusCode::BAD_REQUEST,
+            format!("Telegram login failed: {detail}"),
+        ),
+    };
+    json_error(status, &message)
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+struct WizardBeginRequest {
+    #[serde(default)]
+    phone: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+struct WizardCodeRequest {
+    code: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+struct WizardPasswordRequest {
+    password: Option<String>,
+}
+
+async fn read_json_body_opt<T: serde::de::DeserializeOwned>(
+    request: Request<Incoming>,
+) -> Option<T> {
+    let body = match request.into_body().collect().await {
+        Ok(value) => value.to_bytes(),
+        Err(_) => return None,
+    };
+    serde_json::from_slice(&body).ok()
+}
+
+async fn read_wizard_begin_request(request: Request<Incoming>) -> Option<WizardBeginRequest> {
+    read_json_body_opt(request).await
+}
+
+async fn read_wizard_code_request(request: Request<Incoming>) -> Option<String> {
+    read_json_body_opt::<WizardCodeRequest>(request)
+        .await
+        .and_then(|body| body.code)
+}
+
+async fn read_wizard_password_request(request: Request<Incoming>) -> Option<String> {
+    read_json_body_opt::<WizardPasswordRequest>(request)
+        .await
+        .and_then(|body| body.password)
+}
+
 fn object_to_wire(manifest: &ObjectManifest, key: &str) -> ObjectEntryWire {
     ObjectEntryWire {
         name: basename_key(key),
@@ -899,6 +1506,25 @@ fn is_safe_folder_path(path: &str) -> bool {
         return false;
     }
     path.len() <= 1024
+}
+
+fn is_safe_object_key(key: &str) -> bool {
+    if key.is_empty()
+        || key.starts_with('/')
+        || key.ends_with('/')
+        || key.contains('\u{0}')
+        || key.len() > 2048
+    {
+        return false;
+    }
+    // Reject any `..` path traversal (including within filename segments).
+    !key.split(['/', '\\']).any(|segment| segment == "..")
+}
+
+fn body_to_streaming_blob(request_body: Incoming) -> StreamingBlob {
+    use http_body_util::BodyExt as _;
+    // Each item is Result<Bytes, hyper::Error>; hyper::Error: std::error::Error.
+    StreamingBlob::wrap(request_body.into_data_stream())
 }
 
 fn parse_list_params(query: &str) -> std::collections::HashMap<String, String> {

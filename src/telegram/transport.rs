@@ -466,6 +466,36 @@ impl TelegramTransport {
     }
 }
 
+impl TelegramTransport {
+    /// Whether the transport is running against the local mock runtime. Used to
+    /// drive scripted login flows in tests and CI.
+    pub(crate) fn is_mock(&self) -> bool {
+        self.mock_mode
+    }
+
+    /// Borrow the live grammers client, if this transport holds one.
+    pub(crate) fn login_client(&self) -> Result<&Client, TelegramTransportError> {
+        self.client()
+    }
+
+    pub(crate) fn app_api_hash(&self) -> &str {
+        self.config.telegram_api_hash.as_deref().unwrap_or_default()
+    }
+
+    /// Run an RPC operation under the shared retry / flood-wait policy so the
+    /// HTTP wizard and the CLI login behave identically on transient failures.
+    pub(crate) async fn retry_invocation<T, F, Fut>(
+        &self,
+        op: F,
+    ) -> Result<T, TelegramTransportError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, grammers_client::InvocationError>>,
+    {
+        self.retry_rpc(op).await
+    }
+}
+
 fn login_failure_from_sign_in(error: SignInError) -> LoginFailure {
     login_failure_from_text(&error.to_string())
 }

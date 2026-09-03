@@ -136,7 +136,7 @@ Completed work:
 
 ## Phase 9 - Multi-user control plane
 
-- Status: in progress (initial slice landed; see below for the next slice)
+- Status: in progress (initial control-plane slice + the bounded-content-streaming and in-browser Telegram-wizard increment landed)
 - Exit criteria:
   - multiple operator accounts are supported as database-backed username/password records (no per-user `.env`)
   - account management (add/list/delete/password change) is administered by a superadmin in-app
@@ -156,6 +156,16 @@ Completed work (initial slice):
 - login rate limiting / lockout (in-process per-IP + per-account buckets)
 - unit + integration smoke coverage for auth, migrations, user CRUD, and the credential login lifecycle
 
-Next slice (deferred, documented in ADR-0006 / README): bounded binary content streaming (upload/download/resumable range) over `_admin`, and the in-browser Telegram onboarding wizard behind a kept-alive single-account client. Both are isolated, non-blocking follow-ups to the control-plane core above.
+Next slice (landed this increment): bounded binary content streaming over `_admin` and the in-browser Telegram onboarding wizard.
+
+Completed work (content streaming + wizard increment):
+
+- bounded file upload (`POST /_admin/api/objects/content?bucket&key`, raw body, CSRF) reuses the S3 `put_stream` data-plane writer so nothing is buffered in RAM
+- full + ranged download answering over the same authenticated surface: `GET`/`HEAD /_admin/api/objects/content` with range requests returning `206` + `Content-Range`, correct `ETag`/`Content-Length`/`Content-Disposition`
+- both the S3 `get_object` and the admin download now feed a single shared chunk reader (`ObjectFormatService::read_spans_to_stream`), so byte-for-byte S3 output is preserved and memory stays bounded per chunk
+- in-browser Telegram onboarding wizard behind a kept-alive single-account client: authenticated `/telegram/wizard/{state,begin,submit-code,submit-password,cancel}` with a staged, single-in-flight driver (second begin → `409`), mock-runtime test path, and 2FA (cloud-password) stage surfaced only when Telegram asks for it
+- the Svelte UI gains per-file upload + progress, per-row Download, and a three-step Telegram set-up flow; readiness panel flips once authorised
+
+Remaining Phase-9 follow-ups (explicitly out of this increment, see ADR-0006 / ROADMAP): bulk/folder download or server-side ZIP (no whole-RAM buffering), drag-in of nested directory trees, browser resumable-multipart upload negotiation, and moving object bytes on/off Telegram in earnest (the data plane still reads/writes committed local chunk files; `telegram_document_id` is `local:`).
 
 Rejected alternatives this phase (see `docs/adr/0006-...md`): keeping MinIO-time `TELEGRAM_ADMIN_BOOTSTRAP_SECRET` as a shared login secret; per-user `.env` accounts; a separate credentials SQLite file; `governor`-style thundering rate limiters; site-replication peering of Telegram S3 (documented unsupported).

@@ -1,8 +1,12 @@
+pub mod login_driver;
 pub mod proxy;
 pub mod retry;
 pub mod session;
 pub mod transport;
 
+pub use login_driver::{
+    LoginDriverError, LoginSnapshot, LoginStage, LoginStep, TelegramLoginDriver,
+};
 pub use proxy::{
     MaterializedProxy, ProxyBridgeHandle, ProxyError, ProxyMode, ProxyPlan, ProxyScheme,
     ProxyTransportKind, resolve_proxy_plan,

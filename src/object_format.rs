@@ -4,6 +4,7 @@ use crate::metadata::{
     BucketRecord, JournalEntry, MetadataError, MetadataStatus, MetadataStore, OperationKind,
 };
 use crate::multipart::{MultipartCompletionPlan, MultipartPart, MultipartSession, MultipartState};
+use bytes::Bytes;
 use futures::StreamExt;
 use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use s3s::{Body, dto::StreamingBlob};
@@ -13,6 +14,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tokio::fs as async_fs;
@@ -1231,6 +1233,134 @@ impl ObjectFormatService {
             requested_range: range,
             chunks,
         })
+    }
+
+    /// Emit one decrypted + checksum-verified slice per [`ReadSpan`], bounded by
+    /// the chunk size and never allocating a whole object in memory.
+    ///
+    /// This is the single shared streaming reader used by both the S3
+    /// `get_object` path and the `/_admin` download endpoint so their byte
+    /// output stays identical. Errors surface per-chunk as stream items so a
+    /// failure mid-download aborts the stream instead of buffering.
+    pub fn read_spans_to_stream(
+        this: Arc<Self>,
+        manifest: &ObjectManifest,
+        spans: Vec<ReadSpan>,
+    ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + Sync + 'static {
+        futures::stream::unfold(
+            (
+                Arc::clone(&this),
+                manifest.object_id,
+                manifest.encryption.enabled,
+                0usize,
+                spans,
+                false,
+            ),
+            move |(object_format, object_id, encryption_enabled, index, spans, done)| async move {
+                if done {
+                    return None;
+                }
+                let span = spans.get(index)?.clone();
+                let path = object_format
+                    .chunk_dir(object_id)
+                    .join(chunk_file_name(span.order));
+                let ciphertext = match async_fs::read(&path).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Some((
+                            Err(error),
+                            (
+                                object_format,
+                                object_id,
+                                encryption_enabled,
+                                index + 1,
+                                spans,
+                                true,
+                            ),
+                        ));
+                    }
+                };
+                let plaintext = if encryption_enabled {
+                    match object_format.decrypt_chunk(object_id, span.order, &ciphertext) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return Some((
+                                Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    error.to_string(),
+                                )),
+                                (
+                                    object_format,
+                                    object_id,
+                                    encryption_enabled,
+                                    index + 1,
+                                    spans,
+                                    true,
+                                ),
+                            ));
+                        }
+                    }
+                } else {
+                    ciphertext
+                };
+                if sha256_hex(&plaintext) != span.checksum {
+                    return Some((
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "checksum mismatch for chunk {}: expected {}, got {}",
+                                span.order,
+                                span.checksum,
+                                sha256_hex(&plaintext)
+                            ),
+                        )),
+                        (
+                            object_format,
+                            object_id,
+                            encryption_enabled,
+                            index + 1,
+                            spans,
+                            true,
+                        ),
+                    ));
+                }
+                let start = span.offset_within_chunk as usize;
+                let end = start + span.length as usize;
+                if plaintext.len() < end {
+                    return Some((
+                        Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            format!(
+                                "chunk {} shorter than planned span (len {}, need {}-{})",
+                                span.order,
+                                plaintext.len(),
+                                start,
+                                end
+                            ),
+                        )),
+                        (
+                            object_format,
+                            object_id,
+                            encryption_enabled,
+                            index + 1,
+                            spans,
+                            true,
+                        ),
+                    ));
+                }
+                Some((
+                    Ok(Bytes::copy_from_slice(&plaintext[start..end])),
+                    (
+                        object_format,
+                        object_id,
+                        encryption_enabled,
+                        index + 1,
+                        spans,
+                        false,
+                    ),
+                ))
+            },
+        )
     }
 
     pub fn plan_chunks(

@@ -11,7 +11,8 @@
     listUsers,
     login,
     logout,
-    removeObject
+    removeObject,
+    contentUrl
   } from './lib/api';
   import type {
     BucketInfo,
@@ -21,6 +22,8 @@
     SessionState,
     UserInfo
   } from './lib/types';
+  import TelegramWizard from './components/TelegramWizard.svelte';
+  import UploadBox from './components/UploadBox.svelte';
 
   let session: SessionState | null = null;
   let overview: OverviewState | null = null;
@@ -45,6 +48,21 @@
   let currentPrefix = '';
   let listing: ObjectsState | null = null;
   let newFolder = '';
+
+  // Telegram setup entry (Overview, gated on backend readiness).
+  let showWizard = false;
+  let wizardDismissed = false;
+
+  function telegramNeedsSetup(): boolean {
+    const auth = (overview?.checks ?? []).find((check) => check.label === 'Telegram auth');
+    // Show setup when the backend reports the Telegram session is not usable.
+    if (auth) return !auth.ok;
+    // Fallback: try the raw session_state string when no discrete check exists.
+    return telegramNotUsable(overview?.telegram?.session_state ?? '');
+  }
+  function telegramNotUsable(state: string): boolean {
+    return !/^(Authorized|LoggedIn|Reused)$/i.test(state.trim());
+  }
 
   onMount(() => {
     void bootstrapApp();
@@ -105,6 +123,15 @@
     }
   }
 
+  async function refreshOverview() {
+    const csrf = session?.csrf_token;
+    try {
+      overview = await getOverview();
+    } catch (cause) {
+      error = normalizeError(cause);
+    }
+  }
+
   async function handleLogout() {
     if (!session?.csrf_token) return;
     busy = true;
@@ -115,6 +142,8 @@
       users = [];
       buckets = [];
       listing = null;
+      showWizard = false;
+      wizardDismissed = false;
       view = 'overview';
       message = 'Signed out.';
     } catch (cause) {
@@ -124,9 +153,21 @@
     }
   }
 
+  function toggleWizard(open: boolean) {
+    showWizard = open;
+  }
+
+  async function handleWizardAuthorized() {
+    showWizard = false;
+    wizardDismissed = true;
+    message = 'Telegram account authorized.';
+    await refreshOverview();
+  }
+
   async function switchView(next: 'overview' | 'users' | 'buckets') {
     view = next;
     error = '';
+    if (next === 'overview') await refreshOverview();
     if (next === 'users') await refreshUsers();
     if (next === 'buckets') await refreshBuckets();
   }
@@ -328,7 +369,7 @@
         <strong>{session.user?.username}</strong>
       </div>
       <div class="toolbar-actions">
-        <button class:active={view === 'overview'} on:click={() => (view = 'overview')}>Overview</button>
+        <button class:active={view === 'overview'} on:click={() => switchView('overview')}>Overview</button>
         <button class:active={view === 'buckets'} on:click={() => switchView('buckets')}>Buckets</button>
         <button class:active={view === 'users'} on:click={() => switchView('users')}>Users</button>
         <button class="ghost" on:click={handleLogout} disabled={busy}>Logout</button>
@@ -336,6 +377,38 @@
     </section>
 
     {#if view === 'overview'}
+      {#if telegramNeedsSetup() && !wizardDismissed}
+        {#if !showWizard}
+          <article class="card surface tg-callout">
+            <div class="tg-banner">
+              <div class="tg-copy">
+                <p class="card-label">Telegram</p>
+                <h2>Authorize the Telegram account used for storage</h2>
+                <p>
+                  Before objects can be written, sign in once so the store can talk to the
+                  storage chat that backs it. This is a short wizard from the Overview page —
+                  no terminal access required.
+                </p>
+              </div>
+              <div class="tg-actions">
+                <button class="primary" type="button" on:click={() => toggleWizard(true)}>
+                  Set up Telegram login
+                </button>
+                <button class="ghost" type="button" on:click={() => (wizardDismissed = true)}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </article>
+        {:else}
+          <TelegramWizard
+            csrf={session?.csrf_token}
+            prefillPhone={undefined}
+            onDone={handleWizardAuthorized}
+          />
+          <button class="ghost" type="button" on:click={() => toggleWizard(false)}>Close wizard</button>
+        {/if}
+      {/if}
       <section class="cards">
         <article class="card metric">
           <p class="card-label">Buckets</p>
@@ -405,6 +478,12 @@
             <input bind:value={newFolder} placeholder="new folder" />
             <button class="primary" disabled={busy || !newFolder.trim()} on:click={makeFolder}>New folder</button>
           </div>
+          <UploadBox
+            bucket={selectedBucket}
+            prefix={currentPrefix}
+            csrf={session?.csrf_token}
+            onUploaded={() => refreshObjects()}
+          />
           <table class="kv-table">
             <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
             <tbody>
@@ -413,7 +492,9 @@
                   <td><button class="btn-link" on:click={() => enterFolder(folder)}>{folder}/</button></td>
                   <td class="muted">folder</td>
                   <td class="muted">—</td>
-                  <td><button class="ghost" on:click={() => removeKey(folder)}>Delete</button></td>
+                  <td class="row-actions">
+                    <button class="ghost" on:click={() => removeKey(folder)}>Delete</button>
+                  </td>
                 </tr>
               {/each}
               {#each listing?.objects ?? [] as obj}
@@ -421,7 +502,12 @@
                   <td>{obj.name}</td>
                   <td>{formatBytes(obj.size)}</td>
                   <td>{obj.last_modified}</td>
-                  <td><button class="ghost" on:click={() => removeKey(obj)}>Delete</button></td>
+                  <td class="row-actions">
+                    <a class="row-download" href={contentUrl(selectedBucket, obj.key)} download>
+                      Download
+                    </a>
+                    <button class="ghost" on:click={() => removeKey(obj)}>Delete</button>
+                  </td>
                 </tr>
               {/each}
               {#if listing && listing.folders.length === 0 && listing.objects.length === 0}
@@ -430,8 +516,9 @@
             </tbody>
           </table>
           <p class="fine-print">
-            Content upload/download arrives in the next slice; for now list,
-            navigate and manage folders and objects via the S3 data plane.
+            Individual files upload and download in place here. Bulk download of a whole
+            folder or bucket is a future item; for now list, navigate and manage folders
+            and objects via the S3 data plane.
           </p>
         {/if}
       </section>
@@ -558,5 +645,51 @@
   .muted {
     color: var(--text, #172033);
     opacity: 0.5;
+  }
+  .row-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+  }
+  .row-actions button {
+    padding: 0.3rem 0.7rem;
+  }
+  .row-download {
+    color: var(--accent, #0d7a6d);
+    text-decoration: none;
+    font-weight: 700;
+  }
+  .row-download:hover {
+    text-decoration: underline;
+  }
+  .tg-callout {
+    margin-bottom: 1rem;
+  }
+  .tg-banner {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .tg-callout h2 {
+    margin: 0.25rem 0 0.5rem;
+    font-size: 1.3rem;
+  }
+  .tg-copy {
+    flex: 1 1 24rem;
+  }
+  .tg-copy p {
+    margin: 0;
+    color: var(--text, #172033);
+    opacity: 0.72;
+    max-width: 62ch;
+  }
+  .tg-actions {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    align-items: center;
   }
 </style>

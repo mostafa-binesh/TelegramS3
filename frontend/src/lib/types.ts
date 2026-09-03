@@ -65,3 +65,19 @@ export interface OverviewState {
   telegram?: { session_state: string; phone_number?: string | null };
   checks?: { label: string; ok: boolean; detail: string }[];
 }
+
+export type WizardPhase = 'idle' | 'code' | 'two_fa' | 'authorized';
+
+export interface WizardState {
+  phase: WizardPhase;
+  needs_2fa: boolean;
+  authorized: boolean;
+  owner?: string | null;
+  message?: string | null;
+}
+
+export interface FileUploadResult {
+  size: number;
+  etag: string;
+  version_id: string;
+}

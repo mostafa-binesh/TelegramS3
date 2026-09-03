@@ -1,12 +1,11 @@
 use crate::admin::AdminUiState;
 use crate::config::AppConfig;
 use crate::multipart::MultipartPartPlan;
-use crate::object_format::{ObjectFormatService, sha256_hex};
+use crate::object_format::ObjectFormatService;
 use crate::redact;
 use crate::telegram::{TelegramTransport, TelegramTransportStatus};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream;
 use http::{StatusCode, header};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -812,117 +811,12 @@ impl S3 for TelegramS3Backend {
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
-        if spans.len() == 1 {
-            let span = spans[0].clone();
-            let object_format = Arc::clone(&self.object_format);
-            let chunk_path = object_format.chunk_path(manifest.object_id, span.order);
-            let chunk = tokio::fs::read(&chunk_path).await.map_err(|error| {
-                s3s::S3Error::with_message(S3ErrorCode::InternalError, error.to_string())
-            })?;
-            let plaintext = if manifest.encryption.enabled {
-                object_format
-                    .decrypt_chunk(manifest.object_id, span.order, &chunk)
-                    .map_err(map_object_error)?
-            } else {
-                chunk
-            };
-            let actual_checksum = sha256_hex(&plaintext);
-            if actual_checksum != span.checksum {
-                return Err(s3s::S3Error::with_message(
-                    S3ErrorCode::InternalError,
-                    format!(
-                        "checksum mismatch for chunk {}: expected {}, got {}",
-                        span.order, span.checksum, actual_checksum
-                    ),
-                ));
-            }
-            let start = span.offset_within_chunk as usize;
-            let end = start + span.length as usize;
-            if plaintext.len() < end {
-                return Err(s3s::S3Error::with_message(
-                    S3ErrorCode::InternalError,
-                    "chunk shorter than planned span",
-                ));
-            }
-            let actual = &plaintext[start..end];
-            return Ok(S3Response::new(GetObjectOutput {
-                body: Some(StreamingBlob::from_bytes(Bytes::copy_from_slice(actual))),
-                content_length: Some((range.end - range.start) as i64),
-                content_type: Some(manifest.content_type),
-                e_tag: Some(ETag::Strong(manifest.checksum.whole_object)),
-                last_modified: Some(Timestamp::from(manifest.created_at)),
-                metadata: Some(metadata),
-                version_id: manifest.version_id,
-                content_range,
-                ..Default::default()
-            }));
-        }
-        let object_format = Arc::clone(&self.object_format);
-        let object_id = manifest.object_id;
-        let manifest_encryption_enabled = manifest.encryption.enabled;
-        let body_stream = stream::unfold((0usize, spans, false), move |state| {
-            let object_format = Arc::clone(&object_format);
-            async move {
-                let (index, spans, done) = state;
-                if done {
-                    return None;
-                }
-                let span = spans.get(index)?.clone();
-                let chunk_path = object_format.chunk_path(object_id, span.order);
-                let chunk = match tokio::fs::read(&chunk_path).await {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
-                        return Some((Err::<Bytes, std::io::Error>(error), (index, spans, true)));
-                    }
-                };
-                let plaintext = if manifest_encryption_enabled {
-                    match object_format
-                        .decrypt_chunk(object_id, span.order, &chunk)
-                        .map_err(|error| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
-                        }) {
-                        Ok(plaintext) => plaintext,
-                        Err(error) => {
-                            return Some((
-                                Err::<Bytes, std::io::Error>(error),
-                                (index, spans, true),
-                            ));
-                        }
-                    }
-                } else {
-                    chunk
-                };
-                let actual_checksum = sha256_hex(&plaintext);
-                if actual_checksum != span.checksum {
-                    return Some((
-                        Err::<Bytes, std::io::Error>(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!(
-                                "checksum mismatch for chunk {}: expected {}, got {}",
-                                span.order, span.checksum, actual_checksum
-                            ),
-                        )),
-                        (index, spans, true),
-                    ));
-                }
-                let start = span.offset_within_chunk as usize;
-                let end = start + span.length as usize;
-                if plaintext.len() < end {
-                    return Some((
-                        Err::<Bytes, std::io::Error>(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "chunk shorter than planned span",
-                        )),
-                        (index, spans, true),
-                    ));
-                }
-                let actual = &plaintext[start..end];
-                Some((
-                    Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(actual)),
-                    (index + 1, spans, false),
-                ))
-            }
-        });
+        // Shared streaming reader: decrypts + verifies chunk-by-chunk, bounded.
+        let body_stream = ObjectFormatService::read_spans_to_stream(
+            Arc::clone(&self.object_format),
+            &manifest,
+            spans,
+        );
         let body = StreamingBlob::wrap(body_stream);
         Ok(S3Response::new(GetObjectOutput {
             body: Some(body),

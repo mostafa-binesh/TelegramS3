@@ -29,6 +29,14 @@
 - Every operator is admin-tier for now; the stored `role` is reserved for future
   per-user/tenant scopes. All authenticated operators currently see the full
   bucket/object surface.
-- The Phase-9 control-plane UI exposes a JSON bucket/folder browser. Bounded
-  binary upload/download-from-browser and the in-browser Telegram onboarding
-  wizard are enabled in the next slice (ADR-0006, ROADMAP Phase 9).
+- The `/_admin` operator surface exposes a bucket/object browser (prefix folders
+  + directory markers + delete) and **bounded binary upload/download** whose
+  transport flows through the S3 data plane (see `docs/s3-compatibility.md`).
+  Upload/download memory stays bounded per chunk; the Telegram **login wizard**
+  drives the real single-account login. Guest access, and browsers without a
+  valid session, get `401`/`403` on the content and wizard APIs.
+- Explicit future items (not claimed as done): bulk **folder download** /
+  server-side ZIP (would need whole-object buffering) and drag-in of nested
+  directory trees; real Telegram **byte transport** (the object store currently
+  reads/writes committed local chunk files and reports `telegram_document_id` as
+  `local:`).
