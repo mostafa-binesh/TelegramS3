@@ -3,30 +3,23 @@
 [![Docker image](https://github.com/mostafa-binesh/TelegramS3/actions/workflows/publish-docker-image.yml/badge.svg)](https://github.com/mostafa-binesh/TelegramS3/actions/workflows/publish-docker-image.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSES.md)
 
-An S3-compatible object storage server whose durable object format is designed
-to be carried by private Telegram chats and channels — chunked, checksummed,
-journaled, and encrypted at rest.
+An S3-compatible object storage server. Buckets and objects are served to
+standard S3 clients (`aws` CLI, SDKs, MinIO tooling) through a RustFS-compatible
+listener, stored as a chunked, checksummed, journaled, and encrypted-at-rest
+object format, and operated through an authenticated web UI.
 
-Telegram S3 speaks the S3 API to standard clients (`aws` CLI, SDKs, MinIO
-tooling) through a RustFS-compatible server seam, while the storage engine
-treats Telegram as a constrained remote object store rather than an unlimited
-backup target. Because Telegram is not a transactional object store, local
-metadata, operation journals, manifests, and recovery tooling are part of the
-durability model — never an afterthought.
-
-> **Status: in development (v0.4.0).** The full S3 surface, operator web UI,
-> and durability machinery are implemented and tested. The Telegram transport
-> layer (headless login, session reuse, proxy, retries) and an in-browser
-> onboarding wizard are wired, but object bytes currently live on the local
-> data directory; streaming them onto Telegram documents is the next milestone.
-> See [Status](#status) below for the precise breakdown.
+The storage engine treats Telegram as a constrained remote object store rather
+than an unlimited backup target. Because Telegram is not a transactional object
+store, local metadata, operation journals, manifests, and recovery tooling are
+part of the durability model — never an afterthought. Object bytes live as
+committed chunk files on local durable storage; the Telegram transport layer
+(headless login, persisted sessions, proxy, retries) underlies that store.
 
 ---
 
 ## Contents
 
 - [Features](#features)
-- [Status](#status)
 - [Architecture](#architecture)
 - [How storage works](#how-storage-works)
 - [Quick start](#quick-start)
@@ -47,8 +40,7 @@ durability model — never an afterthought.
   atomically; interrupted writes never appear as objects; startup
   reconciliation repairs, rolls back, or quarantines incomplete state.
 - **Chunked manifest format** — every object is a canonical manifest plus
-  immutable, independently verifiable chunks (SHA-256 checked), designed to map
-  one-to-one onto Telegram documents later.
+  immutable, independently verifiable chunks (SHA-256 checked).
 - **Envelope encryption at rest** — chunk payloads are encrypted with
   ChaCha20-Poly1305 keyed from a local master key; range reads decrypt only the
   spans they touch, keeping memory bounded.
@@ -67,28 +59,21 @@ durability model — never an afterthought.
   HTTP-only session cookies, per-account login rate limiting and lockout,
   revocable sessions, and a superadmin role for account management.
 
-## Status
+## What's implemented
 
-The compatibility matrix in [docs/s3-compatibility.md](docs/s3-compatibility.md)
-and the [ROADMAP](ROADMAP.md) are authoritative. In short:
+Everything described in [Features](#features) is live and smoke-tested against a
+standard S3 client. Beyond the core CRUD path, that includes multipart sessions,
+byte-range reads, conditional requests, version-aware listings and delete
+markers, checksum enforcement, and retention-aware garbage collection.
 
-| Area | State |
-| --- | --- |
-| S3 CRUD, range reads, copy, conditional requests | Implemented and smoke-tested against a standard S3 client |
-| Multipart upload (initiate / part / complete / abort / list) | Implemented with durable local session state |
-| Versioning, delete markers, lifecycle GC | Implemented as a compatibility layer over local metadata |
-| Journaled object format + startup reconciliation | Implemented |
-| Envelope encryption, repair, garbage collection | Implemented |
-| Authenticated operator UI + onboarding wizard | Implemented |
-| Multi-user accounts (Phase 9) | In progress; all accounts are admin-tier today |
-| Real Telegram byte transport | **Next milestone** — bytes currently live under the local data dir with synthetic `local:` document IDs; manifests/chunks are laid out to move onto Telegram documents unchanged |
-| Strong S3 transactional semantics from Telegram | Not a goal — see [Limitations](docs/limitations.md) |
-
-Known constraints are documented honestly in
-[docs/limitations.md](docs/limitations.md): Telegram files cap at ~2 GiB,
-flood waits and rate limits are external, the local database is part of the
-durability model, and the project must not be described as an unlimited or
-sole backup target.
+Modern S3 semantics that can't be honored over the current store are not
+silently emulated — known constraints are documented in
+[docs/limitations.md](docs/limitations.md): Telegram files cap at ~2 GiB, flood
+waits and rate limits are external, the local database is part of the durability
+model, and the project is not an unlimited or sole backup target. Telegram is
+treated as a constrained remote store, not a transactional object database; the
+full per-operation matrix lives in
+[docs/s3-compatibility.md](docs/s3-compatibility.md).
 
 ## Architecture
 
@@ -107,9 +92,6 @@ Object-format service        (src/object_format.rs)
       v
 Telegram transport           (src/telegram/)
   MTProto session, login, proxy, retry, flood-wait
-      |
-      v
-Private Telegram chats / channels   (future byte transport)
 ```
 
 Two complementary surfaces serve the same store:
@@ -199,10 +181,10 @@ server is down. See [docs/configuration.md](docs/configuration.md).
 
 ### 3. Log in to the operator UI
 
-Open <http://localhost:9000/_admin>, sign in with the account above, and follow
-the in-browser **Telegram onboarding wizard** (phone → code → cloud password
-when required) to authorize the storage peer. The readiness panel flips once
-the session is live.
+Open <http://localhost:9000/_admin>, sign in with the account above, and use the
+in-browser **Telegram onboarding wizard** (phone → code → cloud password when
+required) to authorize the Telegram session the store runs on. The readiness
+panel flips once the session is authorized.
 
 ### 4. Use it as S3
 
@@ -270,8 +252,9 @@ matrix is [docs/s3-compatibility.md](docs/s3-compatibility.md).
   rate-limited with per-account lockout.
 - Deletes leave recoverable state (tombstones) before any physical cleanup;
   garbage collection is conservative, retention-aware, and dry-run reviewed.
-- Local metadata is a fast path, **not** the only source of truth — Telegram
-  manifests are sufficient to rebuild the index.
+- Local metadata is a fast path, **not** the only source of truth — manifest
+  documents are the authoritative recovery source, and the index can be rebuilt
+  from them (see [docs/disaster-recovery.md](docs/disaster-recovery.md)).
 - Secrets and sensitive paths are redacted from logs and CLI diagnostics.
 
 See [SECURITY.md](SECURITY.md), [THREAT_MODEL.md](THREAT_MODEL.md), and
