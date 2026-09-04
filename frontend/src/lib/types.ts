@@ -53,6 +53,24 @@ export interface StorageCard {
   data_dir?: string;
 }
 
+export interface RecoveryIssue {
+  object_id?: string | null;
+  bucket?: string | null;
+  key?: string | null;
+  path?: string | null;
+  commit_state?: string | null;
+  kind: string;
+  summary: string;
+  details: string[];
+}
+
+export interface RecoveryState {
+  issue_count: number;
+  scan_ok: boolean;
+  scan_error?: string | null;
+  issues: RecoveryIssue[];
+}
+
 export interface OverviewState {
   checked_at?: string;
   session?: { authenticated: boolean; user?: UserInfo };
@@ -62,6 +80,7 @@ export interface OverviewState {
     admin_route_prefix: string;
   };
   storage?: StorageCard;
+  recovery?: RecoveryState;
   telegram?: { session_state: string; phone_number?: string | null };
   checks?: { label: string; ok: boolean; detail: string }[];
 }

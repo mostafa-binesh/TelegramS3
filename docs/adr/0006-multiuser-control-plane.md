@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (initial slice landed; the bounded binary content streaming and the in-browser Telegram onboarding wizard have since landed as a follow-up increment, see the `## Update` section below).
+Accepted (initial slice landed; the bounded binary content streaming, Telegram-backed byte storage, and the in-browser Telegram onboarding wizard have since landed as follow-up increments, see the `## Update` section below).
 
 ## Context
 
@@ -58,10 +58,10 @@ add or remove people who should reach the management UI. Phase 9 needs:
   the S3 data plane and does not add unsupported S3 semantics.
 - **The browser surface is split**: control-plane core (login, users, and a JSON
   bucket/folder/object listing + folder create/delete + tombstones) landed with
-  this slice. Binary content streaming (upload/download/range) and the
-  in-browser Telegram onboarding wizard are implemented in a follow-up increment
-  described in `## Update` below. Bulk/folder download and moving object bytes
-  onto Telegram remain future work.
+  this slice. Binary content streaming (upload/download/range), Telegram-backed
+  object bytes, and the in-browser Telegram onboarding wizard are implemented
+  in follow-up increments described in `## Update` below. Bulk/folder download
+  remains future work.
 - **Storage-op authority**: the management controller talks to the same
   `ObjectFormatService` as the S3 server (single-writer, bounded reads,
   tombstones before cleanup). It never introduces an independent object-writing
@@ -87,13 +87,15 @@ Implemented as the documented follow-up increment:
 
 - **Bounded upload** (`POST /_admin/api/objects/content?bucket=&key=`) is a
   transport bridge only: the raw request body is turned into an
-  `s3s::dto::StreamingBlob` and handed to the existing S3 `put_stream`, so the
-  write path is shared with the S3 data plane and memory stays bounded.
+  `s3s::dto::StreamingBlob` and handed to the existing S3 `put_stream`, which
+  now commits the payloads as Telegram documents/messages. The write path is
+  shared with the S3 data plane and memory stays bounded.
 - **Shared streaming reader**: `ObjectFormatService::read_spans_to_stream`
-  decrypts + checksum-verifies one chunk span at a time. Both the S3
-  `get_object` and the admin `GET/HEAD /_admin/api/objects/content` endpoints
-  feed this one reader (DRY and byte-for-byte identical S3 output). Full +
-  range downloads answer `206`/`Content-Range` without buffering an object.
+  decrypts + checksum-verifies one chunk span at a time by fetching Telegram
+  documents chunk-by-chunk. Both the S3 `get_object` and the admin
+  `GET/HEAD /_admin/api/objects/content` endpoints feed this one reader (DRY
+  and byte-for-byte identical S3 output). Full + range downloads answer
+  `206`/`Content-Range` without buffering an object.
 - **The wizard keeps exactly one single-account Telegram client alive while it
   is open**, opened lazily on `begin` and dropped on completion/cancel, so we
   avoid holding an idle client when Telegram is already authorised and no wizard
@@ -108,11 +110,9 @@ Implemented as the documented follow-up increment:
   (stdin/stdout prompts) driving those shared real steps rather than changing
   behaviour for headless/CI use; aligning it to literally call in to the driver
   object is a documented, non-functional follow-up.
-- **Honest scope gate**: there is still no real Telegram byte transport (data
-  plane reads/writes committed local chunk files; `telegram_document_id` is
-  `local:`) and no bulk folder download/server-side ZIP (which would require
-  whole-object buffering). Both are recorded as future work in
-  `docs/limitations.md`.
+- **Honest scope gate**: there is still no bulk folder download/server-side ZIP
+  (which would require whole-object buffering). That remains recorded as future
+  work in `docs/limitations.md`.
 
 ## Rejected alternatives
 

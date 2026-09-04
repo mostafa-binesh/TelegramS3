@@ -608,6 +608,28 @@ impl MetadataStore {
         })
     }
 
+    pub fn update_manifest(
+        &self,
+        manifest: ObjectManifest,
+    ) -> Result<ObjectManifest, MetadataError> {
+        let object_id = manifest.object_id.to_string();
+        let manifest_json = serde_json::to_string(&manifest)?;
+        self.with_connection(|connection| {
+            let tx = connection.transaction()?;
+            tx.execute(
+                r#"
+                UPDATE object_manifests
+                SET commit_state = ?2,
+                    manifest_json = ?3
+                WHERE object_id = ?1
+                "#,
+                params![object_id, manifest.commit_state.as_str(), manifest_json],
+            )?;
+            tx.commit()?;
+            Ok(manifest)
+        })
+    }
+
     pub fn tombstone_manifest(
         &self,
         object_id: Uuid,

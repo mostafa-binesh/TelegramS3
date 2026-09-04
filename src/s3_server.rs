@@ -6,8 +6,10 @@ use crate::redact;
 use crate::telegram::{TelegramTransport, TelegramTransportStatus};
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::StreamExt;
 use http::{StatusCode, header};
-use hyper::body::Incoming;
+use http_body_util::StreamBody;
+use hyper::body::{Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -257,8 +259,8 @@ impl S3Server {
         config.validate()?;
         let transport = TelegramTransport::open(config.clone()).await?;
         let transport_status = transport.bootstrap().await?;
-        let object_format = Arc::new(ObjectFormatService::open(config)?);
-        let object_status = object_format.bootstrap()?;
+        let object_format = Arc::new(ObjectFormatService::open(config).await?);
+        let object_status = object_format.bootstrap().await?;
         let admin_addr = config.admin_bind_addr()?;
         let admin_ui_dist_dir = config.admin_ui_dist_dir();
         let admin_index = admin_ui_dist_dir.join("index.html");
@@ -663,6 +665,7 @@ impl S3 for TelegramS3Backend {
         let bytes = self
             .object_format
             .read_bytes(&source_manifest.bucket, &source_manifest.key, range)
+            .await
             .map_err(map_object_error)?;
         let upload_id = uuid::Uuid::parse_str(&input.upload_id).map_err(|error| {
             s3s::S3Error::with_message(S3ErrorCode::InvalidArgument, error.to_string())
@@ -766,6 +769,7 @@ impl S3 for TelegramS3Backend {
                 content_length: plan_parts.iter().map(|part| part.size).sum(),
                 parts: plan_parts,
             })
+            .await
             .map_err(map_object_error)?;
         Ok(S3Response::new(CompleteMultipartUploadOutput {
             bucket: Some(manifest.bucket),
@@ -786,6 +790,7 @@ impl S3 for TelegramS3Backend {
         })?;
         self.object_format
             .abort_multipart_upload(upload_id)
+            .await
             .map_err(map_object_error)?;
         Ok(S3Response::new(AbortMultipartUploadOutput::default()))
     }
@@ -865,6 +870,7 @@ impl S3 for TelegramS3Backend {
         let bytes = self
             .object_format
             .read_bytes(&manifest.bucket, &manifest.key, 0..manifest.content_length)
+            .await
             .map_err(map_object_error)?;
         let content_type = input
             .content_type
@@ -873,6 +879,7 @@ impl S3 for TelegramS3Backend {
         let copied = self
             .object_format
             .put_bytes(&input.bucket, &input.key, &content_type, &bytes)
+            .await
             .map_err(map_object_error)?;
         let copy_result = s3s::dto::CopyObjectResult {
             e_tag: Some(ETag::Strong(copied.checksum.whole_object.clone())),
@@ -957,7 +964,10 @@ impl S3 for TelegramS3Backend {
             &manifest,
             spans,
         );
-        let body = StreamingBlob::wrap(body_stream);
+        let body = Body::http_body_unsync(StreamBody::new(
+            body_stream.map(|chunk| chunk.map(Frame::data)),
+        ))
+        .into();
         Ok(S3Response::new(GetObjectOutput {
             body: Some(body),
             content_length: Some((range.end - range.start) as i64),

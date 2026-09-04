@@ -1,11 +1,14 @@
 use crate::config::AppConfig;
-use crate::manifest::{ChunkRef, CommitState, ObjectChecksum, ObjectManifest};
+use crate::manifest::{ChunkRef, CommitState, ObjectChecksum, ObjectManifest, TelegramLocation};
 use crate::metadata::{
     BucketRecord, JournalEntry, MetadataError, MetadataStatus, MetadataStore, OperationKind,
 };
 use crate::multipart::{MultipartCompletionPlan, MultipartPart, MultipartSession, MultipartState};
+use crate::telegram::TelegramTransport;
 use bytes::Bytes;
 use futures::StreamExt;
+use grammers_client::media::Media;
+use grammers_client::message::InputMessage;
 use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use s3s::{Body, dto::StreamingBlob};
 use sha2::{Digest, Sha256};
@@ -19,6 +22,7 @@ use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tokio::fs as async_fs;
 use tokio::io::AsyncWriteExt;
+use tracing::warn;
 use uuid::Uuid;
 
 const CHECKSUM_ALGORITHM: &str = "sha256";
@@ -30,6 +34,7 @@ const MANIFEST_ROOT: &str = "manifests";
 const CHUNK_ROOT: &str = "chunks";
 const QUARANTINE_ROOT: &str = "quarantine";
 const MULTIPART_ROOT: &str = "multipart";
+const MOCK_TELEGRAM_ROOT: &str = "mock-telegram";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkPlan {
@@ -89,6 +94,19 @@ pub struct ObjectFormatStatus {
     pub staged_objects: u64,
     pub recovery_required_objects: u64,
     pub orphaned_chunks: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RecoveryIssue {
+    pub object_id: Option<Uuid>,
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    pub path: Option<String>,
+    pub commit_state: Option<CommitState>,
+    pub kind: String,
+    pub summary: String,
+    pub details: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +215,8 @@ pub enum ObjectFormatError {
     #[error("{0}")]
     Metadata(#[from] MetadataError),
     #[error("{0}")]
+    Telegram(#[from] crate::telegram::TelegramTransportError),
+    #[error("{0}")]
     Serde(#[from] serde_json::Error),
     #[error("io error: {0}")]
     Io(#[from] io::Error),
@@ -220,6 +240,7 @@ pub enum ObjectFormatError {
 
 pub struct ObjectFormatService {
     metadata: MetadataStore,
+    transport: std::sync::Arc<TelegramTransport>,
     data_dir: PathBuf,
     chunk_size: u64,
     storage_chat_id: String,
@@ -227,15 +248,17 @@ pub struct ObjectFormatService {
 }
 
 impl ObjectFormatService {
-    pub fn open(config: &AppConfig) -> Result<Self, ObjectFormatError> {
+    pub async fn open(config: &AppConfig) -> Result<Self, ObjectFormatError> {
         config.validate()?;
         let metadata = MetadataStore::open(config.metadata_path())?;
         let master_key = config
             .telegram_s3_master_key
             .clone()
             .ok_or_else(|| ObjectFormatError::InvalidPlan("missing master key".to_string()))?;
+        let transport = std::sync::Arc::new(TelegramTransport::open(config.clone()).await?);
         let service = Self::new(
             metadata,
+            transport,
             config.data_dir(),
             config.chunk_size()?,
             config.telegram_storage_chat_id.clone().ok_or_else(|| {
@@ -248,6 +271,7 @@ impl ObjectFormatService {
 
     pub(crate) fn new(
         metadata: MetadataStore,
+        transport: std::sync::Arc<TelegramTransport>,
         data_dir: impl AsRef<Path>,
         chunk_size: u64,
         storage_chat_id: String,
@@ -261,6 +285,7 @@ impl ObjectFormatService {
         fs::create_dir_all(data_dir.join(MULTIPART_ROOT))?;
         Ok(Self {
             metadata,
+            transport,
             data_dir,
             chunk_size,
             storage_chat_id,
@@ -430,12 +455,17 @@ impl ObjectFormatService {
                 actual: checksum_value,
             });
         }
+        let telegram = self
+            .upload_local_file_to_telegram(&part_path, &part_file_name(part_number))
+            .await?;
+        fs::remove_file(&part_path)?;
         let part = MultipartPart {
             upload_id,
             part_number,
             size,
             checksum: checksum_value.clone(),
             e_tag: checksum_value,
+            telegram,
             created_at: OffsetDateTime::now_utc(),
         };
         self.metadata.put_multipart_part(part.clone())?;
@@ -466,7 +496,7 @@ impl ObjectFormatService {
         Ok(self.metadata.list_multipart_parts(upload_id)?)
     }
 
-    pub fn complete_multipart_upload(
+    pub async fn complete_multipart_upload(
         &self,
         plan: MultipartCompletionPlan,
     ) -> Result<ObjectManifest, ObjectFormatError> {
@@ -494,20 +524,9 @@ impl ObjectFormatService {
             ));
         }
 
-        let object_id = Uuid::new_v4();
+        let object_id = plan.object_id;
         let mut chunk_refs = Vec::with_capacity(plan.parts.len());
-        let mut chunk_plan = ChunkPlan {
-            chunk_size: self.chunk_size,
-            content_length: 0,
-            chunks: Vec::new(),
-        };
         let mut whole_hasher = Sha256::new();
-        let multipart_stage_dir = self.multipart_dir(plan.upload_id);
-        let staging_dir = self.staging_dir(plan.upload_id);
-        if staging_dir.exists() {
-            fs::remove_dir_all(&staging_dir)?;
-        }
-        fs::create_dir_all(&staging_dir)?;
 
         let mut offset = 0_u64;
         for (index, part_plan) in plan.parts.iter().enumerate() {
@@ -526,51 +545,40 @@ impl ObjectFormatService {
                     actual: stored_part.e_tag.clone(),
                 });
             }
-
-            let source_path = multipart_stage_dir.join(part_file_name(part_plan.part_number));
-            if !source_path.exists() {
-                return Err(ObjectFormatError::MissingChunk {
-                    object_id: plan.upload_id,
-                    order: index as u32,
+            let message_id = i32::try_from(stored_part.telegram.message_id).map_err(|_| {
+                ObjectFormatError::InvalidPlan(format!(
+                    "telegram message id out of range for part {}",
+                    part_plan.part_number
+                ))
+            })?;
+            let ciphertext = self.download_message_bytes(message_id).await?;
+            let plaintext = self.decrypt_chunk(object_id, part_plan.part_number, &ciphertext)?;
+            let actual_checksum = sha256_hex(&plaintext);
+            if actual_checksum != stored_part.checksum {
+                return Err(ObjectFormatError::ChecksumMismatch {
+                    scope: format!("multipart part {}", part_plan.part_number),
+                    expected: stored_part.checksum.clone(),
+                    actual: actual_checksum,
                 });
             }
+            whole_hasher.update(&plaintext);
 
-            let destination_path = staging_dir.join(chunk_file_name(index as u32));
-            if fs::hard_link(&source_path, &destination_path).is_err() {
-                fs::copy(&source_path, &destination_path)?;
-            }
-            update_hasher_from_path(&mut whole_hasher, &source_path)?;
-
-            chunk_plan.chunks.push(PlannedChunk {
-                order: index as u32,
-                offset,
-                size: stored_part.size,
-            });
             chunk_refs.push(ChunkRef {
                 order: index as u32,
                 offset,
                 size: stored_part.size,
                 checksum: stored_part.checksum.clone(),
-                telegram_peer_id: self.storage_chat_id.clone(),
-                telegram_message_id: i64::from(index as i32 + 1),
-                telegram_document_id: Some(format!(
-                    "multipart:{}:{}",
-                    plan.upload_id, part_plan.part_number
-                )),
+                telegram_peer_id: stored_part.telegram.peer_id.clone(),
+                telegram_message_id: stored_part.telegram.message_id,
+                telegram_document_id: stored_part.telegram.document_id.clone(),
             });
-            chunk_plan.content_length = chunk_plan
-                .content_length
-                .checked_add(stored_part.size)
-                .ok_or_else(|| {
-                    ObjectFormatError::InvalidPlan("content length overflow".to_string())
-                })?;
             offset = offset
                 .checked_add(stored_part.size)
                 .ok_or_else(|| ObjectFormatError::InvalidPlan("offset overflow".to_string()))?;
         }
 
         let whole_checksum = hex::encode(whole_hasher.finalize());
-        let manifest = self.new_manifest(ManifestBuildArgs {
+        let mut manifest = self.new_manifest(ManifestBuildArgs {
             object_id,
             bucket: plan.bucket.clone(),
             key: plan.key.clone(),
@@ -582,19 +590,25 @@ impl ObjectFormatService {
         let operation_id = self
             .metadata
             .stage_manifest(OperationKind::Put, manifest.clone())?;
+        let staging_dir = self.staging_dir(operation_id);
+        if staging_dir.exists() {
+            fs::remove_dir_all(&staging_dir)?;
+        }
+        fs::create_dir_all(&staging_dir)?;
         let stage_manifest_path = staging_dir.join(MANIFEST_FILE_NAME);
         write_json_file(&stage_manifest_path, &manifest)?;
-        verify_staged_chunks(&staging_dir, &manifest, &self.encryption)?;
-        let committed = self.commit_staged_object(&StagedObject {
-            operation_id,
-            object_id,
-            manifest,
-            chunk_plan,
-        })?;
+        let manifest_blob = self
+            .upload_local_file_to_telegram(&stage_manifest_path, MANIFEST_FILE_NAME)
+            .await?;
+        manifest.telegram = manifest_blob;
+        manifest.commit_state = CommitState::Committed;
+        write_json_file(&stage_manifest_path, &manifest)?;
+        self.metadata.update_manifest(manifest.clone())?;
+        let committed = self.metadata.commit_manifest(operation_id)?;
         self.metadata
             .update_multipart_session_state(plan.upload_id, MultipartState::Completed)?;
         self.metadata.delete_multipart_parts(plan.upload_id)?;
-        match fs::remove_dir_all(&multipart_stage_dir) {
+        match fs::remove_dir_all(&staging_dir) {
             Ok(()) => {}
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
             Err(_) => {}
@@ -602,7 +616,15 @@ impl ObjectFormatService {
         Ok(committed)
     }
 
-    pub fn abort_multipart_upload(&self, upload_id: Uuid) -> Result<(), ObjectFormatError> {
+    pub async fn abort_multipart_upload(&self, upload_id: Uuid) -> Result<(), ObjectFormatError> {
+        let parts = self.metadata.list_multipart_parts(upload_id)?;
+        let message_ids: Vec<i32> = parts
+            .iter()
+            .filter_map(|part| i32::try_from(part.telegram.message_id).ok())
+            .collect();
+        if !message_ids.is_empty() {
+            self.delete_telegram_messages(&message_ids).await?;
+        }
         self.metadata
             .update_multipart_session_state(upload_id, MultipartState::Aborted)?;
         self.metadata.delete_multipart_parts(upload_id)?;
@@ -669,15 +691,137 @@ impl ObjectFormatService {
         })
     }
 
-    pub fn bootstrap(&self) -> Result<ObjectFormatStatus, ObjectFormatError> {
-        let report = self.reconcile()?;
+    pub async fn bootstrap(&self) -> Result<ObjectFormatStatus, ObjectFormatError> {
+        let report = self.reconcile().await?;
         if report.staged_objects > 0 || report.recovery_required_objects > 0 {
-            return Err(ObjectFormatError::RecoveryRequired(format!(
-                "staged_objects={}, recovery_required_objects={}",
+            warn!(
+                "object-format bootstrap completed with recovery state: staged_objects={}, recovery_required_objects={}",
                 report.staged_objects, report.recovery_required_objects
-            )));
+            );
         }
         self.status()
+    }
+
+    pub async fn recovery_issues(&self) -> Result<Vec<RecoveryIssue>, ObjectFormatError> {
+        let manifests = self.metadata.list_manifests()?;
+        let journal_entries = self.metadata.list_journal_entries()?;
+        let journal_by_operation: HashMap<Uuid, JournalEntry> = journal_entries
+            .into_iter()
+            .map(|entry| (entry.operation_id, entry))
+            .collect();
+        let mut issues = Vec::new();
+
+        for manifest in manifests {
+            match manifest.commit_state {
+                CommitState::Staging => {
+                    let operation_id = journal_by_operation
+                        .values()
+                        .find(|entry| {
+                            entry.object_id == manifest.object_id && entry.state == "staging"
+                        })
+                        .map(|entry| entry.operation_id);
+                    issues.extend(self.inspect_staging_manifest(&manifest, operation_id)?);
+                }
+                CommitState::Committed | CommitState::RecoveryRequired => {
+                    issues.extend(self.inspect_committed_manifest(&manifest).await?);
+                }
+                CommitState::Orphaned => {
+                    issues.push(RecoveryIssue {
+                        object_id: Some(manifest.object_id),
+                        bucket: Some(manifest.bucket.clone()),
+                        key: Some(manifest.key.clone()),
+                        path: Some(format!("{}/{}", manifest.bucket, manifest.key)),
+                        commit_state: Some(manifest.commit_state),
+                        kind: "orphaned".to_string(),
+                        summary: "orphaned object data".to_string(),
+                        details: vec![
+                            "object metadata is marked orphaned and needs reconciliation"
+                                .to_string(),
+                        ],
+                    });
+                }
+                CommitState::Tombstoned => {}
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(self.data_dir.join(STAGING_ROOT)) {
+            for entry in entries {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if Uuid::parse_str(&dir_name).is_ok() {
+                    continue;
+                }
+                issues.push(RecoveryIssue {
+                    object_id: None,
+                    bucket: None,
+                    key: None,
+                    path: Some(entry.path().display().to_string()),
+                    commit_state: None,
+                    kind: "orphaned_staging_dir".to_string(),
+                    summary: "orphaned staging directory".to_string(),
+                    details: vec!["directory is not tied to an active upload".to_string()],
+                });
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(self.data_dir.join(MANIFEST_ROOT)) {
+            for entry in entries {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                let stem = file_name.trim_end_matches(".json");
+                if Uuid::parse_str(stem).is_ok() {
+                    continue;
+                }
+                issues.push(RecoveryIssue {
+                    object_id: None,
+                    bucket: None,
+                    key: None,
+                    path: Some(entry.path().display().to_string()),
+                    commit_state: None,
+                    kind: "orphaned_manifest_file".to_string(),
+                    summary: "orphaned manifest file".to_string(),
+                    details: vec!["manifest file does not match a tracked object".to_string()],
+                });
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(self.data_dir.join(CHUNK_ROOT)) {
+            for entry in entries {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if Uuid::parse_str(&dir_name).is_ok() {
+                    continue;
+                }
+                issues.push(RecoveryIssue {
+                    object_id: None,
+                    bucket: None,
+                    key: None,
+                    path: Some(entry.path().display().to_string()),
+                    commit_state: None,
+                    kind: "orphaned_chunk_dir".to_string(),
+                    summary: "orphaned chunk directory".to_string(),
+                    details: vec!["chunk directory is not tied to a tracked object".to_string()],
+                });
+            }
+        }
+
+        issues.sort_by(|a, b| {
+            a.bucket
+                .cmp(&b.bucket)
+                .then(a.key.cmp(&b.key))
+                .then(a.path.cmp(&b.path))
+                .then(a.kind.cmp(&b.kind))
+        });
+        Ok(issues)
     }
 
     pub fn plan_upload(&self, content_length: u64) -> Result<ChunkPlan, ObjectFormatError> {
@@ -791,30 +935,65 @@ impl ObjectFormatService {
         })
     }
 
-    pub fn commit_staged_object(
+    pub async fn commit_staged_object(
         &self,
         staged: &StagedObject,
     ) -> Result<ObjectManifest, ObjectFormatError> {
         let staging_dir = self.staging_dir(staged.operation_id);
-        let committed_chunk_dir = self.chunk_dir(staged.object_id);
-        let committed_manifest_path = self.manifest_path(staged.object_id);
-        fs::create_dir_all(&committed_chunk_dir)?;
-
+        let mut final_chunks = Vec::with_capacity(staged.manifest.chunks.len());
+        let mut uploaded_message_ids = Vec::new();
         for chunk in &staged.manifest.chunks {
             let staged_path = staging_dir.join(chunk_file_name(chunk.order));
-            let committed_path = committed_chunk_dir.join(chunk_file_name(chunk.order));
             if !staged_path.exists() {
                 return Err(ObjectFormatError::MissingChunk {
                     object_id: staged.object_id,
                     order: chunk.order,
                 });
             }
-            fs::rename(&staged_path, &committed_path)?;
+            let location = match self
+                .upload_local_file_to_telegram(&staged_path, &chunk_file_name(chunk.order))
+                .await
+            {
+                Ok(location) => location,
+                Err(error) => {
+                    let _ = self.delete_telegram_messages(&uploaded_message_ids).await;
+                    return Err(error);
+                }
+            };
+            if let Ok(message_id) = i32::try_from(location.message_id) {
+                uploaded_message_ids.push(message_id);
+            }
+            final_chunks.push(ChunkRef {
+                order: chunk.order,
+                offset: chunk.offset,
+                size: chunk.size,
+                checksum: chunk.checksum.clone(),
+                telegram_peer_id: location.peer_id,
+                telegram_message_id: location.message_id,
+                telegram_document_id: location.document_id,
+            });
+            if let Err(error) = fs::remove_file(&staged_path) {
+                let _ = self.delete_telegram_messages(&uploaded_message_ids).await;
+                return Err(error.into());
+            }
         }
 
         let mut committed_manifest = staged.manifest.clone();
+        committed_manifest.telegram = TelegramLocation {
+            peer_id: self.storage_chat_id.clone(),
+            message_id: 0,
+            document_id: None,
+        };
+        committed_manifest.chunks = final_chunks;
         committed_manifest.commit_state = CommitState::Committed;
-        write_json_file(&committed_manifest_path, &committed_manifest)?;
+        let manifest_path = staging_dir.join(MANIFEST_FILE_NAME);
+        write_json_file(&manifest_path, &committed_manifest)?;
+        let manifest_blob = self
+            .upload_local_file_to_telegram(&manifest_path, MANIFEST_FILE_NAME)
+            .await?;
+        committed_manifest.telegram = manifest_blob;
+        write_json_file(&manifest_path, &committed_manifest)?;
+        self.metadata.update_manifest(committed_manifest.clone())?;
         let committed = self.metadata.commit_manifest(staged.operation_id)?;
         match fs::remove_dir_all(&staging_dir) {
             Ok(()) => {}
@@ -826,7 +1005,7 @@ impl ObjectFormatService {
         Ok(committed)
     }
 
-    pub fn put_bytes(
+    pub async fn put_bytes(
         &self,
         bucket: &str,
         key: &str,
@@ -834,7 +1013,7 @@ impl ObjectFormatService {
         bytes: &[u8],
     ) -> Result<ObjectManifest, ObjectFormatError> {
         let staged = self.stage_bytes(bucket, key, content_type, bytes)?;
-        self.commit_staged_object(&staged)
+        self.commit_staged_object(&staged).await
     }
 
     pub async fn put_stream(
@@ -928,20 +1107,22 @@ impl ObjectFormatService {
             manifest,
             chunk_plan,
         })
+        .await
     }
 
-    pub fn read_bytes(
+    pub async fn read_bytes(
         &self,
         bucket: &str,
         key: &str,
         range: Range<u64>,
     ) -> Result<Vec<u8>, ObjectFormatError> {
         let mut output = Vec::new();
-        self.read_range_to_writer(bucket, key, range, &mut output)?;
+        self.read_range_to_writer(bucket, key, range, &mut output)
+            .await?;
         Ok(output)
     }
 
-    pub fn read_range_to_writer<W: Write>(
+    pub async fn read_range_to_writer<W: Write>(
         &self,
         bucket: &str,
         key: &str,
@@ -968,18 +1149,13 @@ impl ObjectFormatService {
                     order: span.order,
                 },
             )?;
-            let path = self
-                .chunk_dir(manifest.object_id)
-                .join(chunk_file_name(chunk.order));
-            if !path.exists() {
-                return Err(ObjectFormatError::MissingChunk {
-                    object_id: manifest.object_id,
-                    order: chunk.order,
-                });
-            }
-            let mut file = File::open(&path)?;
-            let mut ciphertext = Vec::new();
-            file.read_to_end(&mut ciphertext)?;
+            let message_id = i32::try_from(chunk.telegram_message_id).map_err(|_| {
+                ObjectFormatError::InvalidRead(format!(
+                    "telegram message id out of range for chunk {}",
+                    chunk.order
+                ))
+            })?;
+            let ciphertext = self.download_message_bytes(message_id).await?;
             let plaintext = if manifest.encryption.enabled {
                 self.decrypt_chunk(manifest.object_id, chunk.order, &ciphertext)?
             } else {
@@ -1000,7 +1176,7 @@ impl ObjectFormatService {
         Ok(())
     }
 
-    pub fn reconcile(&self) -> Result<ReconciliationReport, ObjectFormatError> {
+    pub async fn reconcile(&self) -> Result<ReconciliationReport, ObjectFormatError> {
         let mut repaired_objects = 0_u64;
         let mut quarantined_objects = 0_u64;
         let mut orphaned_chunks = 0_u64;
@@ -1029,7 +1205,7 @@ impl ObjectFormatService {
                             manifest: manifest.clone(),
                             chunk_plan: self.plan_upload(manifest.content_length)?,
                         };
-                        self.commit_staged_object(&staged)?;
+                        self.commit_staged_object(&staged).await?;
                         repaired_objects += 1;
                         continue;
                     }
@@ -1038,16 +1214,16 @@ impl ObjectFormatService {
                     quarantined_objects += self.quarantine_staging_manifest(manifest)?;
                 }
                 CommitState::Committed => {
-                    if !self.committed_object_ready(manifest)? {
+                    if !self.committed_object_ready(manifest).await? {
                         self.metadata.update_manifest_state(
                             manifest.object_id,
                             CommitState::RecoveryRequired,
                         )?;
-                        repaired_objects += self.try_repair_committed_manifest(manifest)?;
+                        repaired_objects += self.try_repair_committed_manifest(manifest).await?;
                     }
                 }
                 CommitState::RecoveryRequired => {
-                    if self.committed_object_ready(manifest)? {
+                    if self.committed_object_ready(manifest).await? {
                         self.metadata
                             .update_manifest_state(manifest.object_id, CommitState::Committed)?;
                         repaired_objects += 1;
@@ -1142,7 +1318,7 @@ impl ObjectFormatService {
         })
     }
 
-    pub fn garbage_collect(
+    pub async fn garbage_collect(
         &self,
         dry_run: bool,
         retention: Duration,
@@ -1161,6 +1337,21 @@ impl ObjectFormatService {
             }
             eligible_objects += 1;
             let object_id = record.manifest.object_id;
+            let mut message_ids: Vec<i32> = record
+                .manifest
+                .chunks
+                .iter()
+                .filter_map(|chunk| i32::try_from(chunk.telegram_message_id).ok())
+                .collect();
+            if let Ok(manifest_message_id) = i32::try_from(record.manifest.telegram.message_id)
+                && manifest_message_id > 0
+            {
+                message_ids.push(manifest_message_id);
+            }
+            if !dry_run && !message_ids.is_empty() {
+                self.delete_telegram_messages(&message_ids).await?;
+            }
+
             let manifest_path = self.manifest_path(object_id);
             if manifest_path.exists() {
                 bytes_removed = bytes_removed.saturating_add(fs::metadata(&manifest_path)?.len());
@@ -1179,6 +1370,7 @@ impl ObjectFormatService {
                 chunk_directories_removed += 1;
             }
 
+            bytes_removed = bytes_removed.saturating_add(record.manifest.content_length);
             quarantine_entries_removed += self.cleanup_quarantine_entries(object_id, dry_run)?;
         }
 
@@ -1246,42 +1438,52 @@ impl ObjectFormatService {
         this: Arc<Self>,
         manifest: &ObjectManifest,
         spans: Vec<ReadSpan>,
-    ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + Sync + 'static {
+    ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + 'static {
         futures::stream::unfold(
-            (
-                Arc::clone(&this),
-                manifest.object_id,
-                manifest.encryption.enabled,
-                0usize,
-                spans,
-                false,
-            ),
-            move |(object_format, object_id, encryption_enabled, index, spans, done)| async move {
+            (Arc::clone(&this), manifest.clone(), 0usize, spans, false),
+            move |(object_format, manifest, index, spans, done)| async move {
                 if done {
                     return None;
                 }
                 let span = spans.get(index)?.clone();
-                let path = object_format
-                    .chunk_dir(object_id)
-                    .join(chunk_file_name(span.order));
-                let ciphertext = match async_fs::read(&path).await {
-                    Ok(value) => value,
-                    Err(error) => {
+                let chunk = match manifest.chunks.get(span.order as usize) {
+                    Some(chunk) => chunk,
+                    None => {
                         return Some((
-                            Err(error),
-                            (
-                                object_format,
-                                object_id,
-                                encryption_enabled,
-                                index + 1,
-                                spans,
-                                true,
-                            ),
+                            Err(io::Error::new(
+                                io::ErrorKind::NotFound,
+                                format!("missing chunk {}", span.order),
+                            )),
+                            (object_format, manifest, index + 1, spans, true),
                         ));
                     }
                 };
-                let plaintext = if encryption_enabled {
-                    match object_format.decrypt_chunk(object_id, span.order, &ciphertext) {
+                let message_id = match i32::try_from(chunk.telegram_message_id) {
+                    Ok(message_id) => message_id,
+                    Err(_) => {
+                        return Some((
+                            Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "telegram message id out of range for chunk {}",
+                                    span.order
+                                ),
+                            )),
+                            (object_format, manifest, index + 1, spans, true),
+                        ));
+                    }
+                };
+                let ciphertext = match object_format.download_message_bytes(message_id).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Some((
+                            Err(io::Error::other(error.to_string())),
+                            (object_format, manifest, index + 1, spans, true),
+                        ));
+                    }
+                };
+                let plaintext = if manifest.encryption.enabled {
+                    match object_format.decrypt_chunk(manifest.object_id, span.order, &ciphertext) {
                         Ok(value) => value,
                         Err(error) => {
                             return Some((
@@ -1289,14 +1491,7 @@ impl ObjectFormatService {
                                     io::ErrorKind::InvalidData,
                                     error.to_string(),
                                 )),
-                                (
-                                    object_format,
-                                    object_id,
-                                    encryption_enabled,
-                                    index + 1,
-                                    spans,
-                                    true,
-                                ),
+                                (object_format, manifest, index + 1, spans, true),
                             ));
                         }
                     }
@@ -1314,14 +1509,7 @@ impl ObjectFormatService {
                                 sha256_hex(&plaintext)
                             ),
                         )),
-                        (
-                            object_format,
-                            object_id,
-                            encryption_enabled,
-                            index + 1,
-                            spans,
-                            true,
-                        ),
+                        (object_format, manifest, index + 1, spans, true),
                     ));
                 }
                 let start = span.offset_within_chunk as usize;
@@ -1338,26 +1526,12 @@ impl ObjectFormatService {
                                 end
                             ),
                         )),
-                        (
-                            object_format,
-                            object_id,
-                            encryption_enabled,
-                            index + 1,
-                            spans,
-                            true,
-                        ),
+                        (object_format, manifest, index + 1, spans, true),
                     ));
                 }
                 Some((
                     Ok(Bytes::copy_from_slice(&plaintext[start..end])),
-                    (
-                        object_format,
-                        object_id,
-                        encryption_enabled,
-                        index + 1,
-                        spans,
-                        false,
-                    ),
+                    (object_format, manifest, index + 1, spans, false),
                 ))
             },
         )
@@ -1397,21 +1571,18 @@ impl ObjectFormatService {
         })
     }
 
-    fn committed_object_ready(&self, manifest: &ObjectManifest) -> Result<bool, ObjectFormatError> {
-        let manifest_path = self.manifest_path(manifest.object_id);
-        if !manifest_path.exists() {
-            return Ok(false);
-        }
+    async fn committed_object_ready(
+        &self,
+        manifest: &ObjectManifest,
+    ) -> Result<bool, ObjectFormatError> {
         for chunk in &manifest.chunks {
-            let path = self
-                .chunk_dir(manifest.object_id)
-                .join(chunk_file_name(chunk.order));
-            if !path.exists() {
-                return Ok(false);
-            }
-            let mut file = File::open(&path)?;
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
+            let message_id = i32::try_from(chunk.telegram_message_id).map_err(|_| {
+                ObjectFormatError::InvalidRead(format!(
+                    "telegram message id out of range for chunk {}",
+                    chunk.order
+                ))
+            })?;
+            let bytes = self.download_message_bytes(message_id).await?;
             let plaintext = if manifest.encryption.enabled {
                 self.decrypt_chunk(manifest.object_id, chunk.order, &bytes)?
             } else {
@@ -1457,18 +1628,260 @@ impl ObjectFormatService {
         Ok(true)
     }
 
-    fn try_repair_committed_manifest(
+    async fn try_repair_committed_manifest(
         &self,
         manifest: &ObjectManifest,
     ) -> Result<u64, ObjectFormatError> {
-        if self.committed_object_ready(manifest)? {
-            let committed_manifest_path = self.manifest_path(manifest.object_id);
-            write_json_file(&committed_manifest_path, manifest)?;
+        if self.committed_object_ready(manifest).await? {
             self.metadata
                 .update_manifest_state(manifest.object_id, CommitState::Committed)?;
             return Ok(1);
         }
         Ok(0)
+    }
+
+    fn inspect_staging_manifest(
+        &self,
+        manifest: &ObjectManifest,
+        operation_id: Option<Uuid>,
+    ) -> Result<Vec<RecoveryIssue>, ObjectFormatError> {
+        let mut issues = Vec::new();
+        let mut missing_details = Vec::new();
+        let mut corrupted_details = Vec::new();
+        let mut invalid_details = Vec::new();
+
+        if let Err(error) = manifest.validate() {
+            invalid_details.push(format!("manifest validation failed: {error}"));
+        }
+
+        let staging_dir = operation_id
+            .map(|id| self.staging_dir(id))
+            .unwrap_or_else(|| {
+                self.data_dir
+                    .join(STAGING_ROOT)
+                    .join(manifest.object_id.to_string())
+            });
+
+        if !staging_dir.exists() {
+            issues.push(self.build_recovery_issue(
+                manifest,
+                "missing_staging_dir",
+                "staging directory missing".to_string(),
+                vec![format!(
+                    "expected staging directory: {}",
+                    staging_dir.display()
+                )],
+            ));
+            return Ok(issues);
+        }
+
+        let stage_manifest = staging_dir.join(MANIFEST_FILE_NAME);
+        if !stage_manifest.exists() {
+            invalid_details.push(format!(
+                "staged manifest missing: {}",
+                stage_manifest.display()
+            ));
+        } else {
+            let bytes = fs::read(&stage_manifest)?;
+            let actual_checksum = sha256_hex(&bytes);
+            let expected_checksum = sha256_hex(&serde_json::to_vec_pretty(manifest)?);
+            if actual_checksum != expected_checksum {
+                corrupted_details.push(format!(
+                    "staged manifest checksum mismatch at {}: expected {}, got {}",
+                    stage_manifest.display(),
+                    expected_checksum,
+                    actual_checksum
+                ));
+            }
+        }
+
+        for chunk in &manifest.chunks {
+            let path = staging_dir.join(chunk_file_name(chunk.order));
+            if !path.exists() {
+                missing_details.push(format!(
+                    "chunk {} missing at {}",
+                    chunk.order,
+                    path.display()
+                ));
+                continue;
+            }
+            let bytes = fs::read(&path)?;
+            let plaintext = if manifest.encryption.enabled {
+                match self.decrypt_chunk(manifest.object_id, chunk.order, &bytes) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        corrupted_details.push(format!(
+                            "chunk {} could not be decrypted at {}: {}",
+                            chunk.order,
+                            path.display(),
+                            error
+                        ));
+                        continue;
+                    }
+                }
+            } else {
+                bytes
+            };
+            let actual_checksum = sha256_hex(&plaintext);
+            if actual_checksum != chunk.checksum {
+                corrupted_details.push(format!(
+                    "chunk {} checksum mismatch at {}: expected {}, got {}",
+                    chunk.order,
+                    path.display(),
+                    chunk.checksum,
+                    actual_checksum
+                ));
+            }
+        }
+
+        if !invalid_details.is_empty() {
+            issues.push(self.build_recovery_issue(
+                manifest,
+                "invalid_staging_manifest",
+                "staged metadata is invalid".to_string(),
+                invalid_details,
+            ));
+        }
+        if !missing_details.is_empty() {
+            issues.push(self.build_recovery_issue(
+                manifest,
+                "missing_staged_chunk",
+                format!("{} staged chunk(s) missing", missing_details.len()),
+                missing_details,
+            ));
+        }
+        if !corrupted_details.is_empty() {
+            issues.push(self.build_recovery_issue(
+                manifest,
+                "corrupted_staged_chunk",
+                format!("{} staged chunk(s) corrupted", corrupted_details.len()),
+                corrupted_details,
+            ));
+        }
+
+        Ok(issues)
+    }
+
+    async fn inspect_committed_manifest(
+        &self,
+        manifest: &ObjectManifest,
+    ) -> Result<Vec<RecoveryIssue>, ObjectFormatError> {
+        let mut issues = Vec::new();
+        let mut missing_details = Vec::new();
+        let mut corrupted_details = Vec::new();
+        let mut invalid_details = Vec::new();
+
+        if let Err(error) = manifest.validate() {
+            invalid_details.push(format!("manifest validation failed: {error}"));
+        }
+
+        if manifest.chunks.is_empty() && manifest.content_length > 0 {
+            invalid_details.push(format!(
+                "manifest declares {} bytes but has no chunk references",
+                manifest.content_length
+            ));
+        }
+
+        for chunk in &manifest.chunks {
+            let message_id = match i32::try_from(chunk.telegram_message_id) {
+                Ok(message_id) => message_id,
+                Err(_) => {
+                    invalid_details.push(format!(
+                        "chunk {} has telegram message id out of range: {}",
+                        chunk.order, chunk.telegram_message_id
+                    ));
+                    continue;
+                }
+            };
+
+            let ciphertext = match self.download_message_bytes(message_id).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let message = error.to_string();
+                    if message.contains("not found") {
+                        missing_details.push(format!(
+                            "chunk {} missing from Telegram message {}",
+                            chunk.order, message_id
+                        ));
+                    } else {
+                        corrupted_details.push(format!(
+                            "chunk {} could not be read from Telegram message {}: {}",
+                            chunk.order, message_id, message
+                        ));
+                    }
+                    continue;
+                }
+            };
+
+            let plaintext = if manifest.encryption.enabled {
+                match self.decrypt_chunk(manifest.object_id, chunk.order, &ciphertext) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        corrupted_details.push(format!(
+                            "chunk {} could not be decrypted from Telegram message {}: {}",
+                            chunk.order, message_id, error
+                        ));
+                        continue;
+                    }
+                }
+            } else {
+                ciphertext
+            };
+
+            let actual_checksum = sha256_hex(&plaintext);
+            if actual_checksum != chunk.checksum {
+                corrupted_details.push(format!(
+                    "chunk {} checksum mismatch from Telegram message {}: expected {}, got {}",
+                    chunk.order, message_id, chunk.checksum, actual_checksum
+                ));
+            }
+        }
+
+        if !invalid_details.is_empty() {
+            issues.push(self.build_recovery_issue(
+                manifest,
+                "invalid_manifest",
+                "manifest metadata is invalid".to_string(),
+                invalid_details,
+            ));
+        }
+        if !missing_details.is_empty() {
+            issues.push(self.build_recovery_issue(
+                manifest,
+                "missing_chunk",
+                format!("{} chunk(s) missing", missing_details.len()),
+                missing_details,
+            ));
+        }
+        if !corrupted_details.is_empty() {
+            issues.push(self.build_recovery_issue(
+                manifest,
+                "corrupted_chunk",
+                format!("{} chunk(s) corrupted", corrupted_details.len()),
+                corrupted_details,
+            ));
+        }
+
+        Ok(issues)
+    }
+
+    fn build_recovery_issue(
+        &self,
+        manifest: &ObjectManifest,
+        kind: &str,
+        summary: String,
+        details: Vec<String>,
+    ) -> RecoveryIssue {
+        RecoveryIssue {
+            object_id: Some(manifest.object_id),
+            bucket: Some(manifest.bucket.clone()),
+            key: Some(manifest.key.clone()),
+            path: Some(format!("{}/{}", manifest.bucket, manifest.key)),
+            commit_state: Some(manifest.commit_state),
+            kind: kind.to_string(),
+            summary,
+            details,
+        }
     }
 
     fn quarantine_staging_manifest(
@@ -1630,6 +2043,150 @@ impl ObjectFormatService {
             chunks: args.chunks,
         }
     }
+
+    async fn upload_local_file_to_telegram(
+        &self,
+        path: &Path,
+        file_name: &str,
+    ) -> Result<TelegramLocation, ObjectFormatError> {
+        if self.transport.is_mock() {
+            let message_id = self.next_mock_message_id()?;
+            let mock_dir = self.mock_telegram_dir();
+            fs::create_dir_all(&mock_dir)?;
+            let destination = mock_dir.join(format!("{message_id}.bin"));
+            fs::copy(path, &destination)?;
+            return Ok(TelegramLocation {
+                peer_id: self.storage_chat_id.clone(),
+                message_id: i64::from(message_id),
+                document_id: Some(format!("mock:{message_id}:{file_name}")),
+            });
+        }
+        let client = self.transport.client()?;
+        let storage_peer = self.transport.storage_peer().await?;
+        let uploaded = client.upload_file(path).await.map_err(|error| {
+            ObjectFormatError::Telegram(crate::telegram::TelegramTransportError::Rpc(format!(
+                "upload_file({file_name}) failed: {error}"
+            )))
+        })?;
+        let message = client
+            .send_message(
+                storage_peer,
+                InputMessage::new().text("").document(uploaded),
+            )
+            .await
+            .map_err(|error| {
+                ObjectFormatError::Telegram(crate::telegram::TelegramTransportError::Rpc(format!(
+                    "send_message({file_name}) failed: {error}"
+                )))
+            })?;
+        let media = message.media().ok_or_else(|| {
+            ObjectFormatError::InvalidPlan(format!(
+                "telegram upload did not return media for {file_name}"
+            ))
+        })?;
+        let document = match media {
+            Media::Document(document) => document,
+            _ => {
+                return Err(ObjectFormatError::InvalidPlan(format!(
+                    "telegram upload did not store {file_name} as a document"
+                )));
+            }
+        };
+        Ok(TelegramLocation {
+            peer_id: self.storage_chat_id.clone(),
+            message_id: i64::from(message.id()),
+            document_id: Some(document.id().to_string()),
+        })
+    }
+
+    async fn download_message_bytes(&self, message_id: i32) -> Result<Vec<u8>, ObjectFormatError> {
+        if self.transport.is_mock() {
+            let path = self.mock_telegram_dir().join(format!("{message_id}.bin"));
+            if !path.exists() {
+                return Err(ObjectFormatError::InvalidRead(format!(
+                    "telegram message not found: {message_id}"
+                )));
+            }
+            return Ok(fs::read(path)?);
+        }
+        let client = self.transport.client()?;
+        let storage_peer = self.transport.storage_peer().await?;
+        let messages = client
+            .get_messages_by_id(storage_peer, &[message_id])
+            .await
+            .map_err(|error| {
+                ObjectFormatError::Telegram(crate::telegram::TelegramTransportError::Rpc(
+                    error.to_string(),
+                ))
+            })?;
+        let message = messages.into_iter().flatten().next().ok_or_else(|| {
+            ObjectFormatError::InvalidRead(format!("telegram message not found: {message_id}"))
+        })?;
+        let media = message.media().ok_or_else(|| {
+            ObjectFormatError::InvalidRead(format!("telegram message has no media: {message_id}"))
+        })?;
+        let mut download = client.iter_download(&media);
+        let mut bytes = Vec::new();
+        while let Some(chunk) = download.next().await.map_err(|error| {
+            ObjectFormatError::Telegram(crate::telegram::TelegramTransportError::Rpc(
+                error.to_string(),
+            ))
+        })? {
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+
+    async fn delete_telegram_messages(&self, message_ids: &[i32]) -> Result<(), ObjectFormatError> {
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+        if self.transport.is_mock() {
+            let mock_dir = self.mock_telegram_dir();
+            for message_id in message_ids {
+                let path = mock_dir.join(format!("{message_id}.bin"));
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+            return Ok(());
+        }
+        let client = self.transport.client()?;
+        let storage_peer = self.transport.storage_peer().await?;
+        client
+            .delete_messages(storage_peer, message_ids)
+            .await
+            .map_err(|error| {
+                ObjectFormatError::Telegram(crate::telegram::TelegramTransportError::Rpc(
+                    error.to_string(),
+                ))
+            })?;
+        Ok(())
+    }
+
+    fn mock_telegram_dir(&self) -> PathBuf {
+        self.data_dir.join(MOCK_TELEGRAM_ROOT)
+    }
+
+    fn next_mock_message_id(&self) -> Result<i32, ObjectFormatError> {
+        let mock_dir = self.mock_telegram_dir();
+        fs::create_dir_all(&mock_dir)?;
+        let mut next = 1_i32;
+        for entry in fs::read_dir(&mock_dir)? {
+            let entry = entry?;
+            let stem = entry
+                .path()
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .and_then(|value| value.parse::<i32>().ok());
+            if let Some(message_id) = stem
+                && message_id >= next
+            {
+                next = message_id + 1;
+            }
+        }
+        Ok(next)
+    }
 }
 
 fn verify_staged_chunks(
@@ -1710,35 +2267,48 @@ fn part_file_name(part_number: u32) -> String {
     format!("part-{part_number:08}.bin")
 }
 
-fn update_hasher_from_path(hasher: &mut Sha256, path: &Path) -> Result<(), io::Error> {
-    let mut file = File::open(path)?;
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
+    use std::env;
     use tempfile::TempDir;
     use time::Duration;
 
-    fn sample_service(tempdir: &TempDir) -> ObjectFormatService {
-        let metadata = MetadataStore::open_in_memory().expect("metadata");
-        ObjectFormatService::new(
-            metadata,
-            tempdir.path(),
-            1024,
-            "-1001234567890".to_string(),
-            ObjectEncryption::from_master_key("master-key"),
-        )
-        .expect("service")
+    fn test_config(tempdir: &TempDir) -> AppConfig {
+        AppConfig {
+            telegram_api_id: Some("123456".to_string()),
+            telegram_api_hash: Some("test-api-hash".to_string()),
+            telegram_session_path: Some(
+                tempdir
+                    .path()
+                    .join("session")
+                    .join("telegram.session")
+                    .display()
+                    .to_string(),
+            ),
+            telegram_storage_chat_id: Some("-1001234567890".to_string()),
+            telegram_metadata_path: Some(
+                tempdir.path().join("metadata.sqlite").display().to_string(),
+            ),
+            telegram_data_dir: Some(tempdir.path().join("data").display().to_string()),
+            telegram_s3_master_key: Some("master-key".to_string()),
+            rustfs_access_key: Some("access-key".to_string()),
+            rustfs_secret_key: Some("secret-key".to_string()),
+            telegram_admin_bootstrap_secret: Some("admin-secret".to_string()),
+            telegram_admin_bind_addr: Some("127.0.0.1:9001".to_string()),
+            telegram_s3_bind_addr: Some("127.0.0.1:9000".to_string()),
+            ..AppConfig::default()
+        }
+    }
+
+    async fn sample_service(tempdir: &TempDir) -> ObjectFormatService {
+        unsafe {
+            env::set_var("TELEGRAM_TRANSPORT_RUNTIME", "mock");
+        }
+        ObjectFormatService::open(&test_config(tempdir))
+            .await
+            .expect("service")
     }
 
     #[test]
@@ -1756,52 +2326,49 @@ mod tests {
         assert_eq!(decoded.len(), 32);
     }
 
-    #[test]
-    fn put_and_read_range_are_chunk_aware() {
+    #[tokio::test]
+    async fn put_and_read_range_are_chunk_aware() {
         let tempdir = TempDir::new().expect("tempdir");
-        let service = sample_service(&tempdir);
+        let service = sample_service(&tempdir).await;
         let payload = b"abcdefghijklmnopqrstuvwxyz";
         let manifest = service
             .put_bytes("bucket", "key.txt", "text/plain", payload)
+            .await
             .expect("put");
         assert_eq!(manifest.commit_state, CommitState::Committed);
         let bytes = service
             .read_bytes("bucket", "key.txt", 3..19)
+            .await
             .expect("read");
         assert_eq!(&bytes, b"defghijklmnopqrs");
+        assert!(!service.chunk_path(manifest.object_id, 0).exists());
+        assert!(!service.manifest_file_path(manifest.object_id).exists());
+        assert!(tempdir.path().join("data/mock-telegram/1.bin").exists());
     }
 
-    #[test]
-    fn staged_upload_can_be_reconciled_after_restart() {
+    #[tokio::test]
+    async fn staged_upload_can_be_reconciled_after_restart() {
         let tempdir = TempDir::new().expect("tempdir");
-        let metadata =
-            MetadataStore::open(tempdir.path().join("metadata.sqlite")).expect("metadata");
-        let service = ObjectFormatService::new(
-            metadata,
-            tempdir.path().join("data"),
-            8,
-            "-1001234567890".to_string(),
-            ObjectEncryption::from_master_key("master-key"),
-        )
-        .expect("service");
+        let service = sample_service(&tempdir).await;
 
         let staged = service
             .stage_bytes("bucket", "key.txt", "text/plain", b"hello world")
             .expect("stage");
         assert_eq!(staged.manifest.commit_state, CommitState::Staging);
-        let report = service.reconcile().expect("reconcile");
+        let report = service.reconcile().await.expect("reconcile");
         assert_eq!(report.repaired_objects, 1);
         assert_eq!(report.staged_objects, 0);
     }
 
-    #[test]
-    fn encrypted_writes_round_trip_and_change_at_rest_bytes() {
+    #[tokio::test]
+    async fn encrypted_writes_round_trip_and_change_at_rest_bytes() {
         let tempdir = TempDir::new().expect("tempdir");
-        let service = sample_service(&tempdir);
+        let service = sample_service(&tempdir).await;
         let payload = b"hello encrypted world";
 
         let manifest = service
             .put_bytes("bucket", "encrypted.txt", "text/plain", payload)
+            .await
             .expect("put");
 
         assert!(manifest.encryption.enabled);
@@ -1810,20 +2377,22 @@ mod tests {
         assert_eq!(
             service
                 .read_bytes("bucket", "encrypted.txt", 0..payload.len() as u64)
+                .await
                 .expect("read"),
             payload
         );
 
-        let chunk_bytes = fs::read(service.chunk_path(manifest.object_id, 0)).expect("chunk");
-        assert_ne!(chunk_bytes, payload);
+        let stored = fs::read(tempdir.path().join("data/mock-telegram/1.bin")).expect("mock blob");
+        assert_ne!(stored, payload);
     }
 
-    #[test]
-    fn garbage_collection_removes_aged_tombstoned_artifacts() {
+    #[tokio::test]
+    async fn garbage_collection_removes_aged_tombstoned_artifacts() {
         let tempdir = TempDir::new().expect("tempdir");
-        let service = sample_service(&tempdir);
+        let service = sample_service(&tempdir).await;
         let manifest = service
             .put_bytes("bucket", "gc.txt", "text/plain", b"gc payload")
+            .await
             .expect("put");
         let tombstoned = service
             .tombstone_manifest(manifest.object_id, "cleanup test")
@@ -1832,17 +2401,23 @@ mod tests {
 
         let preview = service
             .garbage_collect(true, Duration::seconds(0))
+            .await
             .expect("dry-run gc");
         assert_eq!(preview.eligible_objects, 1);
-        assert_eq!(preview.manifests_removed, 1);
-        assert_eq!(preview.chunk_directories_removed, 1);
 
         let report = service
             .garbage_collect(false, Duration::seconds(0))
+            .await
             .expect("gc");
         assert_eq!(report.eligible_objects, 1);
-        assert_eq!(report.manifests_removed, 1);
+        assert!(report.bytes_removed >= b"gc payload".len() as u64);
         assert!(!service.manifest_file_path(manifest.object_id).exists());
         assert!(!service.chunk_path(manifest.object_id, 0).exists());
+        assert!(
+            service
+                .read_bytes("bucket", "gc.txt", 0..b"gc payload".len() as u64)
+                .await
+                .is_err()
+        );
     }
 }

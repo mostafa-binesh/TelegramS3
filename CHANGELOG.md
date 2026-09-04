@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.2-rc.1 - 2026-09-04
+
+- Kept bootstrap alive when recovery-required objects are present and surfaced
+  recovery diagnostics in the admin overview.
+- Added clickable recovery detail rows so operators can inspect missing or
+  corrupted files directly from the web UI.
+
 ## 0.5.1 - 2026-09-04
 
 - Added bounded admin content streaming with ranged downloads backed by the

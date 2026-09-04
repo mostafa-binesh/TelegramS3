@@ -126,8 +126,8 @@ async fn main() {
         Command::Config { command } => run_config(command),
         Command::Index { command } => run_index(command),
         Command::Db { command } => run_db(command),
-        Command::Repair { dry_run } => run_repair(dry_run),
-        Command::Gc { dry_run } => run_gc(dry_run),
+        Command::Repair { dry_run } => run_repair(dry_run).await,
+        Command::Gc { dry_run } => run_gc(dry_run).await,
         Command::Users { command } => run_users(command),
         Command::Upstream { command } => run_upstream(command),
     };
@@ -169,9 +169,10 @@ async fn run_doctor() -> Result<(), String> {
     let server = S3Server::bootstrap(&config)
         .await
         .map_err(|error| error.to_string())?;
-    let object_format = open_object_format(&config)?;
+    let object_format = open_object_format(&config).await?;
     let object_status = object_format
         .bootstrap()
+        .await
         .map_err(render_object_format_error)?;
     let metadata_status = object_format
         .metadata_status()
@@ -385,9 +386,9 @@ fn resolve_password(explicit: Option<String>) -> Result<String, String> {
     }
 }
 
-fn run_repair(dry_run: bool) -> Result<(), String> {
+async fn run_repair(dry_run: bool) -> Result<(), String> {
     let config = load_config()?;
-    let object_format = open_object_format(&config)?;
+    let object_format = open_object_format(&config).await?;
     if dry_run {
         let status = object_format.status().map_err(render_object_format_error)?;
         println!("repair dry-run: no files changed");
@@ -403,6 +404,7 @@ fn run_repair(dry_run: bool) -> Result<(), String> {
 
     let report = object_format
         .reconcile()
+        .await
         .map_err(render_object_format_error)?;
     println!("repair complete");
     println!("staged objects: {}", report.staged_objects);
@@ -421,14 +423,15 @@ fn run_repair(dry_run: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn run_gc(dry_run: bool) -> Result<(), String> {
+async fn run_gc(dry_run: bool) -> Result<(), String> {
     let config = load_config()?;
-    let object_format = open_object_format(&config)?;
+    let object_format = open_object_format(&config).await?;
     let report = object_format
         .garbage_collect(
             dry_run,
             time::Duration::seconds(GARBAGE_COLLECTION_RETENTION_SECONDS),
         )
+        .await
         .map_err(render_object_format_error)?;
     if dry_run {
         println!("gc dry-run: no files changed");
@@ -479,8 +482,10 @@ fn render_transport_error(error: TelegramTransportError) -> String {
     error.to_string()
 }
 
-fn open_object_format(config: &AppConfig) -> Result<ObjectFormatService, String> {
-    ObjectFormatService::open(config).map_err(render_object_format_error)
+async fn open_object_format(config: &AppConfig) -> Result<ObjectFormatService, String> {
+    ObjectFormatService::open(config)
+        .await
+        .map_err(render_object_format_error)
 }
 
 fn render_object_format_error(error: ObjectFormatError) -> String {

@@ -15,9 +15,10 @@ index loss.
 
 Store each object as:
 
-- one manifest document
-- one or more immutable chunk documents
+- one manifest document published to Telegram and mirrored in local metadata
+- one or more immutable chunk documents published to Telegram
 - one local journal/index row
+- transient staging and quarantine artifacts under `TELEGRAM_DATA_DIR`
 
 Use a conservative default chunk size of `1 MiB`.
 
@@ -27,6 +28,7 @@ Use a conservative default chunk size of `1 MiB`.
 - Large objects stay below Telegram's file limit.
 - The manifest can rebuild the local index.
 - Deletes and overwrites need tombstones and background cleanup.
+- Committed payloads no longer grow the local data directory.
 
 ## Rejected Alternatives
 
@@ -37,4 +39,3 @@ Rejected because large S3 objects exceed Telegram's practical file limits.
 ### Caption-only metadata
 
 Rejected because captions are not sufficient for durable object metadata.
-

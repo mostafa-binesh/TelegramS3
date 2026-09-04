@@ -47,8 +47,9 @@ Completed work:
 Completed work:
 
 - the object-format service now chunks uploads, writes staged manifests, and commits only after checksum verification
-- bounded range reads map manifest chunk spans back to the committed chunk files
+- bounded range reads map manifest chunk spans back to Telegram-backed chunk references
 - startup reconciliation repairs complete staged uploads, marks incomplete objects recovery-required, and quarantines orphaned data
+- committed object payloads now live in Telegram documents/messages while SQLite keeps the control-plane index and journal
 - `doctor` and `server` now fail fast if object-format bootstrap finds unresolved recovery state
 
 ## Phase 4 - RustFS integration
@@ -167,6 +168,6 @@ Completed work (content streaming + wizard increment):
 - in-browser Telegram onboarding wizard behind a kept-alive single-account client: authenticated `/telegram/wizard/{state,begin,submit-code,submit-password,cancel}` with a staged, single-in-flight driver (second begin → `409`), mock-runtime test path, and 2FA (cloud-password) stage surfaced only when Telegram asks for it
 - the Svelte UI gains per-file upload + progress, per-row Download, in-app bucket creation, and a three-step Telegram set-up flow; readiness panel flips once authorised
 
-Remaining Phase-9 follow-ups (explicitly out of this increment, see ADR-0006 / ROADMAP): bulk/folder download or server-side ZIP (no whole-RAM buffering), drag-in of nested directory trees, browser resumable-multipart upload negotiation, and moving object bytes on/off Telegram in earnest (the data plane still reads/writes committed local chunk files; `telegram_document_id` is `local:`).
+Remaining Phase-9 follow-ups (explicitly out of this increment, see ADR-0006 / ROADMAP): bulk/folder download or server-side ZIP (no whole-RAM buffering), drag-in of nested directory trees, and browser resumable-multipart upload negotiation.
 
 Rejected alternatives this phase (see `docs/adr/0006-...md`): keeping MinIO-time `TELEGRAM_ADMIN_BOOTSTRAP_SECRET` as a shared login secret; per-user `.env` accounts; a separate credentials SQLite file; `governor`-style thundering rate limiters; site-replication peering of Telegram S3 (documented unsupported).

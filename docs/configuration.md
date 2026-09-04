@@ -45,8 +45,8 @@ RUSTFS_SECRET_KEY=<generate_secure_random_value>
 - transport path: the Telegram session and proxy settings used by
   `auth login`, `auth status`, `auth logout`, `doctor`, and `server`
 - object-format path: `TELEGRAM_DATA_DIR` now houses staged uploads,
-  committed manifests, committed chunks, and quarantine artifacts during
-  phase 3
+  multipart scratch, quarantine artifacts, and mock-transport test blobs; the
+  committed payloads themselves live as Telegram documents/messages
 - S3 bind address: `TELEGRAM_S3_BIND_ADDR` controls where the RustFS-backed
   `server` listener binds
 - admin bind address: `TELEGRAM_ADMIN_BIND_ADDR` controls the loopback-only
@@ -61,7 +61,9 @@ RUSTFS_SECRET_KEY=<generate_secure_random_value>
   `TELEGRAM_DATA_DIR`, and `TELEGRAM_SESSION_PATH` on persistent volumes and
   set `TELEGRAM_S3_BIND_ADDR=0.0.0.0:9000` while leaving
   `TELEGRAM_ADMIN_BIND_ADDR=127.0.0.1:9001`; the admin frontend is served
-  from the same Rust process on the reserved `/_admin` path
+  from the same Rust process on the reserved `/_admin` path. The data volume
+  should grow with in-flight staging or quarantine, not with each successful
+  backup, because committed object bytes are uploaded to Telegram.
 
 Defaults used by the current scaffold:
 

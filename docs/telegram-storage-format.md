@@ -10,13 +10,14 @@
 ## Implementation Status
 
 Phase 3 now implements the object-format service in this repository. Uploads
-are chunked, checksummed, and staged through the journal before they become
-visible, while startup reconciliation repairs complete staged uploads and
-quarantines orphaned staging or chunk data. Phase 5 extends that model with
-durable multipart sessions and version-aware object copies, and phase 6 adds
-adapter-bound envelope encryption plus recovery-aware repair and garbage
-collection around the same layout, so the structure is now shared by single
-PUTs, multipart completion, and the RustFS-backed S3 surface.
+are chunked, checksummed, staged through the journal, and then published as
+Telegram documents/messages before they become visible, while startup
+reconciliation repairs complete staged uploads and quarantines orphaned
+staging or scratch data. Phase 5 extends that model with durable multipart
+sessions and version-aware object copies, and phase 6 adds adapter-bound
+envelope encryption plus recovery-aware repair and garbage collection around
+the same layout, so the structure is now shared by single PUTs, multipart
+completion, and the RustFS-backed S3 surface.
 
 The authenticated operator frontend introduced in phase 8 reads the same
 metadata and status surfaces for visibility, but it does not alter the storage
@@ -40,10 +41,11 @@ validate it against the Telegram client behavior in tests.
 
 ## Manifest Document
 
-The manifest is a small JSON document. In phase 3, the object-format service
-persists it through the local staging and commit paths under
-`TELEGRAM_DATA_DIR`, while the future Telegram transport will publish the same
-payload remotely. It must not depend on captions alone.
+The manifest is a small JSON document. The committed manifest lives in the
+local metadata store and is also published to Telegram as a document during
+commit. `TELEGRAM_DATA_DIR` is only for transient staging, quarantine, and
+recovery artifacts; it must not be the only copy of object bytes or metadata.
+The manifest must not depend on captions alone.
 
 ```json
 {
@@ -100,9 +102,10 @@ payload remotely. It must not depend on captions alone.
 
 - Immutable after commit.
 - Each chunk records order, offset, size, and checksum.
-- Chunk documents are named with a stable object ID and chunk index.
-- In phase 3, chunk payloads are stored as local durable files; phase 4 will
-  map the same layout to Telegram documents.
+- Chunk documents are uploaded to Telegram and identified by peer/message
+  metadata in the manifest.
+- Local disk keeps only temporary staging, quarantine, or mock transport
+  artifacts.
 - Chunk payloads must be independently verifiable.
 
 ## Local Index

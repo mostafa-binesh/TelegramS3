@@ -1,3 +1,4 @@
+use crate::manifest::TelegramLocation;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -48,6 +49,7 @@ pub struct MultipartPart {
     pub size: u64,
     pub checksum: String,
     pub e_tag: String,
+    pub telegram: TelegramLocation,
     pub created_at: OffsetDateTime,
 }
 

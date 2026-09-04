@@ -4,7 +4,7 @@
 
 1. Stop the server.
 2. Preserve the current Telegram session and data directories.
-3. Run `telegram-s3 db status` to confirm the metadata path and schema.
+3. Restore `metadata.sqlite` from backup if you have one, then run `telegram-s3 db status` to confirm the metadata path and schema.
 4. Rebuild the local index with `telegram-s3 index rebuild`.
 5. Verify object counts and checksum samples with `telegram-s3 index verify`.
 
@@ -13,22 +13,26 @@
 > state and who can sign in. If accounts are lost, re-provision the first
 > operator with `telegram-s3 users create <username> --password <pw>` (the first
 > account becomes the superadmin). Password hashes are argon2id + per-account
-> salt and are not recoverable from the file alone.
+> salt and are not recoverable from the file alone. The object rows also hold
+> the Telegram peer/message/document references, so losing the metadata store
+> means losing the index that points at the Telegram payloads.
 
 ## Telegram Manifest Lost
 
 1. Mark the object corrupt or unrecoverable.
-2. Attempt to recover from local backup copies if available.
-3. If chunks remain but the manifest is missing, quarantine them as orphans.
+2. Attempt to recover from a surviving metadata backup or from the source data
+   that produced the object.
+3. If the committed Telegram document is missing, treat the object as corrupt
+   until it is repaired or re-uploaded.
 
 ## Interrupted Upload
 
 1. On startup, inspect the operation journal.
 2. The startup reconciliation pass now promotes complete staged uploads,
    recreates recovery markers for incomplete rows, and quarantines orphaned
-   staging or chunk files.
+   staging artifacts.
 3. Resume only if the upload state is safe to continue.
-4. Otherwise roll back and clean up staging chunks or quarantined artifacts.
+4. Otherwise roll back and clean up staging or quarantined artifacts.
 
 ## Repair and Garbage Collection
 

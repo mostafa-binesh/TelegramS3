@@ -17,7 +17,7 @@ use crate::auth::{self, AuthError, LoginLimiter};
 use crate::config::AppConfig;
 use crate::manifest::ObjectManifest;
 use crate::metadata::MetadataStore;
-use crate::object_format::ObjectFormatService;
+use crate::object_format::{ObjectFormatService, RecoveryIssue as RecoveryIssueModel};
 use crate::redact::{redact_path, redact_phone_number};
 use crate::telegram::{
     LoginDriverError, LoginStage, SessionState, TelegramLoginDriver, TelegramTransport,
@@ -25,10 +25,12 @@ use crate::telegram::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
+use futures::StreamExt;
 use http::header::{self, HeaderValue};
 use http::{Method, StatusCode};
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
+use http_body_util::StreamBody;
+use hyper::body::{Frame, Incoming};
 use hyper::{Request, Response};
 use ring::hmac;
 use s3s::Body;
@@ -332,7 +334,7 @@ impl AdminUiState {
         match (method, rest) {
             (Method::POST, "session/logout") => self.handle_logout(&principal).await,
             (Method::POST, "session/refresh") => self.handle_refresh(&principal).await,
-            (Method::GET, "overview") => self.handle_overview(&principal),
+            (Method::GET, "overview") => self.handle_overview(&principal).await,
             (Method::GET, "users") => self.handle_list_users(),
             (Method::POST, "users") => self.handle_create_user(request, &principal).await,
             (Method::POST, p) if p.starts_with("users/") => {
@@ -805,16 +807,16 @@ impl AdminUiState {
         // Write an empty directory-marker object (S3-visible zero-byte key). The
         // S3 store has no native directory primitive; this keeps it visible to
         // other S3 clients and is used to persist truly-empty folders.
-        let manifest =
-            match self
-                .object_format
-                .put_bytes(&bucket, &path, "application/directory", &[])
-            {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
-                }
-            };
+        let manifest = match self
+            .object_format
+            .put_bytes(&bucket, &path, "application/directory", &[])
+            .await
+        {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        };
         let _ = manifest;
         json_response(StatusCode::CREATED, serde_json::json!({ "ok": true }))
     }
@@ -909,7 +911,9 @@ impl AdminUiState {
                 &manifest,
                 spans,
             );
-            Response::new(Body::from(StreamingBlob::wrap(stream)))
+            Response::new(Body::http_body_unsync(StreamBody::new(
+                stream.map(|chunk| chunk.map(Frame::data)),
+            )))
         };
         *response.status_mut() = status;
         if let Ok(value) = HeaderValue::from_str(&content_length.to_string()) {
@@ -1201,7 +1205,7 @@ impl AdminUiState {
         )
     }
 
-    fn handle_overview(&self, principal: &ResolvedPrincipal) -> Response<Body> {
+    async fn handle_overview(&self, principal: &ResolvedPrincipal) -> Response<Body> {
         let metadata_status = self
             .object_format
             .metadata_status()
@@ -1210,6 +1214,10 @@ impl AdminUiState {
             .object_format
             .status()
             .unwrap_or_else(|_| empty_object());
+        let recovery = match self.object_format.recovery_issues().await {
+            Ok(issues) => RecoveryWire::from_issues(issues),
+            Err(error) => RecoveryWire::failed(error.to_string()),
+        };
         let session_state = self.telegram_status_snapshot().session_state;
         let session_state_debug = format!("{session_state:?}");
         let session_usable = telegram_session_usable(session_state.clone());
@@ -1260,6 +1268,7 @@ impl AdminUiState {
                 "session": {"authenticated": true, "user": UserWire::from_user(&principal.user)},
                 "endpoint": endpoint,
                 "storage": storage,
+                "recovery": recovery,
                 "telegram": telegram,
                 "checks": checks,
             }),
@@ -1711,6 +1720,63 @@ struct StorageWire {
     recovery_markers: u64,
     chunk_size: u64,
     recovery_required_objects: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct RecoveryIssueWire {
+    object_id: Option<String>,
+    bucket: Option<String>,
+    key: Option<String>,
+    path: Option<String>,
+    commit_state: Option<String>,
+    kind: String,
+    summary: String,
+    details: Vec<String>,
+}
+
+impl From<RecoveryIssueModel> for RecoveryIssueWire {
+    fn from(value: RecoveryIssueModel) -> Self {
+        Self {
+            object_id: value.object_id.map(|id| id.to_string()),
+            bucket: value.bucket,
+            key: value.key,
+            path: value.path,
+            commit_state: value.commit_state.map(|state| state.as_str().to_string()),
+            kind: value.kind,
+            summary: value.summary,
+            details: value.details,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct RecoveryWire {
+    issue_count: u64,
+    scan_ok: bool,
+    scan_error: Option<String>,
+    issues: Vec<RecoveryIssueWire>,
+}
+
+impl RecoveryWire {
+    fn from_issues(issues: Vec<RecoveryIssueModel>) -> Self {
+        Self {
+            issue_count: issues.len() as u64,
+            scan_ok: true,
+            scan_error: None,
+            issues: issues.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    fn failed(error: String) -> Self {
+        Self {
+            issue_count: 0,
+            scan_ok: false,
+            scan_error: Some(error),
+            issues: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

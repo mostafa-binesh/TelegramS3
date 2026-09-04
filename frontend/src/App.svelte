@@ -21,6 +21,7 @@
     ObjectEntry,
     ObjectsState,
     OverviewState,
+    RecoveryIssue,
     SessionState,
     UserInfo
   } from './lib/types';
@@ -51,6 +52,7 @@
   let currentPrefix = '';
   let listing: ObjectsState | null = null;
   let newFolder = '';
+  let recoveryOpen = true;
 
   let showWizard = false;
   $: canManageOperators = session?.user?.role === 'superadmin';
@@ -89,6 +91,13 @@
   }
   function crumbs() {
     return currentPrefix.split('/').filter(Boolean);
+  }
+
+  function recoveryLabel(issue: RecoveryIssue) {
+    if (issue.path) return issue.path;
+    if (issue.bucket && issue.key) return `${issue.bucket}/${issue.key}`;
+    if (issue.bucket) return issue.bucket;
+    return issue.kind;
   }
 
   async function bootstrapApp() {
@@ -473,6 +482,56 @@
           <strong>{formatCount(overview?.storage?.recovery_markers ?? 0)}</strong>
         </article>
       </section>
+      <section class="card surface recovery-panel">
+        <div class="section-head">
+          <div>
+            <p class="card-label">Recovery issues</p>
+            <h2>
+              {formatCount(overview?.recovery?.issue_count ?? 0)}
+              {(overview?.recovery?.issue_count ?? 0) === 1 ? ' file needs attention' : ' files need attention'}
+            </h2>
+            <p class="fine-print">
+              Click an issue to see the exact files or Telegram objects that are missing,
+              unreadable, or corrupted.
+            </p>
+          </div>
+          {#if (overview?.recovery?.issues ?? []).length > 0 || overview?.recovery?.scan_error}
+            <button class="ghost" type="button" on:click={() => (recoveryOpen = !recoveryOpen)}>
+              {recoveryOpen ? 'Hide details' : 'Show details'}
+            </button>
+          {/if}
+        </div>
+        {#if overview?.recovery?.scan_error}
+          <p class="error-hint">Recovery scan unavailable: {overview.recovery.scan_error}</p>
+        {:else if (overview?.recovery?.issue_count ?? 0) === 0}
+          <p class="fine-print">No missing or corrupted files were detected.</p>
+        {:else if recoveryOpen}
+          <div class="recovery-list">
+            {#each overview?.recovery?.issues ?? [] as issue}
+              <details class="recovery-item" open>
+                <summary>
+                  <span>{recoveryLabel(issue)}</span>
+                  <small>{issue.summary}</small>
+                </summary>
+                <div class="recovery-meta">
+                  <span>{issue.kind}</span>
+                  {#if issue.commit_state}
+                    <span>{issue.commit_state}</span>
+                  {/if}
+                  {#if issue.object_id}
+                    <span>{issue.object_id}</span>
+                  {/if}
+                </div>
+                <ul>
+                  {#each issue.details as detail}
+                    <li>{detail}</li>
+                  {/each}
+                </ul>
+              </details>
+            {/each}
+          </div>
+        {/if}
+      </section>
       <section class="layout">
         <article class="card surface">
           <p class="card-label">Endpoints</p>
@@ -794,5 +853,52 @@
     gap: 0.75rem;
     flex-wrap: wrap;
     align-items: center;
+  }
+  .recovery-panel {
+    margin: 1rem 0 1.25rem;
+  }
+  .recovery-list {
+    display: grid;
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
+  .recovery-item {
+    border: 1px solid color-mix(in srgb, var(--text, #172033) 12%, transparent);
+    border-radius: 16px;
+    padding: 0.85rem 1rem;
+    background: color-mix(in srgb, var(--bg, #ffffff) 92%, transparent);
+  }
+  .recovery-item summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    align-items: baseline;
+    cursor: pointer;
+    list-style: none;
+  }
+  .recovery-item summary::-webkit-details-marker {
+    display: none;
+  }
+  .recovery-item summary span {
+    font-weight: 700;
+  }
+  .recovery-item summary small {
+    color: var(--text, #172033);
+    opacity: 0.72;
+  }
+  .recovery-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 0.55rem 0 0.35rem;
+    color: var(--text, #172033);
+    opacity: 0.6;
+    font-size: 0.9rem;
+  }
+  .recovery-item ul {
+    margin: 0.4rem 0 0;
+    padding-left: 1.2rem;
+    color: var(--text, #172033);
+    opacity: 0.8;
   }
 </style>

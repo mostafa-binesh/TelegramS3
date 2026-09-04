@@ -31,12 +31,15 @@
   bucket/object surface.
 - The `/_admin` operator surface exposes a bucket/object browser (prefix folders
   + directory markers + delete) and **bounded binary upload/download** whose
-  transport flows through the S3 data plane (see `docs/s3-compatibility.md`).
-  Upload/download memory stays bounded per chunk; the Telegram **login wizard**
-  drives the real single-account login. Guest access, and browsers without a
-  valid session, get `401`/`403` on the content and wizard APIs.
+  transport flows through the Telegram-backed S3 data plane (see
+  `docs/s3-compatibility.md`). Upload/download memory stays bounded per chunk;
+  the Telegram **login wizard** drives the real single-account login. Guest
+  access, and browsers without a valid session, get `401`/`403` on the content
+  and wizard APIs.
+- Committed object payloads live in Telegram documents/messages, so
+  `TELEGRAM_DATA_DIR` should only grow from staging, quarantine, or mock/test
+  artifacts. If that directory grows in lockstep with every backup, something
+  is wrong.
 - Explicit future items (not claimed as done): bulk **folder download** /
   server-side ZIP (would need whole-object buffering) and drag-in of nested
-  directory trees; real Telegram **byte transport** (the object store currently
-  reads/writes committed local chunk files and reports `telegram_document_id` as
-  `local:`).
+  directory trees.

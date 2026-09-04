@@ -7,10 +7,13 @@ use crate::telegram::session::{SessionError, SessionStatus, TelegramSession};
 use grammers_client::Client;
 use grammers_client::SignInError;
 use grammers_mtsender::SenderPool;
+use grammers_session::Session;
+use grammers_session::types::{PeerId, PeerRef};
 use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -123,6 +126,8 @@ pub struct TelegramTransport {
     runner: Option<JoinHandle<()>>,
     retry_policy: RetryPolicy,
     proxy: MaterializedProxy,
+    storage_peer_id: PeerId,
+    storage_peer: Mutex<Option<PeerRef>>,
     mock_mode: bool,
 }
 
@@ -137,6 +142,30 @@ impl TelegramTransport {
         let session_path = PathBuf::from(config.telegram_session_path.as_deref().ok_or(
             TelegramTransportError::InvalidState("missing session path after validation"),
         )?);
+
+        let storage_chat_id =
+            config
+                .telegram_storage_chat_id
+                .clone()
+                .ok_or(TelegramTransportError::InvalidState(
+                    "missing storage chat id after validation",
+                ))?;
+        let storage_peer_id = storage_chat_id
+            .parse::<i64>()
+            .map_err(|_| {
+                TelegramTransportError::Config(ConfigError::Parse {
+                    field: "TELEGRAM_STORAGE_CHAT_ID",
+                    value: storage_chat_id.clone(),
+                })
+            })
+            .and_then(|id| {
+                PeerId::from_bot_api_dialog_id(id).ok_or_else(|| {
+                    TelegramTransportError::Config(ConfigError::Parse {
+                        field: "TELEGRAM_STORAGE_CHAT_ID",
+                        value: storage_chat_id.clone(),
+                    })
+                })
+            })?;
 
         let session = if mock_mode {
             if let Some(parent) = session_path.parent() {
@@ -199,6 +228,12 @@ impl TelegramTransport {
             (Some(client), Some(runner))
         };
 
+        let storage_peer = if mock_mode {
+            Mutex::new(Some(storage_peer_id.to_ambient_ref()))
+        } else {
+            Mutex::new(None)
+        };
+
         Ok(Self {
             config,
             session_path,
@@ -207,6 +242,8 @@ impl TelegramTransport {
             runner,
             retry_policy,
             proxy: materialized,
+            storage_peer_id,
+            storage_peer,
             mock_mode,
         })
     }
@@ -221,6 +258,38 @@ impl TelegramTransport {
 
     pub fn proxy_kind(&self) -> ProxyTransportKind {
         self.proxy.kind
+    }
+
+    pub(crate) async fn storage_peer(&self) -> Result<PeerRef, TelegramTransportError> {
+        if let Some(peer) = *self.storage_peer.lock().expect("storage peer mutex") {
+            return Ok(peer);
+        }
+
+        if let Some(session) = self.session.as_ref()
+            && let Ok(Some(peer)) = session.storage().peer_ref(self.storage_peer_id).await
+        {
+            *self.storage_peer.lock().expect("storage peer mutex") = Some(peer);
+            return Ok(peer);
+        }
+
+        if self.mock_mode {
+            let peer = self.storage_peer_id.to_ambient_ref();
+            *self.storage_peer.lock().expect("storage peer mutex") = Some(peer);
+            return Ok(peer);
+        }
+
+        let client = self.client()?;
+        let mut dialogs = client.iter_dialogs();
+        while let Some(dialog) = dialogs.next().await.map_err(map_rpc_error)? {
+            if dialog.peer().id() == self.storage_peer_id {
+                let peer = dialog.peer_ref();
+                *self.storage_peer.lock().expect("storage peer mutex") = Some(peer);
+                return Ok(peer);
+            }
+        }
+        Err(TelegramTransportError::InvalidState(
+            "storage peer dialog not found",
+        ))
     }
 
     pub async fn auth_state(&self) -> Result<AuthState, TelegramTransportError> {
@@ -457,7 +526,7 @@ fn map_rpc_error(error: impl std::fmt::Display) -> TelegramTransportError {
 }
 
 impl TelegramTransport {
-    fn client(&self) -> Result<&Client, TelegramTransportError> {
+    pub(crate) fn client(&self) -> Result<&Client, TelegramTransportError> {
         self.client
             .as_ref()
             .ok_or(TelegramTransportError::InvalidState(
