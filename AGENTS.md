@@ -40,6 +40,16 @@ cargo audit
 cargo deny check
 ```
 
+## Release and Docker Tags
+
+- Docker publishing runs from version tags (`v*`) or manual workflow dispatch,
+  not from every `main` push.
+- Release candidates (`vX.Y.Z-rc.N`) must publish only explicit RC image tags.
+  Do not move `latest`, `X.Y`, or `X` tags for prerelease builds.
+- Stable version tags (`vX.Y.Z`) may update `latest`, `X.Y`, and `X`.
+- When releasing, push the release commit and tag; expect GitHub Actions to run
+  for the tag ref only.
+
 ## Secrets and Sessions
 
 - Use environment variables for Telegram API credentials, S3 credentials, and encryption keys.

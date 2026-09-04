@@ -74,13 +74,6 @@ fn seed_telegram_settings(tempdir: &TempDir) {
         .set_telegram_bootstrap_settings(&TelegramBootstrapSettings {
             telegram_api_id: Some("12345".to_string()),
             telegram_api_hash: Some("hash".to_string()),
-            telegram_session_path: Some(
-                tempdir
-                    .path()
-                    .join("telegram.session")
-                    .display()
-                    .to_string(),
-            ),
             telegram_storage_chat_id: Some("-1001234567890".to_string()),
             telegram_proxy_mode: Some("auto".to_string()),
             ..TelegramBootstrapSettings::default()

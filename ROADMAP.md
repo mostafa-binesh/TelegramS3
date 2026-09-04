@@ -31,7 +31,7 @@
 Completed work:
 
 - headless auth/login/status/logout flow is wired through the transport service
-- session reuse is persisted through the admin-managed Telegram session path
+- session reuse is persisted through a system-derived Telegram session path
 - proxy resolution covers direct, SOCKS5, and bridged HTTP/HTTPS modes
 - a shared retry and flood-wait policy is used by transport calls
 - smoke tests cover the transport bootstrap path in mock mode

@@ -36,7 +36,6 @@ use ring::hmac;
 use s3s::Body;
 use s3s::dto::StreamingBlob;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use time::{Duration, OffsetDateTime};
@@ -58,8 +57,6 @@ pub struct AdminUiState {
     transport_manager: Arc<TelegramTransportManager>,
     /// Process-wide, single in-flight onboarding flow state.
     wizard_driver: Arc<tokio::sync::Mutex<TelegramLoginDriver>>,
-    s3_addr: SocketAddr,
-    admin_addr: SocketAddr,
     cookie_secret: String,
     ui_dist_dir: PathBuf,
     limiter: LoginLimiter,
@@ -148,7 +145,6 @@ struct DeleteObjectRequest {
 struct TelegramSettingsRequest {
     telegram_api_id: Option<String>,
     telegram_api_hash: Option<String>,
-    telegram_session_path: Option<String>,
     telegram_storage_chat_id: Option<String>,
     telegram_proxy_url: Option<String>,
     telegram_proxy_username: Option<String>,
@@ -226,8 +222,6 @@ impl AdminUiState {
         config: AppConfig,
         object_format: Arc<ObjectFormatService>,
         transport_manager: Arc<TelegramTransportManager>,
-        s3_addr: SocketAddr,
-        admin_addr: SocketAddr,
         cookie_secret: String,
         ui_dist_dir: PathBuf,
     ) -> Self {
@@ -236,8 +230,6 @@ impl AdminUiState {
             object_format,
             transport_manager,
             wizard_driver: Arc::new(tokio::sync::Mutex::new(TelegramLoginDriver::new())),
-            s3_addr,
-            admin_addr,
             cookie_secret,
             ui_dist_dir,
             limiter: LoginLimiter::new(),
@@ -1113,7 +1105,6 @@ impl AdminUiState {
         let TelegramSettingsRequest {
             telegram_api_id,
             telegram_api_hash,
-            telegram_session_path,
             telegram_storage_chat_id,
             telegram_proxy_url,
             telegram_proxy_username,
@@ -1134,8 +1125,7 @@ impl AdminUiState {
         let next = TelegramBootstrapSettings {
             telegram_api_id: clean_required(telegram_api_id).or(current.telegram_api_id),
             telegram_api_hash: clean_required(telegram_api_hash).or(current.telegram_api_hash),
-            telegram_session_path: clean_optional(telegram_session_path)
-                .or(current.telegram_session_path),
+            telegram_session_path: None,
             telegram_storage_chat_id: clean_required(telegram_storage_chat_id)
                 .or(current.telegram_storage_chat_id),
             telegram_proxy_url: clean_optional(telegram_proxy_url),
@@ -1182,11 +1172,6 @@ impl AdminUiState {
             .flatten()
             .unwrap_or_default();
         let resolved = self.config.resolve_telegram_bootstrap(self.store()).ok();
-        let session_path = resolved
-            .as_ref()
-            .map(|settings| settings.telegram_session_path.display().to_string())
-            .or_else(|| stored.telegram_session_path.clone())
-            .unwrap_or_else(|| self.config.metadata_path().display().to_string());
         TelegramSettingsWire {
             telegram_api_id: resolved
                 .as_ref()
@@ -1198,7 +1183,6 @@ impl AdminUiState {
                 .map(|settings| settings.telegram_api_hash.clone())
                 .or_else(|| stored.telegram_api_hash.clone())
                 .unwrap_or_default(),
-            telegram_session_path: session_path,
             telegram_storage_chat_id: resolved
                 .as_ref()
                 .map(|settings| settings.telegram_storage_chat_id.clone())
@@ -1312,11 +1296,6 @@ impl AdminUiState {
             detail: health.detail.clone(),
             storage_chat_id: Some(health.status.storage_chat_id.clone()),
         };
-        let endpoint = EndpointWire {
-            s3_bind_addr: self.s3_addr.to_string(),
-            admin_bind_addr: self.admin_addr.to_string(),
-            admin_route_prefix: ADMIN_ROUTE_PREFIX.to_string(),
-        };
         let storage = StorageWire {
             metadata_path: redact_path(&self.config.metadata_path().display().to_string()),
             data_dir: redact_path(&self.config.data_dir().display().to_string()),
@@ -1346,7 +1325,6 @@ impl AdminUiState {
             serde_json::json!({
                 "checked_at": rfc3339(OffsetDateTime::now_utc()),
                 "session": {"authenticated": true, "user": UserWire::from_user(&principal.user)},
-                "endpoint": endpoint,
                 "storage": storage,
                 "recovery": recovery,
                 "telegram": telegram,
@@ -1805,14 +1783,6 @@ fn check(label: &str, ok: bool, detail: &str) -> CheckItemWire {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
-struct EndpointWire {
-    s3_bind_addr: String,
-    admin_bind_addr: String,
-    admin_route_prefix: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
 struct StorageWire {
     metadata_path: String,
     data_dir: String,
@@ -1896,7 +1866,6 @@ struct TelegramStateWire {
 struct TelegramSettingsWire {
     telegram_api_id: String,
     telegram_api_hash: String,
-    telegram_session_path: String,
     telegram_storage_chat_id: String,
     telegram_proxy_url: String,
     telegram_proxy_username: String,

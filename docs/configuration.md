@@ -27,14 +27,14 @@ RUSTFS_SECRET_KEY=<generate_secure_random_value>
 
 ## Paths
 
-- session path: persistent Telegram session database, stored in `metadata.sqlite`
-  and managed by the admin panel
+- session path: persistent Telegram session database, derived automatically from
+  the metadata path as `<metadata-dir>/telegram.session`
 - metadata path: local SQLite journal and indexes
 - cache path: bounded manifest/chunk cache
 - recovery path: exported backups and repair artifacts
 - transport path: the resolved Telegram bootstrap settings persisted in
   `metadata.sqlite` and used by `auth login`, `auth status`, `auth logout`,
-  `doctor`, and `server`
+  `doctor`, and `server`; the session file path itself is system-owned
 - object-format path: `TELEGRAM_DATA_DIR` now houses staged uploads,
   multipart scratch, quarantine artifacts, and mock-transport test blobs; the
   committed payloads themselves live as Telegram documents/messages

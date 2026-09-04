@@ -60,7 +60,6 @@
   let showWizard = false;
   let telegramApiId = '';
   let telegramApiHash = '';
-  let telegramSessionPath = '';
   let telegramStorageChatId = '';
   let telegramProxyUrl = '';
   let telegramProxyUsername = '';
@@ -196,7 +195,6 @@
   function applyTelegramSettings(settings: TelegramSettings) {
     telegramApiId = settings.telegram_api_id ?? '';
     telegramApiHash = settings.telegram_api_hash ?? '';
-    telegramSessionPath = settings.telegram_session_path ?? '';
     telegramStorageChatId = settings.telegram_storage_chat_id ?? '';
     telegramProxyUrl = settings.telegram_proxy_url ?? '';
     telegramProxyUsername = settings.telegram_proxy_username ?? '';
@@ -213,7 +211,6 @@
       const response = await saveTelegramSettings(session?.csrf_token, {
         telegram_api_id: telegramApiId.trim(),
         telegram_api_hash: telegramApiHash.trim(),
-        telegram_session_path: telegramSessionPath.trim(),
         telegram_storage_chat_id: telegramStorageChatId.trim(),
         telegram_proxy_url: telegramProxyUrl.trim(),
         telegram_proxy_username: telegramProxyUsername.trim(),
@@ -523,10 +520,6 @@
               <input bind:value={telegramApiHash} type="password" autocomplete="off" />
             </label>
             <label>
-              <span>Session path</span>
-              <input bind:value={telegramSessionPath} type="text" autocomplete="off" />
-            </label>
-            <label>
               <span>Storage chat ID</span>
               <input bind:value={telegramStorageChatId} type="text" autocomplete="off" />
             </label>
@@ -634,14 +627,6 @@
         {/if}
       </section>
       <section class="layout">
-        <article class="card surface">
-          <p class="card-label">Endpoints</p>
-          <dl class="kv">
-            <div><dt>S3 listener</dt><dd>{overview?.endpoint?.s3_bind_addr}</dd></div>
-            <div><dt>Admin listener</dt><dd>{overview?.endpoint?.admin_bind_addr}</dd></div>
-            <div><dt>Admin route</dt><dd>{overview?.endpoint?.admin_route_prefix}</dd></div>
-          </dl>
-        </article>
         <article class="card surface">
           <p class="card-label">Readiness</p>
           <ul class="checks">

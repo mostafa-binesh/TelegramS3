@@ -137,10 +137,12 @@ recovery procedures.
 ### 1. Run with Docker
 
 The published image is `ghcr.io/mostafa-binesh/telegrams3`
-(built on every push to `main` and on `v*` tags; see
+(built on `v*` tags and manual workflow dispatch; see
 [.github/workflows/publish-docker-image.yml](.github/workflows/publish-docker-image.yml)).
 Pinning a version tag such as `v0.5.2-rc.4` is recommended when validating a
-release candidate.
+release candidate. Release-candidate tags publish only their explicit RC tags;
+the floating `latest`, major, and major-minor tags are reserved for stable
+version tags without a prerelease suffix.
 
 ```bash
 export TELEGRAM_S3_MASTER_KEY=$(openssl rand -hex 32)   # envelope encryption

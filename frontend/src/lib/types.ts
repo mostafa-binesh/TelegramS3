@@ -74,11 +74,6 @@ export interface RecoveryState {
 export interface OverviewState {
   checked_at?: string;
   session?: { authenticated: boolean; user?: UserInfo };
-  endpoint?: {
-    s3_bind_addr: string;
-    admin_bind_addr: string;
-    admin_route_prefix: string;
-  };
   storage?: StorageCard;
   recovery?: RecoveryState;
   telegram?: {
@@ -93,7 +88,6 @@ export interface OverviewState {
 export interface TelegramSettings {
   telegram_api_id: string;
   telegram_api_hash: string;
-  telegram_session_path: string;
   telegram_storage_chat_id: string;
   telegram_proxy_url: string;
   telegram_proxy_username: string;

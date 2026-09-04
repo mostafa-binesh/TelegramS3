@@ -216,7 +216,6 @@ async fn telegram_settings_survive_restart_without_bootstrap_envs() {
     let payload = serde_json::json!({
         "telegram_api_id": "12345",
         "telegram_api_hash": "hash",
-        "telegram_session_path": tempdir.path().join("telegram.session").display().to_string(),
         "telegram_storage_chat_id": "-1001234567890",
         "telegram_proxy_url": "socks5://127.0.0.1:12334",
         "telegram_proxy_username": "",
@@ -242,6 +241,11 @@ async fn telegram_settings_survive_restart_without_bootstrap_envs() {
         saved["settings"]["telegram_storage_chat_id"],
         "-1001234567890"
     );
+    assert!(
+        saved["settings"].get("telegram_session_path").is_none(),
+        "session path is system-owned and not exposed"
+    );
+    assert!(tempdir.path().join("telegram.session").exists());
 
     let _ = child.kill();
     let _ = child.wait();

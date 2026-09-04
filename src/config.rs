@@ -243,10 +243,7 @@ impl AppConfig {
         let telegram_storage_chat_id = merged
             .telegram_storage_chat_id
             .ok_or(ConfigError::Missing("telegram storage chat id"))?;
-        let telegram_session_path = merged
-            .telegram_session_path
-            .map(PathBuf::from)
-            .unwrap_or_else(|| default_session_path(&self.metadata_path()));
+        let telegram_session_path = default_session_path(&self.metadata_path());
         if telegram_session_path.as_os_str().is_empty() {
             return Err(ConfigError::Missing("telegram session path"));
         }

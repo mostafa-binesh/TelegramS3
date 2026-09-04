@@ -8,7 +8,7 @@ in `metadata.sqlite`, and a shared retry policy for Telegram RPC calls.
 
 - `telegram-s3 auth login` performs headless phone-code login and prompts for an
   optional 2FA password when Telegram requires it.
-- `telegram-s3 auth status` reports the configured session path and current
+- `telegram-s3 auth status` reports the resolved session path and current
   Telegram/auth state.
 - `telegram-s3 auth logout` signs the session out and leaves the local session
   path in place for the next login.
@@ -19,8 +19,8 @@ in `metadata.sqlite`, and a shared retry policy for Telegram RPC calls.
 
 ## Session Reuse
 
-- The Telegram session path is stored in the admin-managed bootstrap settings
-  and persisted in `metadata.sqlite`.
+- The Telegram session path is derived automatically from the metadata path as
+  `<metadata-dir>/telegram.session`.
 - Startup reuses that path automatically when it already exists.
 - A successful login writes back to the same session file so subsequent process
   starts can reopen it.
@@ -47,9 +47,9 @@ in `metadata.sqlite`, and a shared retry policy for Telegram RPC calls.
 
 ## Bootstrap Settings
 
-- Telegram API credentials, storage chat id, session path, and proxy settings
-  are edited in the authenticated admin panel and stored in `metadata.sqlite`.
+- Telegram API credentials, storage chat id, and proxy settings are edited in
+  the authenticated admin panel and stored in `metadata.sqlite`.
 - The CLI and server resolve those settings from the persisted store on startup
   and again when the admin panel saves a change.
-- The environment no longer carries Telegram API credentials, session path,
-  storage chat id, or proxy settings.
+- The environment no longer carries Telegram API credentials, storage chat id,
+  session path, or proxy settings.

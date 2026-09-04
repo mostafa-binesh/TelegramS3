@@ -300,8 +300,6 @@ impl S3Server {
             config.clone(),
             Arc::clone(&object_format),
             Arc::clone(&transport_manager),
-            config.s3_bind_addr()?,
-            admin_addr,
             config
                 .telegram_admin_bootstrap_secret
                 .clone()
