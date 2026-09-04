@@ -11,9 +11,9 @@ object format, and operated through an authenticated web UI.
 The storage engine treats Telegram as a constrained remote object store rather
 than an unlimited backup target. Because Telegram is not a transactional object
 store, local metadata, operation journals, manifests, and recovery tooling are
-part of the durability model — never an afterthought. Object bytes live as
-committed chunk files on local durable storage; the Telegram transport layer
-(headless login, persisted sessions, proxy, retries) underlies that store.
+part of the durability model - never an afterthought. Object bytes are stored
+as Telegram documents/messages; local disk holds the control plane, transient
+staging, and recovery artifacts, not committed payloads.
 
 ---
 
@@ -41,7 +41,8 @@ committed chunk files on local durable storage; the Telegram transport layer
   atomically; interrupted writes never appear as objects; startup
   reconciliation repairs, rolls back, or quarantines incomplete state.
 - **Chunked manifest format** — every object is a canonical manifest plus
-  immutable, independently verifiable chunks (SHA-256 checked).
+  immutable, independently verifiable chunks (SHA-256 checked) published as
+  Telegram documents/messages.
 - **Envelope encryption at rest** — chunk payloads are encrypted with
   ChaCha20-Poly1305 keyed from a local master key; range reads decrypt only the
   spans they touch, keeping memory bounded.
@@ -110,15 +111,16 @@ A full request-lifecycle and consistency walkthrough is in
 
 - One object = one canonical **manifest** (JSON: bucket, key, object ID,
   version, metadata, whole-object checksum, encryption state, chunk
-  references) + one or more immutable **chunks** (~1 MiB each by default).
-- Uploads write to staging, verify every chunk checksum, then publish the
-  manifest and commit the local index **atomically** — readers never see a
-  partial object.
+  references, Telegram message/document IDs) + one or more immutable
+  **chunks** (~1 MiB each by default).
+- Uploads write to staging, verify every chunk checksum, publish the chunk
+  payloads to Telegram, then commit the manifest and local index **atomically**
+  — readers never see a partial object.
 - Deletes first record a recoverable tombstone, hide the object, then queue
   physical cleanup for conservative garbage collection.
-- The manifest is the canonical recovery source: if local metadata is lost,
-  the index can be rebuilt from manifests; if a journal entry points at
-  nothing, reconciliation repairs or rolls it back.
+- The manifest plus its Telegram references are the canonical recovery source:
+  if local metadata is lost, the index can be rebuilt from manifests; if a
+  journal entry points at nothing, reconciliation repairs or rolls it back.
 
 See [docs/telegram-storage-format.md](docs/telegram-storage-format.md) for the
 format details and [docs/disaster-recovery.md](docs/disaster-recovery.md) for
@@ -137,7 +139,7 @@ recovery procedures.
 The published image is `ghcr.io/mostafa-binesh/telegrams3`
 (built on every push to `main` and on `v*` tags; see
 [.github/workflows/publish-docker-image.yml](.github/workflows/publish-docker-image.yml)).
-Pinning a version tag such as `v0.5.0` is recommended for production.
+Pinning a version tag such as `v0.5.1` is recommended for production.
 
 ```bash
 export TELEGRAM_API_ID=123456          # from my.telegram.org
@@ -160,7 +162,7 @@ docker run -d --name telegram-s3 \
   -v telegram-s3-metadata:/var/lib/telegram-s3/metadata \
   -v telegram-s3-data:/var/lib/telegram-s3/data \
   -v telegram-s3-session:/var/lib/telegram-s3/session \
-  ghcr.io/mostafa-binesh/telegrams3:v0.5.0
+  ghcr.io/mostafa-binesh/telegrams3:v0.5.1
 ```
 
 Or with the bundled [docker-compose.yml](docker-compose.yml) (local build):
@@ -229,7 +231,7 @@ Runtime configuration is environment-driven. The complete reference lives in
 | `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` | yes | S3 credentials clients must present |
 | `TELEGRAM_S3_BIND_ADDR` | no | S3 listener address (default `127.0.0.1:9000`) |
 | `TELEGRAM_ADMIN_BIND_ADDR` | no | Health/metrics listener, loopback only |
-| `TELEGRAM_METADATA_PATH` / `TELEGRAM_DATA_DIR` / `TELEGRAM_SESSION_PATH` | no | Durable state locations |
+| `TELEGRAM_METADATA_PATH` / `TELEGRAM_DATA_DIR` / `TELEGRAM_SESSION_PATH` | no | Durable state locations (`TELEGRAM_DATA_DIR` is scratch, staging, and quarantine, not committed payload storage) |
 | `TELEGRAM_PROXY_MODE` / `TELEGRAM_PROXY_URL` | no | Proxy transport (`direct`, `socks5`, `auto`...) |
 
 Passwords and session material must come from the environment or the database —

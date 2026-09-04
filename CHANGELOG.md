@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.5.1 - 2026-09-04
+
+- Added bounded admin content streaming with ranged downloads backed by the
+  shared object-format reader.
+- Extended the operator UI and Telegram onboarding flow so the auth and setup
+  experience stays in-browser.
+- Aligned storage, recovery, and compatibility docs with the current Phase 9
+  and Phase 3 behavior.
+
 ## 0.5.0 - 2026-09-04
 
 - Added legacy S3 `ListObjects` support on the main data plane, backed by the
