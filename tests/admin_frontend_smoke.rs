@@ -39,7 +39,6 @@ fn command_for(tempdir: &TempDir, bind_addr: &str) -> Command {
     let mut command = Command::cargo_bin("telegram-s3").expect("binary");
     command.env("TELEGRAM_API_ID", "12345");
     command.env("TELEGRAM_API_HASH", "hash");
-    command.env("TELEGRAM_PHONE_NUMBER", "+15551234567");
     command.env("TELEGRAM_SESSION_PATH", session_path.display().to_string());
     command.env("TELEGRAM_STORAGE_CHAT_ID", "-1001234567890");
     command.env(

@@ -10,7 +10,6 @@ const DEFAULT_DATA_DIR: &str = "data";
 pub struct AppConfig {
     pub telegram_api_id: Option<String>,
     pub telegram_api_hash: Option<String>,
-    pub telegram_phone_number: Option<String>,
     pub telegram_session_path: Option<String>,
     pub telegram_storage_chat_id: Option<String>,
     pub telegram_proxy_url: Option<String>,
@@ -62,7 +61,6 @@ impl AppConfig {
         Self {
             telegram_api_id: read("TELEGRAM_API_ID"),
             telegram_api_hash: read("TELEGRAM_API_HASH"),
-            telegram_phone_number: read("TELEGRAM_PHONE_NUMBER"),
             telegram_session_path: read("TELEGRAM_SESSION_PATH"),
             telegram_storage_chat_id: read("TELEGRAM_STORAGE_CHAT_ID"),
             telegram_proxy_url: read("TELEGRAM_PROXY_URL"),

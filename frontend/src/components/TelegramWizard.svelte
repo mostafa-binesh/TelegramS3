@@ -8,7 +8,6 @@
   import type { WizardPhase } from '../lib/types';
 
   export let csrf: string | null | undefined;
-  export let prefillPhone: string | undefined;
   export let onDone: () => void = () => {};
 
   let closed = false;
@@ -116,12 +115,12 @@
     {#if phase === 'idle'}
       <div class="wizard-step">
         <p class="wizard-desc">
-          Add the phone number of the Telegram account whose storage chat this store writes to.
-          Leave it blank to use the number configured on the server.
+          Add the phone number of the Telegram account whose storage chat this store writes to,
+          or leave it blank to type it directly here.
         </p>
         <label>
           <span>Phone (international format, optional)</span>
-          <input bind:value={phone} type="tel" placeholder={prefillPhone ?? '+1 555 000 0000'} />
+          <input bind:value={phone} type="tel" placeholder="+1 555 000 0000" />
         </label>
         <button class="primary" type="button" on:click={sendCode} disabled={pending}>
           Send code

@@ -14,6 +14,7 @@ pub use proxy::{
 pub use retry::{RetryDecision, RetryPolicy, parse_flood_wait_seconds};
 pub use session::{SessionError, SessionStatus, TelegramSession};
 pub use transport::{
-    AuthFlowState, AuthState, LoginFailure, SessionState, TelegramTransport,
-    TelegramTransportError, TelegramTransportStatus,
+    AuthFlowState, AuthState, LoginFailure, SessionState, TelegramConnectionHealth,
+    TelegramConnectionState, TelegramTransport, TelegramTransportError, TelegramTransportManager,
+    TelegramTransportStatus,
 };

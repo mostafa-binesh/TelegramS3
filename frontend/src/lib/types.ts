@@ -81,7 +81,12 @@ export interface OverviewState {
   };
   storage?: StorageCard;
   recovery?: RecoveryState;
-  telegram?: { session_state: string; phone_number?: string | null };
+  telegram?: {
+    session_state: string;
+    connection_state: string;
+    detail: string;
+    storage_chat_id?: string | null;
+  };
   checks?: { label: string; ok: boolean; detail: string }[];
 }
 

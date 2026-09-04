@@ -139,7 +139,7 @@ recovery procedures.
 The published image is `ghcr.io/mostafa-binesh/telegrams3`
 (built on every push to `main` and on `v*` tags; see
 [.github/workflows/publish-docker-image.yml](.github/workflows/publish-docker-image.yml)).
-Pinning a version tag such as `v0.5.2-rc.1` is recommended when validating a
+Pinning a version tag such as `v0.5.2-rc.2` is recommended when validating a
 release candidate.
 
 ```bash
@@ -163,7 +163,7 @@ docker run -d --name telegram-s3 \
   -v telegram-s3-metadata:/var/lib/telegram-s3/metadata \
   -v telegram-s3-data:/var/lib/telegram-s3/data \
   -v telegram-s3-session:/var/lib/telegram-s3/session \
-  ghcr.io/mostafa-binesh/telegrams3:v0.5.2-rc.1
+  ghcr.io/mostafa-binesh/telegrams3:v0.5.2-rc.2
 ```
 
 Or with the bundled [docker-compose.yml](docker-compose.yml) (local build):
@@ -189,7 +189,8 @@ Open <http://localhost:9000/_admin>, sign in with the account above, and use the
 in-browser **Telegram onboarding wizard** (phone → code → cloud password when
 required) to authorize the single Telegram session the store runs on. Operator
 accounts in the "Operators" tab are separate from that Telegram login. The
-readiness panel flips once the session is authorized.
+overview now shows the Telegram storage connection state directly and flips to
+connected once the session is authorized and the storage chat is reachable.
 
 ### 4. Use it as S3
 
@@ -226,7 +227,6 @@ Runtime configuration is environment-driven. The complete reference lives in
 | --- | --- | --- |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | yes | Telegram application credentials |
 | `TELEGRAM_STORAGE_CHAT_ID` | yes | Dedicated storage channel/chat peer |
-| `TELEGRAM_PHONE_NUMBER` | first login | Account to authorize (or use the UI wizard) |
 | `TELEGRAM_S3_MASTER_KEY` | yes | Master key for envelope encryption |
 | `TELEGRAM_ADMIN_BOOTSTRAP_SECRET` | yes | HMAC secret signing `/_admin` session cookies (not a login password) |
 | `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` | yes | S3 credentials clients must present |

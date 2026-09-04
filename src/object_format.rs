@@ -4,7 +4,7 @@ use crate::metadata::{
     BucketRecord, JournalEntry, MetadataError, MetadataStatus, MetadataStore, OperationKind,
 };
 use crate::multipart::{MultipartCompletionPlan, MultipartPart, MultipartSession, MultipartState};
-use crate::telegram::TelegramTransport;
+use crate::telegram::TelegramTransportManager;
 use bytes::Bytes;
 use futures::StreamExt;
 use grammers_client::media::Media;
@@ -240,7 +240,7 @@ pub enum ObjectFormatError {
 
 pub struct ObjectFormatService {
     metadata: MetadataStore,
-    transport: std::sync::Arc<TelegramTransport>,
+    transport_manager: std::sync::Arc<TelegramTransportManager>,
     data_dir: PathBuf,
     chunk_size: u64,
     storage_chat_id: String,
@@ -249,16 +249,23 @@ pub struct ObjectFormatService {
 
 impl ObjectFormatService {
     pub async fn open(config: &AppConfig) -> Result<Self, ObjectFormatError> {
+        let transport_manager = TelegramTransportManager::open(config.clone()).await?;
+        Self::open_with_transport_manager(config, transport_manager).await
+    }
+
+    pub async fn open_with_transport_manager(
+        config: &AppConfig,
+        transport_manager: std::sync::Arc<TelegramTransportManager>,
+    ) -> Result<Self, ObjectFormatError> {
         config.validate()?;
         let metadata = MetadataStore::open(config.metadata_path())?;
         let master_key = config
             .telegram_s3_master_key
             .clone()
             .ok_or_else(|| ObjectFormatError::InvalidPlan("missing master key".to_string()))?;
-        let transport = std::sync::Arc::new(TelegramTransport::open(config.clone()).await?);
         let service = Self::new(
             metadata,
-            transport,
+            transport_manager,
             config.data_dir(),
             config.chunk_size()?,
             config.telegram_storage_chat_id.clone().ok_or_else(|| {
@@ -271,7 +278,7 @@ impl ObjectFormatService {
 
     pub(crate) fn new(
         metadata: MetadataStore,
-        transport: std::sync::Arc<TelegramTransport>,
+        transport_manager: std::sync::Arc<TelegramTransportManager>,
         data_dir: impl AsRef<Path>,
         chunk_size: u64,
         storage_chat_id: String,
@@ -285,7 +292,7 @@ impl ObjectFormatService {
         fs::create_dir_all(data_dir.join(MULTIPART_ROOT))?;
         Ok(Self {
             metadata,
-            transport,
+            transport_manager,
             data_dir,
             chunk_size,
             storage_chat_id,
@@ -2049,7 +2056,8 @@ impl ObjectFormatService {
         path: &Path,
         file_name: &str,
     ) -> Result<TelegramLocation, ObjectFormatError> {
-        if self.transport.is_mock() {
+        let transport = self.transport_manager.current().await;
+        if transport.is_mock() {
             let message_id = self.next_mock_message_id()?;
             let mock_dir = self.mock_telegram_dir();
             fs::create_dir_all(&mock_dir)?;
@@ -2061,8 +2069,8 @@ impl ObjectFormatService {
                 document_id: Some(format!("mock:{message_id}:{file_name}")),
             });
         }
-        let client = self.transport.client()?;
-        let storage_peer = self.transport.storage_peer().await?;
+        let client = transport.client()?;
+        let storage_peer = transport.storage_peer().await?;
         let uploaded = client.upload_file(path).await.map_err(|error| {
             ObjectFormatError::Telegram(crate::telegram::TelegramTransportError::Rpc(format!(
                 "upload_file({file_name}) failed: {error}"
@@ -2100,7 +2108,8 @@ impl ObjectFormatService {
     }
 
     async fn download_message_bytes(&self, message_id: i32) -> Result<Vec<u8>, ObjectFormatError> {
-        if self.transport.is_mock() {
+        let transport = self.transport_manager.current().await;
+        if transport.is_mock() {
             let path = self.mock_telegram_dir().join(format!("{message_id}.bin"));
             if !path.exists() {
                 return Err(ObjectFormatError::InvalidRead(format!(
@@ -2109,8 +2118,8 @@ impl ObjectFormatService {
             }
             return Ok(fs::read(path)?);
         }
-        let client = self.transport.client()?;
-        let storage_peer = self.transport.storage_peer().await?;
+        let client = transport.client()?;
+        let storage_peer = transport.storage_peer().await?;
         let messages = client
             .get_messages_by_id(storage_peer, &[message_id])
             .await
@@ -2141,7 +2150,8 @@ impl ObjectFormatService {
         if message_ids.is_empty() {
             return Ok(());
         }
-        if self.transport.is_mock() {
+        let transport = self.transport_manager.current().await;
+        if transport.is_mock() {
             let mock_dir = self.mock_telegram_dir();
             for message_id in message_ids {
                 let path = mock_dir.join(format!("{message_id}.bin"));
@@ -2151,8 +2161,8 @@ impl ObjectFormatService {
             }
             return Ok(());
         }
-        let client = self.transport.client()?;
-        let storage_peer = self.transport.storage_peer().await?;
+        let client = transport.client()?;
+        let storage_peer = transport.storage_peer().await?;
         client
             .delete_messages(storage_peer, message_ids)
             .await

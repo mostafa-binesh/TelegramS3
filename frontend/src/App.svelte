@@ -58,14 +58,10 @@
   $: canManageOperators = session?.user?.role === 'superadmin';
 
   function telegramNeedsSetup(): boolean {
-    const auth = (overview?.checks ?? []).find((check) => check.label === 'Telegram auth');
-    // Show setup when the backend reports the Telegram session is not usable.
-    if (auth) return !auth.ok;
-    // Fallback: try the raw session_state string when no discrete check exists.
-    return telegramNotUsable(overview?.telegram?.session_state ?? '');
+    return (overview?.telegram?.connection_state ?? 'needs_reauth') !== 'connected';
   }
-  function telegramNotUsable(state: string): boolean {
-    return !/^(Authorized|LoggedIn|Reused)$/i.test(state.trim());
+  function telegramStatusLabel() {
+    return overview?.telegram?.connection_state?.replaceAll('_', ' ') ?? 'needs reauth';
   }
 
   onMount(() => {
@@ -432,23 +428,22 @@
             <p class="card-label">Telegram</p>
             <h2>
               {telegramNeedsSetup()
-                ? 'Authorize the Telegram account used for storage'
-                : 'Telegram storage account is authorized'}
+                ? 'Telegram storage is not connected'
+                : 'Telegram storage is connected'}
             </h2>
             <p>
               This wizard signs in the single Telegram account that backs storage for the
               whole server. Operator accounts are separate and live in the Operators tab.
             </p>
             <p class="fine-print">
-              Current session: {overview?.telegram?.session_state ?? 'Unknown'}
-              {#if overview?.telegram?.phone_number}
-                {' '}for {overview.telegram.phone_number}
-              {/if}
+              Storage session: {overview?.telegram?.session_state ?? 'Unknown'}
+              {' '}• {telegramStatusLabel()}
             </p>
+            <p class="fine-print">{overview?.telegram?.detail ?? 'No Telegram status available.'}</p>
           </div>
           <div class="tg-actions">
             <button class="primary" type="button" on:click={() => toggleWizard(true)}>
-              {telegramNeedsSetup() ? 'Set up Telegram login' : 'Reauthorize Telegram'}
+              {telegramNeedsSetup() ? 'Set up Telegram login' : 'Refresh Telegram login'}
             </button>
             <button class="ghost" type="button" on:click={() => switchView('users')}>
               Manage operators
@@ -459,7 +454,6 @@
       {#if showWizard}
         <TelegramWizard
           csrf={session?.csrf_token}
-          prefillPhone={overview?.telegram?.phone_number ?? undefined}
           onDone={handleWizardAuthorized}
         />
         <button class="ghost" type="button" on:click={() => toggleWizard(false)}>Close wizard</button>

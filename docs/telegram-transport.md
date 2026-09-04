@@ -22,6 +22,9 @@ policy for Telegram RPC calls.
 - Startup reuses that path automatically when it already exists.
 - A successful login writes back to the same session file so subsequent process
   starts can reopen it.
+- The authenticated `/_admin` panel uses the same persisted session and hot-
+  reloads the live transport after a successful Telegram reauthorization so
+  storage writes can resume without a server restart.
 
 ## Proxy Selection
 

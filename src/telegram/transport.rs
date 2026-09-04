@@ -14,6 +14,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tokio::sync::RwLock;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -100,6 +101,20 @@ pub struct TelegramTransportStatus {
     pub session_state: SessionState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramConnectionState {
+    Connected,
+    Disconnected,
+    NeedsReauth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramConnectionHealth {
+    pub status: TelegramTransportStatus,
+    pub state: TelegramConnectionState,
+    pub detail: String,
+}
+
 #[derive(Debug, Error)]
 pub enum TelegramTransportError {
     #[error("{0}")]
@@ -129,6 +144,13 @@ pub struct TelegramTransport {
     storage_peer_id: PeerId,
     storage_peer: Mutex<Option<PeerRef>>,
     mock_mode: bool,
+}
+
+#[derive(Clone)]
+pub struct TelegramTransportManager {
+    config: AppConfig,
+    transport: std::sync::Arc<RwLock<std::sync::Arc<TelegramTransport>>>,
+    health: std::sync::Arc<RwLock<TelegramConnectionHealth>>,
 }
 
 impl TelegramTransport {
@@ -477,6 +499,34 @@ impl TelegramTransport {
     }
 }
 
+impl TelegramTransportManager {
+    pub async fn open(config: AppConfig) -> Result<std::sync::Arc<Self>, TelegramTransportError> {
+        let transport = std::sync::Arc::new(TelegramTransport::open(config.clone()).await?);
+        let health = evaluate_health(transport.as_ref()).await?;
+        Ok(std::sync::Arc::new(Self {
+            config,
+            transport: std::sync::Arc::new(RwLock::new(transport)),
+            health: std::sync::Arc::new(RwLock::new(health)),
+        }))
+    }
+
+    pub async fn current(&self) -> std::sync::Arc<TelegramTransport> {
+        self.transport.read().await.clone()
+    }
+
+    pub async fn health(&self) -> TelegramConnectionHealth {
+        self.health.read().await.clone()
+    }
+
+    pub async fn refresh(&self) -> Result<TelegramConnectionHealth, TelegramTransportError> {
+        let transport = std::sync::Arc::new(TelegramTransport::open(self.config.clone()).await?);
+        let health = evaluate_health(transport.as_ref()).await?;
+        *self.transport.write().await = transport;
+        *self.health.write().await = health.clone();
+        Ok(health)
+    }
+}
+
 async fn create_private_mock_session(path: &Path) -> Result<(), io::Error> {
     #[cfg(unix)]
     {
@@ -533,6 +583,37 @@ impl TelegramTransport {
                 "real Telegram client is unavailable",
             ))
     }
+}
+
+async fn evaluate_health(
+    transport: &TelegramTransport,
+) -> Result<TelegramConnectionHealth, TelegramTransportError> {
+    let status = transport.status().await?;
+    let (state, detail) = match status.session_state {
+        SessionState::Authorized | SessionState::Reused => match transport.storage_peer().await {
+            Ok(_) => (
+                TelegramConnectionState::Connected,
+                "storage chat reachable".to_string(),
+            ),
+            Err(error) => (
+                TelegramConnectionState::Disconnected,
+                format!("storage peer lookup failed: {error}"),
+            ),
+        },
+        SessionState::Missing | SessionState::Unauthorized | SessionState::Invalid => (
+            TelegramConnectionState::NeedsReauth,
+            "telegram session needs reauthorization".to_string(),
+        ),
+        SessionState::LoggedOut => (
+            TelegramConnectionState::Disconnected,
+            "telegram session is logged out".to_string(),
+        ),
+    };
+    Ok(TelegramConnectionHealth {
+        status,
+        state,
+        detail,
+    })
 }
 
 impl TelegramTransport {

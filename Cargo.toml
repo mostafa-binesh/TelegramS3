@@ -1,6 +1,6 @@
 [package]
 name = "telegram-s3"
-version = "0.5.2-rc.1"
+version = "0.5.2-rc.2"
 edition = "2024"
 license = "Apache-2.0"
 description = "Telegram-backed S3-compatible object storage"

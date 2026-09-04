@@ -3,7 +3,7 @@ use crate::config::AppConfig;
 use crate::multipart::MultipartPartPlan;
 use crate::object_format::ObjectFormatService;
 use crate::redact;
-use crate::telegram::{TelegramTransport, TelegramTransportStatus};
+use crate::telegram::TelegramTransportManager;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -233,7 +233,7 @@ struct AllowAllAccess;
 #[derive(Clone)]
 struct AdminState {
     object_format: Arc<ObjectFormatService>,
-    transport_status: TelegramTransportStatus,
+    transport_manager: Arc<TelegramTransportManager>,
     s3_addr: SocketAddr,
     admin_addr: SocketAddr,
 }
@@ -250,16 +250,19 @@ pub struct S3Server {
     admin_addr: SocketAddr,
     service: S3Service,
     object_format: Arc<ObjectFormatService>,
-    transport_status: TelegramTransportStatus,
+    transport_manager: Arc<TelegramTransportManager>,
     admin_ui_state: Arc<AdminUiState>,
 }
 
 impl S3Server {
     pub async fn bootstrap(config: &AppConfig) -> Result<Self, S3ServerError> {
         config.validate()?;
-        let transport = TelegramTransport::open(config.clone()).await?;
-        let transport_status = transport.bootstrap().await?;
-        let object_format = Arc::new(ObjectFormatService::open(config).await?);
+        let transport_manager = TelegramTransportManager::open(config.clone()).await?;
+        let transport_health = transport_manager.health().await;
+        let object_format = Arc::new(
+            ObjectFormatService::open_with_transport_manager(config, Arc::clone(&transport_manager))
+                .await?,
+        );
         let object_status = object_format.bootstrap().await?;
         let admin_addr = config.admin_bind_addr()?;
         let admin_ui_dist_dir = config.admin_ui_dist_dir();
@@ -271,10 +274,10 @@ impl S3Server {
         }
 
         println!("object format bootstrap: {:?}", object_status);
-        println!("telegram bootstrap: {:?}", transport_status.session_state);
+        println!("telegram bootstrap: {:?}", transport_health.status.session_state);
         println!(
             "telegram bootstrap: session path {}",
-            redact::redact_path(&transport_status.session_path.display().to_string())
+            redact::redact_path(&transport_health.status.session_path.display().to_string())
         );
 
         let backend = TelegramS3Backend {
@@ -290,7 +293,7 @@ impl S3Server {
         let admin_ui_state = Arc::new(AdminUiState::new(
             config.clone(),
             Arc::clone(&object_format),
-            transport_status.clone(),
+            Arc::clone(&transport_manager),
             config.s3_bind_addr()?,
             admin_addr,
             config
@@ -304,7 +307,7 @@ impl S3Server {
             admin_addr,
             service,
             object_format,
-            transport_status,
+            transport_manager,
             admin_ui_state,
         })
     }
@@ -327,7 +330,7 @@ impl S3Server {
         let admin_ui_state = Arc::clone(&self.admin_ui_state);
         let admin_state = AdminState {
             object_format: Arc::clone(&self.object_format),
-            transport_status: self.transport_status.clone(),
+            transport_manager: Arc::clone(&self.transport_manager),
             s3_addr: self.addr,
             admin_addr,
         };
@@ -416,13 +419,16 @@ async fn handle_admin_request(
             StatusCode::OK,
             format!(
                 "ok\ns3_addr={}\nadmin_addr={}\ntransport_session_state={:?}\n",
-                state.s3_addr, state.admin_addr, state.transport_status.session_state
+                state.s3_addr,
+                state.admin_addr,
+                state.transport_manager.health().await.status.session_state
             ),
             "text/plain; charset=utf-8",
         )),
         "/metrics" => {
             let metadata_status = state.object_format.metadata_status()?;
             let object_status = state.object_format.status()?;
+            let transport_health = state.transport_manager.health().await;
             let body = format!(
                 concat!(
                     "# HELP telegram_s3_bootstrap_ok Bootstrap completion state\n",
@@ -456,7 +462,7 @@ async fn handle_admin_request(
                 metadata_status.recovery_markers,
                 object_status.recovery_required_objects,
                 object_status.orphaned_chunks,
-                state.transport_status.session_state,
+                transport_health.status.session_state,
             );
             Ok(text_response(
                 StatusCode::OK,

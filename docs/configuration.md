@@ -7,7 +7,6 @@ Use placeholders only:
 ```dotenv
 TELEGRAM_API_ID=<your_api_id>
 TELEGRAM_API_HASH=<your_api_hash>
-TELEGRAM_PHONE_NUMBER=<optional_interactive_login_number>
 TELEGRAM_SESSION_PATH=/var/lib/telegram-s3/session
 TELEGRAM_STORAGE_CHAT_ID=<dedicated_private_channel_id>
 

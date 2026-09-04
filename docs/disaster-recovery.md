@@ -75,7 +75,9 @@
 1. Keep the local metadata and data directories intact.
 2. If the session file is missing or invalid, run `telegram-s3 auth login` to
    create a fresh Telegram session.
-3. Confirm the new session with `telegram-s3 auth status`.
+3. Confirm the new session with `telegram-s3 auth status` and the `/_admin`
+   overview card, which should move to connected once the storage chat lookup
+   succeeds.
 4. If Telegram rejects the session, use `telegram-s3 auth logout` and log in
    again with a fresh code.
 

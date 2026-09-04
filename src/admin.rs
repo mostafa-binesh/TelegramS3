@@ -18,10 +18,10 @@ use crate::config::AppConfig;
 use crate::manifest::ObjectManifest;
 use crate::metadata::MetadataStore;
 use crate::object_format::{ObjectFormatService, RecoveryIssue as RecoveryIssueModel};
-use crate::redact::{redact_path, redact_phone_number};
+use crate::redact::redact_path;
 use crate::telegram::{
-    LoginDriverError, LoginStage, SessionState, TelegramLoginDriver, TelegramTransport,
-    TelegramTransportStatus,
+    LoginDriverError, LoginStage, SessionState, TelegramConnectionHealth,
+    TelegramLoginDriver, TelegramTransportManager,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
@@ -55,11 +55,7 @@ const ADMIN_CSRF_HEADER: &str = "x-csrf-token";
 pub struct AdminUiState {
     config: AppConfig,
     object_format: Arc<ObjectFormatService>,
-    /// Live/last-known Telegram transport status, writable so a successful
-    /// in-browser onboarding wizard flips the panel to authorised.
-    transport_status: Arc<std::sync::RwLock<TelegramTransportStatus>>,
-    /// Live transport kept only while an onboarding wizard is open.
-    wizard_transport: Arc<tokio::sync::Mutex<Option<Arc<TelegramTransport>>>>,
+    transport_manager: Arc<TelegramTransportManager>,
     /// Process-wide, single in-flight onboarding flow state.
     wizard_driver: Arc<tokio::sync::Mutex<TelegramLoginDriver>>,
     s3_addr: SocketAddr,
@@ -216,7 +212,7 @@ impl AdminUiState {
     pub fn new(
         config: AppConfig,
         object_format: Arc<ObjectFormatService>,
-        transport_status: TelegramTransportStatus,
+        transport_manager: Arc<TelegramTransportManager>,
         s3_addr: SocketAddr,
         admin_addr: SocketAddr,
         cookie_secret: String,
@@ -225,8 +221,7 @@ impl AdminUiState {
         Self {
             config,
             object_format,
-            transport_status: Arc::new(std::sync::RwLock::new(transport_status)),
-            wizard_transport: Arc::new(tokio::sync::Mutex::new(None)),
+            transport_manager,
             wizard_driver: Arc::new(tokio::sync::Mutex::new(TelegramLoginDriver::new())),
             s3_addr,
             admin_addr,
@@ -255,27 +250,8 @@ impl AdminUiState {
         self.handle_static(request).await
     }
 
-    fn telegram_status_snapshot(&self) -> TelegramTransportStatus {
-        self.transport_status
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|_| self.transport_status_fallback())
-    }
-
-    /// Value used only if the status lock is poisoned (never expected in practice).
-    fn transport_status_fallback(&self) -> TelegramTransportStatus {
-        TelegramTransportStatus {
-            session_path: std::path::PathBuf::new(),
-            proxy_kind: crate::telegram::ProxyTransportKind::Direct,
-            proxy_url: None,
-            session_state: SessionState::Unauthorized,
-        }
-    }
-
-    fn set_telegram_status(&self, status: TelegramTransportStatus) {
-        if let Ok(mut guard) = self.transport_status.write() {
-            *guard = status;
-        }
+    async fn telegram_health_snapshot(&self) -> TelegramConnectionHealth {
+        self.transport_manager.health().await
     }
 
     fn store(&self) -> &MetadataStore {
@@ -953,7 +929,7 @@ impl AdminUiState {
         let snapshot = driver.snapshot();
         let authorized = driver.is_authorized()
             || matches!(
-                self.telegram_status_snapshot().session_state,
+                self.telegram_health_snapshot().await.status.session_state,
                 SessionState::Authorized | SessionState::Reused
             );
         json_response(
@@ -995,17 +971,13 @@ impl AdminUiState {
         }
         let phone = read_wizard_begin_request(request)
             .await
-            .and_then(|body| body.phone)
-            .or_else(|| self.config.telegram_phone_number.clone());
-        let transport = match self.wizard_transport_lock(&driver).await {
-            Ok(transport) => transport,
-            Err(response) => return response,
-        };
+            .and_then(|body| body.phone);
+        let transport = self.transport_manager.current().await;
         let owner = &principal.user.username;
         match driver.begin(&transport, phone, owner).await {
             Ok(step) => {
                 if driver.is_authorized() {
-                    self.finalize_wizard_success(&transport).await;
+                    self.finalize_wizard_success().await;
                 }
                 json_response(
                     StatusCode::OK,
@@ -1028,22 +1000,14 @@ impl AdminUiState {
     ) -> Response<Body> {
         let code = read_wizard_code_request(request).await;
         let mut driver = self.wizard_driver.lock().await;
-        let transport = match self.current_wizard_transport().await {
-            Some(transport) => transport,
-            None => {
-                return json_error(
-                    StatusCode::CONFLICT,
-                    "no Telegram login in progress; begin one first",
-                );
-            }
-        };
+        let transport = self.transport_manager.current().await;
         let Some(code) = code else {
             return driver_error_response(&LoginDriverError::MissingCode);
         };
         match driver.submit_code(&transport, &code).await {
             Ok(step) => {
                 if driver.is_authorized() {
-                    self.finalize_wizard_success(&transport).await;
+                    self.finalize_wizard_success().await;
                 }
                 json_response(
                     StatusCode::OK,
@@ -1066,22 +1030,14 @@ impl AdminUiState {
     ) -> Response<Body> {
         let password = read_wizard_password_request(request).await;
         let mut driver = self.wizard_driver.lock().await;
-        let transport = match self.current_wizard_transport().await {
-            Some(transport) => transport,
-            None => {
-                return json_error(
-                    StatusCode::CONFLICT,
-                    "no Telegram login in progress; begin one first",
-                );
-            }
-        };
+        let transport = self.transport_manager.current().await;
         let Some(password) = password else {
             return driver_error_response(&LoginDriverError::MissingPassword);
         };
         match driver.submit_password(&transport, &password).await {
             Ok(step) => {
                 if driver.is_authorized() {
-                    self.finalize_wizard_success(&transport).await;
+                    self.finalize_wizard_success().await;
                 }
                 json_response(
                     StatusCode::OK,
@@ -1100,47 +1056,14 @@ impl AdminUiState {
     async fn wizard_cancel(&self, _principal: &ResolvedPrincipal) -> Response<Body> {
         let mut driver = self.wizard_driver.lock().await;
         driver.cancel();
-        // Drop the kept-alive transport now that nothing in the flow needs it.
-        *self.wizard_transport.lock().await = None;
         json_response(StatusCode::OK, serde_json::json!({ "ok": true }))
     }
 
     /// After a successful phone/code/password login, reflect the now-authorised
-    /// session in the stored status and stop keeping the transport alive.
-    async fn finalize_wizard_success(&self, transport: &TelegramTransport) {
-        if let Ok(status) = transport.status().await {
-            self.set_telegram_status(status);
-        }
-        *self.wizard_transport.lock().await = None;
-    }
-
-    /// Return the currently stored wizard transport, if one is live.
-    async fn current_wizard_transport(&self) -> Option<Arc<TelegramTransport>> {
-        self.wizard_transport.lock().await.clone()
-    }
-
-    /// Ensure a transport exists for the wizard, opening+retaining one lazily if
-    /// the operator has started a flow while Telegram was not already available.
-    #[allow(clippy::result_large_err)]
-    async fn wizard_transport_lock(
-        &self,
-        _driver: &tokio::sync::MutexGuard<'_, TelegramLoginDriver>,
-    ) -> Result<Arc<TelegramTransport>, Response<Body>> {
-        let mut slot = self.wizard_transport.lock().await;
-        if let Some(existing) = slot.as_ref() {
-            return Ok(Arc::clone(existing));
-        }
-        match TelegramTransport::open(self.config.clone()).await {
-            Ok(transport) => {
-                let transport = Arc::new(transport);
-                *slot = Some(Arc::clone(&transport));
-                Ok(transport)
-            }
-            Err(error) => Err(json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to open Telegram transport: {error}"),
-            )),
-        }
+    /// session in the stored status and hot-swap the live transport so later
+    /// object operations use the refreshed Telegram session immediately.
+    async fn finalize_wizard_success(&self) {
+        let _ = self.transport_manager.refresh().await;
     }
 
     // ---- binary content write (upload) ---------------------------------------
@@ -1218,16 +1141,15 @@ impl AdminUiState {
             Ok(issues) => RecoveryWire::from_issues(issues),
             Err(error) => RecoveryWire::failed(error.to_string()),
         };
-        let session_state = self.telegram_status_snapshot().session_state;
+        let health = self.telegram_health_snapshot().await;
+        let session_state = health.status.session_state.clone();
         let session_state_debug = format!("{session_state:?}");
         let session_usable = telegram_session_usable(session_state.clone());
         let telegram = TelegramStateWire {
             session_state: session_state_debug.clone(),
-            phone_number: self
-                .config
-                .telegram_phone_number
-                .as_deref()
-                .map(redact_phone_number),
+            connection_state: telegram_connection_state_label(&health.state).to_string(),
+            detail: health.detail.clone(),
+            storage_chat_id: self.config.telegram_storage_chat_id.clone(),
         };
         let endpoint = EndpointWire {
             s3_bind_addr: self.s3_addr.to_string(),
@@ -1246,7 +1168,7 @@ impl AdminUiState {
             recovery_required_objects: object_status.recovery_required_objects,
         };
         let checks = vec![
-            check("Telegram auth", session_usable, &session_state_debug),
+            check("Telegram storage", session_usable, &health.detail),
             check(
                 "Storage chat",
                 self.config
@@ -1336,6 +1258,14 @@ async fn asset_fallback(base: &Path, requested_asset: &str) -> Option<Response<B
 
 fn telegram_session_usable(state: SessionState) -> bool {
     matches!(state, SessionState::Authorized | SessionState::Reused)
+}
+
+fn telegram_connection_state_label(state: &crate::telegram::TelegramConnectionState) -> &'static str {
+    match state {
+        crate::telegram::TelegramConnectionState::Connected => "connected",
+        crate::telegram::TelegramConnectionState::Disconnected => "disconnected",
+        crate::telegram::TelegramConnectionState::NeedsReauth => "needs_reauth",
+    }
 }
 
 // ---- binary content + telegram wizard helpers ------------------------------
@@ -1783,7 +1713,9 @@ impl RecoveryWire {
 #[serde(rename_all = "snake_case")]
 struct TelegramStateWire {
     session_state: String,
-    phone_number: Option<String>,
+    connection_state: String,
+    detail: String,
+    storage_chat_id: Option<String>,
 }
 
 // ---- cookie / csrf primitives -----------------------------------------------
