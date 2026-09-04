@@ -139,7 +139,7 @@ recovery procedures.
 The published image is `ghcr.io/mostafa-binesh/telegrams3`
 (built on every push to `main` and on `v*` tags; see
 [.github/workflows/publish-docker-image.yml](.github/workflows/publish-docker-image.yml)).
-Pinning a version tag such as `v0.5.2-rc.3` is recommended when validating a
+Pinning a version tag such as `v0.5.2-rc.4` is recommended when validating a
 release candidate.
 
 ```bash
@@ -157,7 +157,7 @@ docker run -d --name telegram-s3 \
   -e TELEGRAM_DATA_DIR=/var/lib/telegram-s3/data \
   -v telegram-s3-metadata:/var/lib/telegram-s3/metadata \
   -v telegram-s3-data:/var/lib/telegram-s3/data \
-  ghcr.io/mostafa-binesh/telegrams3:v0.5.2-rc.3
+  ghcr.io/mostafa-binesh/telegrams3:v0.5.2-rc.4
 ```
 
 Or with the bundled [docker-compose.yml](docker-compose.yml) (local build):

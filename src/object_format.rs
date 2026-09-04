@@ -721,6 +721,12 @@ impl ObjectFormatService {
     }
 
     pub async fn bootstrap(&self) -> Result<ObjectFormatStatus, ObjectFormatError> {
+        if self.transport_manager.current().await.is_err() {
+            warn!(
+                "object-format bootstrap deferred remote reconciliation because Telegram is not configured"
+            );
+            return self.status();
+        }
         let report = self.reconcile().await?;
         if report.staged_objects > 0 || report.recovery_required_objects > 0 {
             warn!(
@@ -2303,6 +2309,7 @@ fn part_file_name(part_number: u32) -> String {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+    use crate::manifest::CommittedManifestArgs;
     use crate::metadata::TelegramBootstrapSettings;
     use std::env;
     use tempfile::TempDir;
@@ -2402,6 +2409,39 @@ mod tests {
         let report = service.reconcile().await.expect("reconcile");
         assert_eq!(report.repaired_objects, 1);
         assert_eq!(report.staged_objects, 0);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_defers_remote_reconciliation_without_telegram_settings() {
+        let tempdir = TempDir::new().expect("tempdir");
+        unsafe {
+            env::set_var("TELEGRAM_TRANSPORT_RUNTIME", "mock");
+        }
+        let service = ObjectFormatService::open(&test_config(&tempdir))
+            .await
+            .expect("service");
+        let manifest = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "bucket".to_string(),
+            key: "old.txt".to_string(),
+            content_length: 3,
+            content_type: "text/plain".to_string(),
+            checksum_algorithm: CHECKSUM_ALGORITHM.to_string(),
+            whole_object: sha256_hex(b"old"),
+            peer_id: "-1001234567890".to_string(),
+            message_id: 1,
+        });
+        let operation_id = service
+            .metadata
+            .stage_manifest(OperationKind::Put, manifest)
+            .expect("stage manifest");
+        service
+            .metadata
+            .commit_manifest(operation_id)
+            .expect("commit manifest");
+
+        let status = service.bootstrap().await.expect("bootstrap status");
+        assert_eq!(status.committed_objects, 1);
+        assert_eq!(status.recovery_required_objects, 0);
     }
 
     #[tokio::test]

@@ -4,6 +4,9 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
+use telegram_s3::manifest::CommittedManifestArgs;
+use telegram_s3::object_format::sha256_hex;
+use telegram_s3::{CommitState, MetadataStore, ObjectManifest, OperationKind};
 use tempfile::TempDir;
 
 fn prepare_admin_ui(tempdir: &TempDir) -> std::path::PathBuf {
@@ -70,6 +73,27 @@ fn seed_admin_users(tempdir: &TempDir) {
         "seed failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn seed_committed_manifest_without_telegram_settings(tempdir: &TempDir) {
+    let store = MetadataStore::open(tempdir.path().join("metadata.sqlite")).expect("metadata");
+    let manifest = ObjectManifest::committed(CommittedManifestArgs {
+        bucket: "existing".to_string(),
+        key: "old.txt".to_string(),
+        content_length: 3,
+        content_type: "text/plain".to_string(),
+        checksum_algorithm: "sha256".to_string(),
+        whole_object: sha256_hex(b"old"),
+        peer_id: "-1001234567890".to_string(),
+        message_id: 1,
+    });
+    let operation_id = store
+        .stage_manifest(OperationKind::Put, manifest)
+        .expect("stage manifest");
+    let committed = store
+        .commit_manifest(operation_id)
+        .expect("commit manifest");
+    assert_eq!(committed.commit_state, CommitState::Committed);
 }
 
 fn wait_listening(reader: &mut BufReader<std::process::ChildStdout>) {
@@ -267,6 +291,28 @@ async fn telegram_settings_survive_restart_without_bootstrap_envs() {
         settings["settings"]["telegram_storage_chat_id"],
         "-1001234567890"
     );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[tokio::test]
+async fn server_boots_existing_metadata_without_telegram_settings() {
+    let tempdir = TempDir::new().expect("tempdir");
+    seed_admin_users(&tempdir);
+    seed_committed_manifest_without_telegram_settings(&tempdir);
+
+    let bind_addr = free_bind_addr();
+    let mut server_command = command_for(&tempdir, &bind_addr);
+    server_command.arg("server");
+    server_command.stdout(Stdio::piped());
+    let mut child = server_command.spawn().expect("spawn server");
+    let stdout = child.stdout.take().expect("server stdout");
+    let mut reader = BufReader::new(stdout);
+    wait_listening(&mut reader);
+
+    let exited = child.try_wait().expect("try wait");
+    assert!(exited.is_none(), "server exited before admin setup");
 
     let _ = child.kill();
     let _ = child.wait();
