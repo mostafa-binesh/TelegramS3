@@ -18,6 +18,7 @@ use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::RwLock;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tokio::fs as async_fs;
@@ -243,7 +244,7 @@ pub struct ObjectFormatService {
     transport_manager: std::sync::Arc<TelegramTransportManager>,
     data_dir: PathBuf,
     chunk_size: u64,
-    storage_chat_id: String,
+    storage_chat_id: RwLock<String>,
     encryption: ObjectEncryption,
 }
 
@@ -263,14 +264,17 @@ impl ObjectFormatService {
             .telegram_s3_master_key
             .clone()
             .ok_or_else(|| ObjectFormatError::InvalidPlan("missing master key".to_string()))?;
+        let storage_chat_id = config
+            .resolve_telegram_bootstrap(&metadata)
+            .ok()
+            .map(|bootstrap| bootstrap.telegram_storage_chat_id)
+            .unwrap_or_default();
         let service = Self::new(
             metadata,
             transport_manager,
             config.data_dir(),
             config.chunk_size()?,
-            config.telegram_storage_chat_id.clone().ok_or_else(|| {
-                ObjectFormatError::InvalidPlan("missing storage chat id".to_string())
-            })?,
+            storage_chat_id,
             ObjectEncryption::from_master_key(&master_key),
         )?;
         Ok(service)
@@ -295,7 +299,7 @@ impl ObjectFormatService {
             transport_manager,
             data_dir,
             chunk_size,
-            storage_chat_id,
+            storage_chat_id: RwLock::new(storage_chat_id),
             encryption,
         })
     }
@@ -307,6 +311,24 @@ impl ObjectFormatService {
     /// Reach the shared SQLite store (single writer) for operator/auth tables.
     pub fn metadata_store(&self) -> &MetadataStore {
         &self.metadata
+    }
+
+    pub fn set_storage_chat_id(&self, storage_chat_id: String) {
+        *self.storage_chat_id.write().expect("storage chat id lock") = storage_chat_id;
+    }
+
+    fn storage_chat_id(&self) -> Result<String, ObjectFormatError> {
+        let storage_chat_id = self
+            .storage_chat_id
+            .read()
+            .expect("storage chat id lock")
+            .clone();
+        if storage_chat_id.is_empty() {
+            return Err(ObjectFormatError::InvalidPlan(
+                "telegram bootstrap settings are not configured".to_string(),
+            ));
+        }
+        Ok(storage_chat_id)
     }
 
     pub fn list_manifests(&self) -> Result<Vec<ObjectManifest>, ObjectFormatError> {
@@ -897,7 +919,7 @@ impl ObjectFormatService {
                 offset,
                 size,
                 checksum: chunk_checksum,
-                telegram_peer_id: self.storage_chat_id.clone(),
+                telegram_peer_id: self.storage_chat_id()?,
                 telegram_message_id: i64::from(order) + 1,
                 telegram_document_id: Some(format!("local:{object_id}:{order}")),
             });
@@ -987,7 +1009,7 @@ impl ObjectFormatService {
 
         let mut committed_manifest = staged.manifest.clone();
         committed_manifest.telegram = TelegramLocation {
-            peer_id: self.storage_chat_id.clone(),
+            peer_id: self.storage_chat_id()?,
             message_id: 0,
             document_id: None,
         };
@@ -1071,7 +1093,7 @@ impl ObjectFormatService {
                 offset,
                 size,
                 checksum: chunk_checksum,
-                telegram_peer_id: self.storage_chat_id.clone(),
+                telegram_peer_id: self.storage_chat_id()?,
                 telegram_message_id: i64::from(order) + 1,
                 telegram_document_id: Some(format!("local:{object_id}:{order}")),
             });
@@ -2043,7 +2065,7 @@ impl ObjectFormatService {
                 key_id: Some(self.encryption.key_id.clone()),
             },
             telegram: crate::manifest::TelegramLocation {
-                peer_id: self.storage_chat_id.clone(),
+                peer_id: self.storage_chat_id().unwrap_or_default(),
                 message_id: 0,
                 document_id: Some(format!("local:{}:manifest", args.object_id)),
             },
@@ -2056,7 +2078,7 @@ impl ObjectFormatService {
         path: &Path,
         file_name: &str,
     ) -> Result<TelegramLocation, ObjectFormatError> {
-        let transport = self.transport_manager.current().await;
+        let transport = self.transport_manager.current().await?;
         if transport.is_mock() {
             let message_id = self.next_mock_message_id()?;
             let mock_dir = self.mock_telegram_dir();
@@ -2064,7 +2086,7 @@ impl ObjectFormatService {
             let destination = mock_dir.join(format!("{message_id}.bin"));
             fs::copy(path, &destination)?;
             return Ok(TelegramLocation {
-                peer_id: self.storage_chat_id.clone(),
+                peer_id: self.storage_chat_id()?,
                 message_id: i64::from(message_id),
                 document_id: Some(format!("mock:{message_id}:{file_name}")),
             });
@@ -2101,14 +2123,14 @@ impl ObjectFormatService {
             }
         };
         Ok(TelegramLocation {
-            peer_id: self.storage_chat_id.clone(),
+            peer_id: self.storage_chat_id()?,
             message_id: i64::from(message.id()),
             document_id: Some(document.id().to_string()),
         })
     }
 
     async fn download_message_bytes(&self, message_id: i32) -> Result<Vec<u8>, ObjectFormatError> {
-        let transport = self.transport_manager.current().await;
+        let transport = self.transport_manager.current().await?;
         if transport.is_mock() {
             let path = self.mock_telegram_dir().join(format!("{message_id}.bin"));
             if !path.exists() {
@@ -2150,7 +2172,7 @@ impl ObjectFormatService {
         if message_ids.is_empty() {
             return Ok(());
         }
-        let transport = self.transport_manager.current().await;
+        let transport = self.transport_manager.current().await?;
         if transport.is_mock() {
             let mock_dir = self.mock_telegram_dir();
             for message_id in message_ids {
@@ -2281,23 +2303,13 @@ fn part_file_name(part_number: u32) -> String {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+    use crate::metadata::TelegramBootstrapSettings;
     use std::env;
     use tempfile::TempDir;
     use time::Duration;
 
     fn test_config(tempdir: &TempDir) -> AppConfig {
         AppConfig {
-            telegram_api_id: Some("123456".to_string()),
-            telegram_api_hash: Some("test-api-hash".to_string()),
-            telegram_session_path: Some(
-                tempdir
-                    .path()
-                    .join("session")
-                    .join("telegram.session")
-                    .display()
-                    .to_string(),
-            ),
-            telegram_storage_chat_id: Some("-1001234567890".to_string()),
             telegram_metadata_path: Some(
                 tempdir.path().join("metadata.sqlite").display().to_string(),
             ),
@@ -2312,10 +2324,32 @@ mod tests {
         }
     }
 
+    fn seed_telegram_settings(tempdir: &TempDir) {
+        let store = MetadataStore::open(tempdir.path().join("metadata.sqlite")).expect("metadata");
+        store
+            .set_telegram_bootstrap_settings(&TelegramBootstrapSettings {
+                telegram_api_id: Some("123456".to_string()),
+                telegram_api_hash: Some("test-api-hash".to_string()),
+                telegram_session_path: Some(
+                    tempdir
+                        .path()
+                        .join("session")
+                        .join("telegram.session")
+                        .display()
+                        .to_string(),
+                ),
+                telegram_storage_chat_id: Some("-1001234567890".to_string()),
+                telegram_proxy_mode: Some("auto".to_string()),
+                ..TelegramBootstrapSettings::default()
+            })
+            .expect("telegram settings");
+    }
+
     async fn sample_service(tempdir: &TempDir) -> ObjectFormatService {
         unsafe {
             env::set_var("TELEGRAM_TRANSPORT_RUNTIME", "mock");
         }
+        seed_telegram_settings(tempdir);
         ObjectFormatService::open(&test_config(tempdir))
             .await
             .expect("service")

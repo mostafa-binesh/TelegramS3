@@ -1,4 +1,3 @@
-use crate::config::AppConfig;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::fmt;
 use std::sync::Arc;
@@ -89,19 +88,20 @@ pub enum ProxyError {
     BridgeFailed(String),
 }
 
-pub fn resolve_proxy_plan(config: &AppConfig) -> Result<ProxyPlan, ProxyError> {
-    let mode = match config.proxy_mode().to_ascii_lowercase().as_str() {
+pub fn resolve_proxy_plan_with(
+    proxy_mode: Option<&str>,
+    proxy_url: Option<&str>,
+    proxy_username: Option<&str>,
+    proxy_password: Option<&str>,
+) -> Result<ProxyPlan, ProxyError> {
+    let mode = match proxy_mode.unwrap_or("auto").to_ascii_lowercase().as_str() {
         "auto" => ProxyMode::Auto,
         "direct" => ProxyMode::Direct,
         "socks5" => ProxyMode::Socks5,
         other => return Err(ProxyError::UnsupportedScheme(other.to_string())),
     };
 
-    let Some(raw_proxy_url) = config
-        .telegram_proxy_url
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(raw_proxy_url) = proxy_url.filter(|value| !value.is_empty()) else {
         return Ok(ProxyPlan {
             mode,
             kind: ProxyTransportKind::Direct,
@@ -112,11 +112,11 @@ pub fn resolve_proxy_plan(config: &AppConfig) -> Result<ProxyPlan, ProxyError> {
 
     let parsed =
         Url::parse(raw_proxy_url).map_err(|err| ProxyError::InvalidUrl(err.to_string()))?;
-    let upstream = proxy_upstream(&parsed, config)?;
+    let upstream = proxy_upstream(&parsed, proxy_username, proxy_password)?;
 
     match mode {
         ProxyMode::Direct => Err(ProxyError::Inconsistent(
-            "direct mode cannot be combined with TELEGRAM_PROXY_URL",
+            "direct mode cannot be combined with a proxy URL",
         )),
         ProxyMode::Socks5 => {
             if upstream.scheme != ProxyScheme::Socks5 {
@@ -186,7 +186,11 @@ impl ProxyPlan {
     }
 }
 
-fn proxy_upstream(parsed: &Url, config: &AppConfig) -> Result<ProxyUpstream, ProxyError> {
+fn proxy_upstream(
+    parsed: &Url,
+    proxy_username: Option<&str>,
+    proxy_password: Option<&str>,
+) -> Result<ProxyUpstream, ProxyError> {
     let scheme = match parsed.scheme() {
         "socks5" => ProxyScheme::Socks5,
         "http" => ProxyScheme::Http,
@@ -202,10 +206,9 @@ fn proxy_upstream(parsed: &Url, config: &AppConfig) -> Result<ProxyUpstream, Pro
         .port_or_known_default()
         .ok_or(ProxyError::InvalidPort)?;
 
-    let username = config
-        .telegram_proxy_username
-        .clone()
+    let username = proxy_username
         .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
         .or_else(|| {
             if parsed.username().is_empty() {
                 None
@@ -213,10 +216,9 @@ fn proxy_upstream(parsed: &Url, config: &AppConfig) -> Result<ProxyUpstream, Pro
                 Some(parsed.username().to_string())
             }
         });
-    let password = config
-        .telegram_proxy_password
-        .clone()
+    let password = proxy_password
         .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
         .or_else(|| parsed.password().map(|value| value.to_string()));
 
     Ok(ProxyUpstream {
@@ -484,36 +486,27 @@ impl fmt::Display for ProxyPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
 
     #[test]
     fn resolves_direct_proxy_when_unset() {
-        let plan = resolve_proxy_plan(&AppConfig::default()).expect("plan");
+        let plan = resolve_proxy_plan_with(None, None, None, None).expect("plan");
         assert_eq!(plan.kind, ProxyTransportKind::Direct);
         assert_eq!(plan.proxy_url, None);
     }
 
     #[test]
     fn rejects_direct_mode_with_proxy_url() {
-        let config = AppConfig {
-            telegram_proxy_url: Some("socks5://127.0.0.1:1080".to_string()),
-            telegram_proxy_mode: Some("direct".to_string()),
-            ..AppConfig::default()
-        };
         assert!(matches!(
-            resolve_proxy_plan(&config),
+            resolve_proxy_plan_with(Some("direct"), Some("socks5://127.0.0.1:1080"), None, None),
             Err(ProxyError::Inconsistent(_))
         ));
     }
 
     #[test]
     fn resolves_socks5_proxy_url() {
-        let config = AppConfig {
-            telegram_proxy_url: Some("socks5://127.0.0.1:1080".to_string()),
-            telegram_proxy_mode: Some("socks5".to_string()),
-            ..AppConfig::default()
-        };
-        let plan = resolve_proxy_plan(&config).expect("plan");
+        let plan =
+            resolve_proxy_plan_with(Some("socks5"), Some("socks5://127.0.0.1:1080"), None, None)
+                .expect("plan");
         assert_eq!(plan.kind, ProxyTransportKind::Socks5);
         assert!(
             plan.proxy_url
@@ -525,12 +518,9 @@ mod tests {
 
     #[test]
     fn resolves_http_proxy_to_bridge_plan() {
-        let config = AppConfig {
-            telegram_proxy_url: Some("http://proxy.example:8080".to_string()),
-            telegram_proxy_mode: Some("auto".to_string()),
-            ..AppConfig::default()
-        };
-        let plan = resolve_proxy_plan(&config).expect("plan");
+        let plan =
+            resolve_proxy_plan_with(Some("auto"), Some("http://proxy.example:8080"), None, None)
+                .expect("plan");
         assert_eq!(plan.kind, ProxyTransportKind::BridgedHttp);
         assert!(plan.proxy_url.is_none());
     }

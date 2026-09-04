@@ -4,6 +4,7 @@ import type {
   ObjectsState,
   OverviewState,
   SessionState,
+  TelegramSettingsState,
   UsersState,
   WizardState
 } from './types';
@@ -73,6 +74,20 @@ export function refreshSession(csrf?: string | null) {
 
 export function getOverview() {
   return requestJson<OverviewState>('/overview');
+}
+
+export function getTelegramSettings() {
+  return requestJson<TelegramSettingsState>('/telegram/settings');
+}
+
+export function saveTelegramSettings(
+  csrf?: string | null,
+  body?: Partial<TelegramSettingsState['settings']>
+) {
+  return requestJson<TelegramSettingsState>('/telegram/settings', csrf, {
+    method: 'POST',
+    body
+  });
 }
 
 export function listUsers(csrf?: string | null) {

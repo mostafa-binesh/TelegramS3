@@ -1,6 +1,7 @@
-use crate::config::{AppConfig, ConfigError};
+use crate::config::{AppConfig, ConfigError, ResolvedTelegramBootstrap};
+use crate::metadata::MetadataError;
 use crate::telegram::proxy::{
-    MaterializedProxy, ProxyError, ProxyTransportKind, resolve_proxy_plan,
+    MaterializedProxy, ProxyError, ProxyTransportKind, resolve_proxy_plan_with,
 };
 use crate::telegram::retry::{RetryPolicy, parse_flood_wait_seconds};
 use crate::telegram::session::{SessionError, SessionStatus, TelegramSession};
@@ -14,8 +15,8 @@ use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tokio::sync::RwLock;
 use thiserror::Error;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
@@ -99,6 +100,7 @@ pub struct TelegramTransportStatus {
     pub proxy_kind: ProxyTransportKind,
     pub proxy_url: Option<String>,
     pub session_state: SessionState,
+    pub storage_chat_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +108,7 @@ pub enum TelegramConnectionState {
     Connected,
     Disconnected,
     NeedsReauth,
+    NotConfigured,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,13 +132,14 @@ pub enum TelegramTransportError {
     Login(LoginFailure),
     #[error("io error: {0}")]
     Io(#[from] io::Error),
+    #[error("{0}")]
+    Metadata(#[from] MetadataError),
     #[error("invalid session state: {0}")]
     InvalidState(&'static str),
 }
 
 pub struct TelegramTransport {
-    config: AppConfig,
-    session_path: PathBuf,
+    bootstrap: ResolvedTelegramBootstrap,
     session: Option<TelegramSession>,
     client: Option<Client>,
     runner: Option<JoinHandle<()>>,
@@ -149,42 +153,42 @@ pub struct TelegramTransport {
 #[derive(Clone)]
 pub struct TelegramTransportManager {
     config: AppConfig,
-    transport: std::sync::Arc<RwLock<std::sync::Arc<TelegramTransport>>>,
+    transport: std::sync::Arc<RwLock<Option<std::sync::Arc<TelegramTransport>>>>,
     health: std::sync::Arc<RwLock<TelegramConnectionHealth>>,
 }
 
 impl TelegramTransport {
     pub async fn open(config: AppConfig) -> Result<Self, TelegramTransportError> {
         config.validate()?;
+        let store = crate::metadata::MetadataStore::open(config.metadata_path())?;
+        let bootstrap = config.resolve_telegram_bootstrap(&store)?;
+        Self::open_with_bootstrap(config, bootstrap).await
+    }
+
+    pub async fn open_with_bootstrap(
+        config: AppConfig,
+        bootstrap: ResolvedTelegramBootstrap,
+    ) -> Result<Self, TelegramTransportError> {
         let mock_mode = matches!(
             std::env::var("TELEGRAM_TRANSPORT_RUNTIME"),
             Ok(value) if value.eq_ignore_ascii_case("mock")
         );
 
-        let session_path = PathBuf::from(config.telegram_session_path.as_deref().ok_or(
-            TelegramTransportError::InvalidState("missing session path after validation"),
-        )?);
-
-        let storage_chat_id =
-            config
-                .telegram_storage_chat_id
-                .clone()
-                .ok_or(TelegramTransportError::InvalidState(
-                    "missing storage chat id after validation",
-                ))?;
-        let storage_peer_id = storage_chat_id
+        let session_path = bootstrap.telegram_session_path.clone();
+        let storage_peer_id = bootstrap
+            .telegram_storage_chat_id
             .parse::<i64>()
             .map_err(|_| {
                 TelegramTransportError::Config(ConfigError::Parse {
-                    field: "TELEGRAM_STORAGE_CHAT_ID",
-                    value: storage_chat_id.clone(),
+                    field: "telegram storage chat id",
+                    value: bootstrap.telegram_storage_chat_id.clone(),
                 })
             })
             .and_then(|id| {
                 PeerId::from_bot_api_dialog_id(id).ok_or_else(|| {
                     TelegramTransportError::Config(ConfigError::Parse {
-                        field: "TELEGRAM_STORAGE_CHAT_ID",
-                        value: storage_chat_id.clone(),
+                        field: "telegram storage chat id",
+                        value: bootstrap.telegram_storage_chat_id.clone(),
                     })
                 })
             })?;
@@ -199,7 +203,12 @@ impl TelegramTransport {
             Some(TelegramSession::open(&session_path).await?)
         };
 
-        let plan = resolve_proxy_plan(&config)?;
+        let plan = resolve_proxy_plan_with(
+            Some(bootstrap.telegram_proxy_mode.as_str()),
+            bootstrap.telegram_proxy_url.as_deref(),
+            bootstrap.telegram_proxy_username.as_deref(),
+            bootstrap.telegram_proxy_password.as_deref(),
+        )?;
         let materialized = if mock_mode {
             MaterializedProxy {
                 kind: plan.kind,
@@ -210,19 +219,12 @@ impl TelegramTransport {
         } else {
             plan.materialize().await?
         };
-        let api_id = config
-            .telegram_api_id
-            .as_deref()
-            .ok_or(TelegramTransportError::InvalidState(
-                "missing api id after validation",
-            ))?
-            .parse::<i32>()
-            .map_err(|_| {
-                TelegramTransportError::Config(ConfigError::Parse {
-                    field: "TELEGRAM_API_ID",
-                    value: config.telegram_api_id.clone().unwrap_or_default(),
-                })
-            })?;
+        let api_id = bootstrap.telegram_api_id.parse::<i32>().map_err(|_| {
+            TelegramTransportError::Config(ConfigError::Parse {
+                field: "telegram api id",
+                value: bootstrap.telegram_api_id.clone(),
+            })
+        })?;
 
         let connection_params = grammers_mtsender::ConnectionParams {
             proxy_url: materialized.proxy_url.clone(),
@@ -257,8 +259,7 @@ impl TelegramTransport {
         };
 
         Ok(Self {
-            config,
-            session_path,
+            bootstrap,
             session,
             client,
             runner,
@@ -271,7 +272,7 @@ impl TelegramTransport {
     }
 
     pub fn session_path(&self) -> &std::path::Path {
-        &self.session_path
+        &self.bootstrap.telegram_session_path
     }
 
     pub fn retry_policy(&self) -> RetryPolicy {
@@ -300,23 +301,16 @@ impl TelegramTransport {
             return Ok(peer);
         }
 
-        let client = self.client()?;
-        let mut dialogs = client.iter_dialogs();
-        while let Some(dialog) = dialogs.next().await.map_err(map_rpc_error)? {
-            if dialog.peer().id() == self.storage_peer_id {
-                let peer = dialog.peer_ref();
-                *self.storage_peer.lock().expect("storage peer mutex") = Some(peer);
-                return Ok(peer);
-            }
-        }
-        Err(TelegramTransportError::InvalidState(
-            "storage peer dialog not found",
-        ))
+        // Fall back to the configured peer id directly so a valid storage chat
+        // stays usable even when it is not present in the current dialog list.
+        let peer = self.storage_peer_id.to_ambient_ref();
+        *self.storage_peer.lock().expect("storage peer mutex") = Some(peer);
+        Ok(peer)
     }
 
     pub async fn auth_state(&self) -> Result<AuthState, TelegramTransportError> {
         if self.mock_mode {
-            let local_state = if self.session_path.exists() {
+            let local_state = if self.session_path().exists() {
                 SessionState::Reused
             } else {
                 SessionState::Missing
@@ -358,7 +352,7 @@ impl TelegramTransport {
                 SessionStatus::Reopened => SessionState::Reused,
             },
             None => {
-                if self.session_path.exists() {
+                if self.bootstrap.telegram_session_path.exists() {
                     SessionState::Reused
                 } else {
                     SessionState::Missing
@@ -366,7 +360,7 @@ impl TelegramTransport {
             }
         };
         Ok(TelegramTransportStatus {
-            session_path: self.session_path.clone(),
+            session_path: self.bootstrap.telegram_session_path.clone(),
             proxy_kind: self.proxy.kind,
             proxy_url: self.proxy.proxy_url.clone(),
             session_state: if matches!(state.session, SessionState::Authorized) {
@@ -374,6 +368,7 @@ impl TelegramTransport {
             } else {
                 local_state
             },
+            storage_chat_id: self.bootstrap.telegram_storage_chat_id.clone(),
         })
     }
 
@@ -426,7 +421,7 @@ impl TelegramTransport {
         let mut flow = AuthFlowState::waiting_for_code(phone.trim().to_string());
 
         let token = self
-            .retry_rpc(|| client.request_login_code(phone.trim(), api_hash(&self.config)))
+            .retry_rpc(|| client.request_login_code(phone.trim(), self.app_api_hash()))
             .await?;
 
         let code = prompt("authentication code")?;
@@ -501,8 +496,17 @@ impl TelegramTransport {
 
 impl TelegramTransportManager {
     pub async fn open(config: AppConfig) -> Result<std::sync::Arc<Self>, TelegramTransportError> {
-        let transport = std::sync::Arc::new(TelegramTransport::open(config.clone()).await?);
-        let health = evaluate_health(transport.as_ref()).await?;
+        let (transport, health) = match open_transport_from_store(&config).await {
+            Ok(transport) => {
+                let transport = std::sync::Arc::new(transport);
+                let health = evaluate_health(transport.as_ref()).await?;
+                (Some(transport), health)
+            }
+            Err(TelegramTransportError::Config(ConfigError::Missing(_))) => {
+                (None, not_configured_health(&config))
+            }
+            Err(error) => return Err(error),
+        };
         Ok(std::sync::Arc::new(Self {
             config,
             transport: std::sync::Arc::new(RwLock::new(transport)),
@@ -510,8 +514,16 @@ impl TelegramTransportManager {
         }))
     }
 
-    pub async fn current(&self) -> std::sync::Arc<TelegramTransport> {
-        self.transport.read().await.clone()
+    pub async fn current(
+        &self,
+    ) -> Result<std::sync::Arc<TelegramTransport>, TelegramTransportError> {
+        self.transport
+            .read()
+            .await
+            .clone()
+            .ok_or(TelegramTransportError::InvalidState(
+                "telegram bootstrap settings are not configured",
+            ))
     }
 
     pub async fn health(&self) -> TelegramConnectionHealth {
@@ -519,9 +531,9 @@ impl TelegramTransportManager {
     }
 
     pub async fn refresh(&self) -> Result<TelegramConnectionHealth, TelegramTransportError> {
-        let transport = std::sync::Arc::new(TelegramTransport::open(self.config.clone()).await?);
+        let transport = std::sync::Arc::new(open_transport_from_store(&self.config).await?);
         let health = evaluate_health(transport.as_ref()).await?;
-        *self.transport.write().await = transport;
+        *self.transport.write().await = Some(transport);
         *self.health.write().await = health.clone();
         Ok(health)
     }
@@ -557,10 +569,6 @@ impl Drop for TelegramTransport {
             runner.abort();
         }
     }
-}
-
-fn api_hash(config: &AppConfig) -> &str {
-    config.telegram_api_hash.as_deref().unwrap_or_default()
 }
 
 fn prompt(label: &str) -> Result<String, TelegramTransportError> {
@@ -629,7 +637,7 @@ impl TelegramTransport {
     }
 
     pub(crate) fn app_api_hash(&self) -> &str {
-        self.config.telegram_api_hash.as_deref().unwrap_or_default()
+        &self.bootstrap.telegram_api_hash
     }
 
     /// Run an RPC operation under the shared retry / flood-wait policy so the
@@ -643,6 +651,28 @@ impl TelegramTransport {
         Fut: std::future::Future<Output = Result<T, grammers_client::InvocationError>>,
     {
         self.retry_rpc(op).await
+    }
+}
+
+async fn open_transport_from_store(
+    config: &AppConfig,
+) -> Result<TelegramTransport, TelegramTransportError> {
+    let store = crate::metadata::MetadataStore::open(config.metadata_path())?;
+    let bootstrap = config.resolve_telegram_bootstrap(&store)?;
+    TelegramTransport::open_with_bootstrap(config.clone(), bootstrap).await
+}
+
+fn not_configured_health(config: &AppConfig) -> TelegramConnectionHealth {
+    TelegramConnectionHealth {
+        status: TelegramTransportStatus {
+            session_path: config.metadata_path().with_file_name("telegram.session"),
+            proxy_kind: ProxyTransportKind::Direct,
+            proxy_url: None,
+            session_state: SessionState::Missing,
+            storage_chat_id: String::new(),
+        },
+        state: TelegramConnectionState::NotConfigured,
+        detail: "telegram bootstrap settings are not configured".to_string(),
     }
 }
 

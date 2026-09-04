@@ -3760,7 +3760,7 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "telegram-s3"
-version = "0.5.2-rc.2"
+version = "0.5.2-rc.3"
 dependencies = [
  "argon2",
  "assert_cmd",

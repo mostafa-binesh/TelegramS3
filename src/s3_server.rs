@@ -260,8 +260,11 @@ impl S3Server {
         let transport_manager = TelegramTransportManager::open(config.clone()).await?;
         let transport_health = transport_manager.health().await;
         let object_format = Arc::new(
-            ObjectFormatService::open_with_transport_manager(config, Arc::clone(&transport_manager))
-                .await?,
+            ObjectFormatService::open_with_transport_manager(
+                config,
+                Arc::clone(&transport_manager),
+            )
+            .await?,
         );
         let object_status = object_format.bootstrap().await?;
         let admin_addr = config.admin_bind_addr()?;
@@ -274,7 +277,10 @@ impl S3Server {
         }
 
         println!("object format bootstrap: {:?}", object_status);
-        println!("telegram bootstrap: {:?}", transport_health.status.session_state);
+        println!(
+            "telegram bootstrap: {:?}",
+            transport_health.status.session_state
+        );
         println!(
             "telegram bootstrap: session path {}",
             redact::redact_path(&transport_health.status.session_path.display().to_string())

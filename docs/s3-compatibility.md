@@ -49,7 +49,7 @@ features, so they are documented separately.
 - `/_admin` and `/_admin/api/*` are implemented as an authenticated operator
   surface served by the same Rust process.
 - Login is credential-based: accounts are argon2id-hashed records in
-  `metadata.sqlite` (schema v4), not the environment. A guest/operator sees only
+  `metadata.sqlite` (schema v5), not the environment. A guest/operator sees only
   the sign-in screen; every management API requires a session bound to a user.
 - Login is rate-limited with per-account lockout; passwords/session state are
   not stored in browser storage.

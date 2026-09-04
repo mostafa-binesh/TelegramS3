@@ -9,7 +9,7 @@ pub use login_driver::{
 };
 pub use proxy::{
     MaterializedProxy, ProxyBridgeHandle, ProxyError, ProxyMode, ProxyPlan, ProxyScheme,
-    ProxyTransportKind, resolve_proxy_plan,
+    ProxyTransportKind,
 };
 pub use retry::{RetryDecision, RetryPolicy, parse_flood_wait_seconds};
 pub use session::{SessionError, SessionStatus, TelegramSession};

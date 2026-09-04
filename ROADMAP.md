@@ -31,7 +31,7 @@
 Completed work:
 
 - headless auth/login/status/logout flow is wired through the transport service
-- session reuse is persisted behind `TELEGRAM_SESSION_PATH`
+- session reuse is persisted through the admin-managed Telegram session path
 - proxy resolution covers direct, SOCKS5, and bridged HTTP/HTTPS modes
 - a shared retry and flood-wait policy is used by transport calls
 - smoke tests cover the transport bootstrap path in mock mode
@@ -149,7 +149,7 @@ Completed work:
 
 Completed work (initial slice):
 
-- real username + password accounts stored in `metadata.sqlite` (schema `v4`) with argon2id-hashed passwords (new `auth` module)
+- real username + password accounts stored in `metadata.sqlite` with argon2id-hashed passwords (new `auth` module), plus admin-managed Telegram bootstrap settings in schema `v5`
 - signed HTTP-only session cookies bound to a `admin_sessions` row; logout revokes that row; password change / user delete revoke all of that user's sessions via `token_version`
 - `/_admin/api/session` (whoami, guest-safe), `/session/login`, `/session/logout`, `/session/refresh`, with CSRF on mutating endpoints
 - user management API: `GET/POST /users`, `DELETE /users/{id}`, per-user password change; superadmin gets account CRUD

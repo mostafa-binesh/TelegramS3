@@ -8,8 +8,9 @@
 4. Rebuild the local index with `telegram-s3 index rebuild`.
 5. Verify object counts and checksum samples with `telegram-s3 index verify`.
 
-> The same `metadata.sqlite` now also stores operator accounts and session
-> tombstones (schema v4). A backup/restore of that file restores both object
+> The same `metadata.sqlite` now also stores operator accounts, Telegram
+> bootstrap settings, and session tombstones (schema v5). A backup/restore of
+> that file restores both object
 > state and who can sign in. If accounts are lost, re-provision the first
 > operator with `telegram-s3 users create <username> --password <pw>` (the first
 > account becomes the superadmin). Password hashes are argon2id + per-account
@@ -61,7 +62,9 @@
 2. Preserve the named metadata, data, and session volumes together if the
    container is still healthy enough to inspect.
 3. Recreate the container from the same `docker-compose.yml` and `.env`
-   settings so the bind addresses and volume mounts remain consistent.
+   settings so the bind addresses and volume mounts remain consistent. If the
+   Telegram bootstrap settings were already saved in the admin panel, they come
+   back with the `metadata.sqlite` volume.
 4. If only the image is lost, rebuild it and reattach the preserved volumes.
 5. After restore, run `telegram-s3 doctor` or
    `docker compose exec telegram-s3 telegram-s3 doctor` to confirm the

@@ -1,8 +1,8 @@
 # Telegram Transport
 
 Phase 2 turns the Telegram layer into a real transport/service boundary. The
-code now owns session reuse, login state, proxy resolution, and a shared retry
-policy for Telegram RPC calls.
+code now owns session reuse, login state, resolved bootstrap settings persisted
+in `metadata.sqlite`, and a shared retry policy for Telegram RPC calls.
 
 ## Commands
 
@@ -12,34 +12,21 @@ policy for Telegram RPC calls.
   Telegram/auth state.
 - `telegram-s3 auth logout` signs the session out and leaves the local session
   path in place for the next login.
-- `telegram-s3 doctor` and `telegram-s3 server` fail fast when the transport
-  cannot be initialized in live mode.
+- `telegram-s3 server` can start before Telegram is configured so the
+  authenticated admin panel can collect bootstrap settings.
+- `telegram-s3 doctor` reports missing Telegram bootstrap settings until they
+  are saved in the admin panel.
 
 ## Session Reuse
 
-- The configured `TELEGRAM_SESSION_PATH` is the persisted Telegram session
-  database.
+- The Telegram session path is stored in the admin-managed bootstrap settings
+  and persisted in `metadata.sqlite`.
 - Startup reuses that path automatically when it already exists.
 - A successful login writes back to the same session file so subsequent process
   starts can reopen it.
 - The authenticated `/_admin` panel uses the same persisted session and hot-
   reloads the live transport after a successful Telegram reauthorization so
   storage writes can resume without a server restart.
-
-## Proxy Selection
-
-The transport resolves proxy behavior from the existing env contract:
-
-- `TELEGRAM_PROXY_MODE=direct` disables proxy use and rejects a proxy URL.
-- `TELEGRAM_PROXY_MODE=socks5` uses the provided `socks5://` URL directly.
-- `TELEGRAM_PROXY_MODE=auto` accepts `socks5://`, `http://`, and `https://`
-  URLs:
-  - `socks5://` is used directly
-  - `http://` and `https://` are bridged through a local SOCKS5 listener
-- `TELEGRAM_PROXY_USERNAME` and `TELEGRAM_PROXY_PASSWORD` are applied to the
-  resolved upstream proxy credentials.
-
-Invalid combinations are rejected before the CLI proceeds.
 
 ## Retry Policy
 
@@ -57,3 +44,12 @@ Invalid combinations are rejected before the CLI proceeds.
   live network access.
 - Mock mode keeps the CLI shape intact while using local-only session handling
   for test coverage.
+
+## Bootstrap Settings
+
+- Telegram API credentials, storage chat id, session path, and proxy settings
+  are edited in the authenticated admin panel and stored in `metadata.sqlite`.
+- The CLI and server resolve those settings from the persisted store on startup
+  and again when the admin panel saves a change.
+- The environment no longer carries Telegram API credentials, session path,
+  storage chat id, or proxy settings.

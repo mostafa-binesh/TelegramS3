@@ -139,13 +139,10 @@ recovery procedures.
 The published image is `ghcr.io/mostafa-binesh/telegrams3`
 (built on every push to `main` and on `v*` tags; see
 [.github/workflows/publish-docker-image.yml](.github/workflows/publish-docker-image.yml)).
-Pinning a version tag such as `v0.5.2-rc.2` is recommended when validating a
+Pinning a version tag such as `v0.5.2-rc.3` is recommended when validating a
 release candidate.
 
 ```bash
-export TELEGRAM_API_ID=123456          # from my.telegram.org
-export TELEGRAM_API_HASH=0123...       # from my.telegram.org
-export TELEGRAM_STORAGE_CHAT_ID=-100...   # your dedicated storage channel
 export TELEGRAM_S3_MASTER_KEY=$(openssl rand -hex 32)   # envelope encryption
 export RUSTFS_ACCESS_KEY=$(openssl rand -hex 16)        # S3 access key
 export RUSTFS_SECRET_KEY=$(openssl rand -hex 32)        # S3 secret key
@@ -154,16 +151,13 @@ export TELEGRAM_ADMIN_BOOTSTRAP_SECRET=$(openssl rand -hex 32)  # signs /_admin 
 docker run -d --name telegram-s3 \
   --init --restart unless-stopped \
   -p 9000:9000 \
-  -e TELEGRAM_API_ID -e TELEGRAM_API_HASH -e TELEGRAM_STORAGE_CHAT_ID \
   -e TELEGRAM_S3_MASTER_KEY -e RUSTFS_ACCESS_KEY -e RUSTFS_SECRET_KEY \
   -e TELEGRAM_ADMIN_BOOTSTRAP_SECRET \
   -e TELEGRAM_METADATA_PATH=/var/lib/telegram-s3/metadata/metadata.sqlite \
   -e TELEGRAM_DATA_DIR=/var/lib/telegram-s3/data \
-  -e TELEGRAM_SESSION_PATH=/var/lib/telegram-s3/session/telegram.session \
   -v telegram-s3-metadata:/var/lib/telegram-s3/metadata \
   -v telegram-s3-data:/var/lib/telegram-s3/data \
-  -v telegram-s3-session:/var/lib/telegram-s3/session \
-  ghcr.io/mostafa-binesh/telegrams3:v0.5.2-rc.2
+  ghcr.io/mostafa-binesh/telegrams3:v0.5.2-rc.3
 ```
 
 Or with the bundled [docker-compose.yml](docker-compose.yml) (local build):
@@ -220,20 +214,19 @@ cargo build --release
 
 ## Configuration
 
-Runtime configuration is environment-driven. The complete reference lives in
+Runtime configuration is mostly environment-driven, but Telegram bootstrap
+settings are now managed from the authenticated admin panel and persisted in
+`metadata.sqlite`. The complete reference lives in
 [docs/configuration.md](docs/configuration.md); the most important variables:
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | yes | Telegram application credentials |
-| `TELEGRAM_STORAGE_CHAT_ID` | yes | Dedicated storage channel/chat peer |
 | `TELEGRAM_S3_MASTER_KEY` | yes | Master key for envelope encryption |
 | `TELEGRAM_ADMIN_BOOTSTRAP_SECRET` | yes | HMAC secret signing `/_admin` session cookies (not a login password) |
 | `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` | yes | S3 credentials clients must present |
 | `TELEGRAM_S3_BIND_ADDR` | no | S3 listener address (default `127.0.0.1:9000`) |
 | `TELEGRAM_ADMIN_BIND_ADDR` | no | Health/metrics listener, loopback only |
-| `TELEGRAM_METADATA_PATH` / `TELEGRAM_DATA_DIR` / `TELEGRAM_SESSION_PATH` | no | Durable state locations (`TELEGRAM_DATA_DIR` is scratch, staging, and quarantine, not committed payload storage) |
-| `TELEGRAM_PROXY_MODE` / `TELEGRAM_PROXY_URL` | no | Proxy transport (`direct`, `socks5`, `auto`...) |
+| `TELEGRAM_METADATA_PATH` / `TELEGRAM_DATA_DIR` | no | Durable state locations (`TELEGRAM_DATA_DIR` is scratch, staging, and quarantine, not committed payload storage) |
 
 Passwords and session material must come from the environment or the database —
 never from source. Secrets are redacted from logs and diagnostics.

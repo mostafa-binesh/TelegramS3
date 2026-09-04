@@ -9,7 +9,7 @@ Telegram alone to answer read/write consistency questions.
 
 ## Schema Version
 
-- Current schema version: `4`
+- Current schema version: `5`
 - Version contract: migrations are applied on startup and are also available
   through the `telegram-s3 db migrate` command.
 - Startup behavior: the store opens the configured SQLite file, creates the
@@ -46,6 +46,9 @@ Telegram alone to answer read/write consistency questions.
   - per-session rows recording the signing cookie id, issuing user, `token_version`
     snapshot, timestamps and revocation, so a single session can be revoked and
     password change / user delete invalidates all of that user's cookies
+- `app_settings`
+  - admin-managed runtime settings, including Telegram bootstrap credentials,
+    storage chat, session path, and proxy settings; added in schema v5
 
 The phase 3 object-format service also persists chunk and manifest documents
 under the configured data directory, using the metadata store as the

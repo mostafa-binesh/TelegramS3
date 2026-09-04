@@ -1,3 +1,4 @@
+use crate::metadata::MetadataStore;
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -8,14 +9,6 @@ const DEFAULT_DATA_DIR: &str = "data";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppConfig {
-    pub telegram_api_id: Option<String>,
-    pub telegram_api_hash: Option<String>,
-    pub telegram_session_path: Option<String>,
-    pub telegram_storage_chat_id: Option<String>,
-    pub telegram_proxy_url: Option<String>,
-    pub telegram_proxy_username: Option<String>,
-    pub telegram_proxy_password: Option<String>,
-    pub telegram_proxy_mode: Option<String>,
     pub telegram_metadata_path: Option<String>,
     pub telegram_data_dir: Option<String>,
     pub telegram_chunk_size: Option<String>,
@@ -32,6 +25,18 @@ pub struct AppConfig {
     pub telegram_admin_ui_dist_dir: Option<String>,
     pub telegram_s3_bind_addr: Option<String>,
     pub telegram_admin_bind_addr: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTelegramBootstrap {
+    pub telegram_api_id: String,
+    pub telegram_api_hash: String,
+    pub telegram_session_path: PathBuf,
+    pub telegram_storage_chat_id: String,
+    pub telegram_proxy_url: Option<String>,
+    pub telegram_proxy_username: Option<String>,
+    pub telegram_proxy_password: Option<String>,
+    pub telegram_proxy_mode: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -59,14 +64,6 @@ pub enum ConfigError {
 impl AppConfig {
     pub fn from_env() -> Self {
         Self {
-            telegram_api_id: read("TELEGRAM_API_ID"),
-            telegram_api_hash: read("TELEGRAM_API_HASH"),
-            telegram_session_path: read("TELEGRAM_SESSION_PATH"),
-            telegram_storage_chat_id: read("TELEGRAM_STORAGE_CHAT_ID"),
-            telegram_proxy_url: read("TELEGRAM_PROXY_URL"),
-            telegram_proxy_username: read("TELEGRAM_PROXY_USERNAME"),
-            telegram_proxy_password: read("TELEGRAM_PROXY_PASSWORD"),
-            telegram_proxy_mode: read("TELEGRAM_PROXY_MODE"),
             telegram_metadata_path: read("TELEGRAM_METADATA_PATH"),
             telegram_data_dir: read("TELEGRAM_DATA_DIR"),
             telegram_chunk_size: read("TELEGRAM_CHUNK_SIZE"),
@@ -168,13 +165,6 @@ impl AppConfig {
         )
     }
 
-    pub fn proxy_mode(&self) -> String {
-        self.telegram_proxy_mode
-            .as_deref()
-            .unwrap_or("auto")
-            .to_string()
-    }
-
     pub fn s3_bind_addr(&self) -> Result<std::net::SocketAddr, ConfigError> {
         let value = self
             .telegram_s3_bind_addr
@@ -205,26 +195,6 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.telegram_api_id.as_deref().is_none_or(str::is_empty) {
-            return Err(ConfigError::Missing("TELEGRAM_API_ID"));
-        }
-        if self.telegram_api_hash.as_deref().is_none_or(str::is_empty) {
-            return Err(ConfigError::Missing("TELEGRAM_API_HASH"));
-        }
-        if self
-            .telegram_session_path
-            .as_deref()
-            .is_none_or(str::is_empty)
-        {
-            return Err(ConfigError::Missing("TELEGRAM_SESSION_PATH"));
-        }
-        if self
-            .telegram_storage_chat_id
-            .as_deref()
-            .is_none_or(str::is_empty)
-        {
-            return Err(ConfigError::Missing("TELEGRAM_STORAGE_CHAT_ID"));
-        }
         if self
             .telegram_s3_master_key
             .as_deref()
@@ -247,35 +217,56 @@ impl AppConfig {
         }
 
         self.validate_runtime_settings()?;
-        self.validate_path_setting(
-            "TELEGRAM_SESSION_PATH",
-            Path::new(
-                self.telegram_session_path
-                    .as_deref()
-                    .ok_or(ConfigError::Missing("TELEGRAM_SESSION_PATH"))?,
-            ),
-            false,
-        )?;
         self.validate_path_setting("TELEGRAM_METADATA_PATH", &self.metadata_path(), false)?;
         self.validate_path_setting("TELEGRAM_DATA_DIR", &self.data_dir(), true)?;
         if !self.admin_bind_addr()?.ip().is_loopback() {
             return Err(ConfigError::Invalid("TELEGRAM_ADMIN_BIND_ADDR"));
         }
 
-        if let Some(proxy_url) = &self.telegram_proxy_url {
-            if !proxy_url.is_empty()
-                && !proxy_url.starts_with("socks5://")
-                && !proxy_url.starts_with("http://")
-                && !proxy_url.starts_with("https://")
-            {
-                return Err(ConfigError::Invalid("TELEGRAM_PROXY_URL"));
-            }
-            if self.proxy_mode() == "direct" && !proxy_url.is_empty() {
-                return Err(ConfigError::Invalid("TELEGRAM_PROXY_MODE"));
-            }
-        }
-
         Ok(())
+    }
+
+    pub fn resolve_telegram_bootstrap(
+        &self,
+        store: &MetadataStore,
+    ) -> Result<ResolvedTelegramBootstrap, ConfigError> {
+        let persisted = store
+            .telegram_bootstrap_settings()
+            .map_err(|_| ConfigError::Invalid("TELEGRAM_BOOTSTRAP_SETTINGS"))?;
+        let merged = persisted.ok_or(ConfigError::Missing("TELEGRAM_BOOTSTRAP_SETTINGS"))?;
+        let telegram_api_id = merged
+            .telegram_api_id
+            .ok_or(ConfigError::Missing("telegram api id"))?;
+        let telegram_api_hash = merged
+            .telegram_api_hash
+            .ok_or(ConfigError::Missing("telegram api hash"))?;
+        let telegram_storage_chat_id = merged
+            .telegram_storage_chat_id
+            .ok_or(ConfigError::Missing("telegram storage chat id"))?;
+        let telegram_session_path = merged
+            .telegram_session_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| default_session_path(&self.metadata_path()));
+        if telegram_session_path.as_os_str().is_empty() {
+            return Err(ConfigError::Missing("telegram session path"));
+        }
+        self.validate_path_setting("telegram session path", &telegram_session_path, false)?;
+        validate_proxy_setting(
+            merged.telegram_proxy_url.as_deref(),
+            merged.telegram_proxy_mode.as_deref(),
+        )?;
+        Ok(ResolvedTelegramBootstrap {
+            telegram_api_id,
+            telegram_api_hash,
+            telegram_session_path,
+            telegram_storage_chat_id,
+            telegram_proxy_url: merged.telegram_proxy_url,
+            telegram_proxy_username: merged.telegram_proxy_username,
+            telegram_proxy_password: merged.telegram_proxy_password,
+            telegram_proxy_mode: merged
+                .telegram_proxy_mode
+                .unwrap_or_else(|| "auto".to_string()),
+        })
     }
 
     fn validate_runtime_settings(&self) -> Result<(), ConfigError> {
@@ -287,11 +278,7 @@ impl AppConfig {
         self.retry_backoff_ms()?;
         self.respect_flood_wait()?;
 
-        let proxy_mode = self.proxy_mode();
-        match proxy_mode.as_str() {
-            "auto" | "direct" | "socks5" => Ok(()),
-            _ => Err(ConfigError::Invalid("TELEGRAM_PROXY_MODE")),
-        }
+        Ok(())
     }
 
     fn validate_path_setting(
@@ -441,6 +428,37 @@ fn has_parent_dir_component(path: &Path) -> bool {
         .any(|component| matches!(component, Component::ParentDir))
 }
 
+fn default_session_path(metadata_path: &Path) -> PathBuf {
+    metadata_path
+        .parent()
+        .map(|parent| parent.join("telegram.session"))
+        .unwrap_or_else(|| PathBuf::from("telegram.session"))
+}
+
+fn validate_proxy_setting(
+    proxy_url: Option<&str>,
+    proxy_mode: Option<&str>,
+) -> Result<(), ConfigError> {
+    match proxy_mode.unwrap_or("auto") {
+        "auto" | "direct" | "socks5" => {}
+        _ => return Err(ConfigError::Invalid("telegram proxy mode")),
+    }
+    if let Some(proxy_url) = proxy_url
+        && !proxy_url.is_empty()
+        && !proxy_url.starts_with("socks5://")
+        && !proxy_url.starts_with("http://")
+        && !proxy_url.starts_with("https://")
+    {
+        return Err(ConfigError::Invalid("telegram proxy url"));
+    }
+    if matches!(proxy_mode.unwrap_or("auto"), "direct")
+        && proxy_url.is_some_and(|value| !value.is_empty())
+    {
+        return Err(ConfigError::Invalid("telegram proxy mode"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,7 +468,7 @@ mod tests {
         let err = AppConfig::default()
             .validate()
             .expect_err("missing config should fail");
-        assert_eq!(err, ConfigError::Missing("TELEGRAM_API_ID"));
+        assert_eq!(err, ConfigError::Missing("TELEGRAM_S3_MASTER_KEY"));
     }
 
     #[test]

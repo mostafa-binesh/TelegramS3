@@ -16,12 +16,12 @@
 use crate::auth::{self, AuthError, LoginLimiter};
 use crate::config::AppConfig;
 use crate::manifest::ObjectManifest;
-use crate::metadata::MetadataStore;
+use crate::metadata::{MetadataStore, TelegramBootstrapSettings};
 use crate::object_format::{ObjectFormatService, RecoveryIssue as RecoveryIssueModel};
 use crate::redact::redact_path;
 use crate::telegram::{
-    LoginDriverError, LoginStage, SessionState, TelegramConnectionHealth,
-    TelegramLoginDriver, TelegramTransportManager,
+    LoginDriverError, LoginStage, SessionState, TelegramConnectionHealth, TelegramLoginDriver,
+    TelegramTransportManager,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
@@ -141,6 +141,19 @@ struct CreateBucketRequest {
 struct DeleteObjectRequest {
     bucket: String,
     key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct TelegramSettingsRequest {
+    telegram_api_id: Option<String>,
+    telegram_api_hash: Option<String>,
+    telegram_session_path: Option<String>,
+    telegram_storage_chat_id: Option<String>,
+    telegram_proxy_url: Option<String>,
+    telegram_proxy_username: Option<String>,
+    telegram_proxy_password: Option<String>,
+    telegram_proxy_mode: Option<String>,
 }
 
 // Session claims carried in the signed cookie and mirrored into the DB row.
@@ -343,6 +356,10 @@ impl AdminUiState {
                 self.wizard_submit_password(request, &principal).await
             }
             (Method::POST, "telegram/wizard/cancel") => self.wizard_cancel(&principal).await,
+            (Method::GET, "telegram/settings") => self.telegram_settings(&principal).await,
+            (Method::POST, "telegram/settings") => {
+                self.telegram_save_settings(request, &principal).await
+            }
             _ => json_error(StatusCode::NOT_FOUND, "not found"),
         }
     }
@@ -972,7 +989,12 @@ impl AdminUiState {
         let phone = read_wizard_begin_request(request)
             .await
             .and_then(|body| body.phone);
-        let transport = self.transport_manager.current().await;
+        let transport = match self.transport_manager.current().await {
+            Ok(transport) => transport,
+            Err(error) => {
+                return driver_error_response(&LoginDriverError::Unauthorized(error.to_string()));
+            }
+        };
         let owner = &principal.user.username;
         match driver.begin(&transport, phone, owner).await {
             Ok(step) => {
@@ -1000,7 +1022,12 @@ impl AdminUiState {
     ) -> Response<Body> {
         let code = read_wizard_code_request(request).await;
         let mut driver = self.wizard_driver.lock().await;
-        let transport = self.transport_manager.current().await;
+        let transport = match self.transport_manager.current().await {
+            Ok(transport) => transport,
+            Err(error) => {
+                return driver_error_response(&LoginDriverError::Unauthorized(error.to_string()));
+            }
+        };
         let Some(code) = code else {
             return driver_error_response(&LoginDriverError::MissingCode);
         };
@@ -1030,7 +1057,12 @@ impl AdminUiState {
     ) -> Response<Body> {
         let password = read_wizard_password_request(request).await;
         let mut driver = self.wizard_driver.lock().await;
-        let transport = self.transport_manager.current().await;
+        let transport = match self.transport_manager.current().await {
+            Ok(transport) => transport,
+            Err(error) => {
+                return driver_error_response(&LoginDriverError::Unauthorized(error.to_string()));
+            }
+        };
         let Some(password) = password else {
             return driver_error_response(&LoginDriverError::MissingPassword);
         };
@@ -1064,6 +1096,135 @@ impl AdminUiState {
     /// object operations use the refreshed Telegram session immediately.
     async fn finalize_wizard_success(&self) {
         let _ = self.transport_manager.refresh().await;
+    }
+
+    async fn telegram_settings(&self, _principal: &ResolvedPrincipal) -> Response<Body> {
+        json_response(
+            StatusCode::OK,
+            serde_json::json!({ "settings": self.telegram_settings_wire() }),
+        )
+    }
+
+    async fn telegram_save_settings(
+        &self,
+        request: Request<Incoming>,
+        _principal: &ResolvedPrincipal,
+    ) -> Response<Body> {
+        let TelegramSettingsRequest {
+            telegram_api_id,
+            telegram_api_hash,
+            telegram_session_path,
+            telegram_storage_chat_id,
+            telegram_proxy_url,
+            telegram_proxy_username,
+            telegram_proxy_password,
+            telegram_proxy_mode,
+        } = match read_json::<TelegramSettingsRequest>(request).await {
+            Ok(body) => body,
+            Err(_) => {
+                return json_error(StatusCode::BAD_REQUEST, "invalid telegram settings payload");
+            }
+        };
+
+        let current = self
+            .store()
+            .telegram_bootstrap_settings()
+            .unwrap_or_default()
+            .unwrap_or_default();
+        let next = TelegramBootstrapSettings {
+            telegram_api_id: clean_required(telegram_api_id).or(current.telegram_api_id),
+            telegram_api_hash: clean_required(telegram_api_hash).or(current.telegram_api_hash),
+            telegram_session_path: clean_optional(telegram_session_path)
+                .or(current.telegram_session_path),
+            telegram_storage_chat_id: clean_required(telegram_storage_chat_id)
+                .or(current.telegram_storage_chat_id),
+            telegram_proxy_url: clean_optional(telegram_proxy_url),
+            telegram_proxy_username: clean_optional(telegram_proxy_username),
+            telegram_proxy_password: clean_optional(telegram_proxy_password),
+            telegram_proxy_mode: clean_optional(telegram_proxy_mode)
+                .or(current.telegram_proxy_mode)
+                .or_else(|| Some("auto".to_string())),
+        };
+        if next.telegram_api_id.as_deref().is_none_or(str::is_empty)
+            || next.telegram_api_hash.as_deref().is_none_or(str::is_empty)
+            || next
+                .telegram_storage_chat_id
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "telegram api id, api hash, and storage chat id are required",
+            );
+        }
+        if let Err(error) = self.store().set_telegram_bootstrap_settings(&next) {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Some(storage_chat_id) = next.telegram_storage_chat_id.clone() {
+            self.object_format.set_storage_chat_id(storage_chat_id);
+        }
+        let refresh = self.transport_manager.refresh().await;
+        if let Err(error) = refresh {
+            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+
+        json_response(
+            StatusCode::OK,
+            serde_json::json!({ "settings": self.telegram_settings_wire() }),
+        )
+    }
+
+    fn telegram_settings_wire(&self) -> TelegramSettingsWire {
+        let stored = self
+            .store()
+            .telegram_bootstrap_settings()
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let resolved = self.config.resolve_telegram_bootstrap(self.store()).ok();
+        let session_path = resolved
+            .as_ref()
+            .map(|settings| settings.telegram_session_path.display().to_string())
+            .or_else(|| stored.telegram_session_path.clone())
+            .unwrap_or_else(|| self.config.metadata_path().display().to_string());
+        TelegramSettingsWire {
+            telegram_api_id: resolved
+                .as_ref()
+                .map(|settings| settings.telegram_api_id.clone())
+                .or_else(|| stored.telegram_api_id.clone())
+                .unwrap_or_default(),
+            telegram_api_hash: resolved
+                .as_ref()
+                .map(|settings| settings.telegram_api_hash.clone())
+                .or_else(|| stored.telegram_api_hash.clone())
+                .unwrap_or_default(),
+            telegram_session_path: session_path,
+            telegram_storage_chat_id: resolved
+                .as_ref()
+                .map(|settings| settings.telegram_storage_chat_id.clone())
+                .or_else(|| stored.telegram_storage_chat_id.clone())
+                .unwrap_or_default(),
+            telegram_proxy_url: resolved
+                .as_ref()
+                .and_then(|settings| settings.telegram_proxy_url.clone())
+                .or_else(|| stored.telegram_proxy_url.clone())
+                .unwrap_or_default(),
+            telegram_proxy_username: resolved
+                .as_ref()
+                .and_then(|settings| settings.telegram_proxy_username.clone())
+                .or_else(|| stored.telegram_proxy_username.clone())
+                .unwrap_or_default(),
+            telegram_proxy_password: resolved
+                .as_ref()
+                .and_then(|settings| settings.telegram_proxy_password.clone())
+                .or_else(|| stored.telegram_proxy_password.clone())
+                .unwrap_or_default(),
+            telegram_proxy_mode: resolved
+                .as_ref()
+                .map(|settings| settings.telegram_proxy_mode.clone())
+                .or_else(|| stored.telegram_proxy_mode.clone())
+                .unwrap_or_else(|| "auto".to_string()),
+        }
     }
 
     // ---- binary content write (upload) ---------------------------------------
@@ -1149,7 +1310,7 @@ impl AdminUiState {
             session_state: session_state_debug.clone(),
             connection_state: telegram_connection_state_label(&health.state).to_string(),
             detail: health.detail.clone(),
-            storage_chat_id: self.config.telegram_storage_chat_id.clone(),
+            storage_chat_id: Some(health.status.storage_chat_id.clone()),
         };
         let endpoint = EndpointWire {
             s3_bind_addr: self.s3_addr.to_string(),
@@ -1171,11 +1332,8 @@ impl AdminUiState {
             check("Telegram storage", session_usable, &health.detail),
             check(
                 "Storage chat",
-                self.config
-                    .telegram_storage_chat_id
-                    .as_deref()
-                    .is_some_and(|v| !v.is_empty()),
-                "configured",
+                !health.status.storage_chat_id.is_empty(),
+                "resolved from Telegram bootstrap settings",
             ),
             check(
                 "UI assets",
@@ -1260,12 +1418,27 @@ fn telegram_session_usable(state: SessionState) -> bool {
     matches!(state, SessionState::Authorized | SessionState::Reused)
 }
 
-fn telegram_connection_state_label(state: &crate::telegram::TelegramConnectionState) -> &'static str {
+fn telegram_connection_state_label(
+    state: &crate::telegram::TelegramConnectionState,
+) -> &'static str {
     match state {
         crate::telegram::TelegramConnectionState::Connected => "connected",
         crate::telegram::TelegramConnectionState::Disconnected => "disconnected",
         crate::telegram::TelegramConnectionState::NeedsReauth => "needs_reauth",
+        crate::telegram::TelegramConnectionState::NotConfigured => "not_configured",
     }
+}
+
+fn clean_required(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn clean_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 // ---- binary content + telegram wizard helpers ------------------------------
@@ -1716,6 +1889,19 @@ struct TelegramStateWire {
     connection_state: String,
     detail: String,
     storage_chat_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct TelegramSettingsWire {
+    telegram_api_id: String,
+    telegram_api_hash: String,
+    telegram_session_path: String,
+    telegram_storage_chat_id: String,
+    telegram_proxy_url: String,
+    telegram_proxy_username: String,
+    telegram_proxy_password: String,
+    telegram_proxy_mode: String,
 }
 
 // ---- cookie / csrf primitives -----------------------------------------------

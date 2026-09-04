@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
+use telegram_s3::metadata::{MetadataStore, TelegramBootstrapSettings};
 use tempfile::TempDir;
 
 fn prepare_admin_ui(tempdir: &TempDir) -> std::path::PathBuf {
@@ -31,16 +32,11 @@ fn free_bind_addr() -> String {
 
 fn command_for(tempdir: &TempDir, bind_addr: &str) -> Command {
     let metadata_path = tempdir.path().join("metadata.sqlite");
-    let session_path = tempdir.path().join("telegram.session");
     let data_dir = tempdir.path().join("data");
     let ui_dir = prepare_admin_ui(tempdir);
     fs::create_dir_all(&data_dir).expect("data dir");
 
     let mut command = Command::cargo_bin("telegram-s3").expect("binary");
-    command.env("TELEGRAM_API_ID", "12345");
-    command.env("TELEGRAM_API_HASH", "hash");
-    command.env("TELEGRAM_SESSION_PATH", session_path.display().to_string());
-    command.env("TELEGRAM_STORAGE_CHAT_ID", "-1001234567890");
     command.env(
         "TELEGRAM_METADATA_PATH",
         metadata_path.display().to_string(),
@@ -52,7 +48,6 @@ fn command_for(tempdir: &TempDir, bind_addr: &str) -> Command {
     command.env("RUSTFS_SECRET_KEY", "secret-key");
     command.env("TELEGRAM_ADMIN_BOOTSTRAP_SECRET", "bootstrap-secret");
     command.env("TELEGRAM_ADMIN_UI_DIST_DIR", ui_dir.display().to_string());
-    command.env("TELEGRAM_PROXY_MODE", "auto");
     command.env("TELEGRAM_FLOOD_WAIT_RESPECT", "true");
     command.env("TELEGRAM_CHUNK_SIZE", "1048576");
     command.env("TELEGRAM_CONNECTION_TIMEOUT_SECS", "30");
@@ -65,9 +60,30 @@ fn command_for(tempdir: &TempDir, bind_addr: &str) -> Command {
     command
 }
 
+fn seed_telegram_settings(tempdir: &TempDir) {
+    let store = MetadataStore::open(tempdir.path().join("metadata.sqlite")).expect("metadata");
+    store
+        .set_telegram_bootstrap_settings(&TelegramBootstrapSettings {
+            telegram_api_id: Some("12345".to_string()),
+            telegram_api_hash: Some("hash".to_string()),
+            telegram_session_path: Some(
+                tempdir
+                    .path()
+                    .join("telegram.session")
+                    .display()
+                    .to_string(),
+            ),
+            telegram_storage_chat_id: Some("-1001234567890".to_string()),
+            telegram_proxy_mode: Some("auto".to_string()),
+            ..TelegramBootstrapSettings::default()
+        })
+        .expect("telegram settings");
+}
+
 #[tokio::test]
 async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     let tempdir = TempDir::new().expect("tempdir");
+    seed_telegram_settings(&tempdir);
 
     // Pair the CLI seed the way production would: create an operator account in
     // the same metadata store the server will use, before it boots.

@@ -90,6 +90,21 @@ export interface OverviewState {
   checks?: { label: string; ok: boolean; detail: string }[];
 }
 
+export interface TelegramSettings {
+  telegram_api_id: string;
+  telegram_api_hash: string;
+  telegram_session_path: string;
+  telegram_storage_chat_id: string;
+  telegram_proxy_url: string;
+  telegram_proxy_username: string;
+  telegram_proxy_password: string;
+  telegram_proxy_mode: string;
+}
+
+export interface TelegramSettingsState {
+  settings: TelegramSettings;
+}
+
 export type WizardPhase = 'idle' | 'code' | 'two_fa' | 'authorized';
 
 export interface WizardState {

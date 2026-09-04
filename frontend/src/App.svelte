@@ -7,6 +7,7 @@
     deleteBucket,
     deleteUser,
     getOverview,
+    getTelegramSettings,
     getSession,
     listBuckets,
     listObjects,
@@ -14,7 +15,8 @@
     login,
     logout,
     removeObject,
-    contentUrl
+    contentUrl,
+    saveTelegramSettings
   } from './lib/api';
   import type {
     BucketInfo,
@@ -23,6 +25,7 @@
     OverviewState,
     RecoveryIssue,
     SessionState,
+    TelegramSettings,
     UserInfo
   } from './lib/types';
   import TelegramWizard from './components/TelegramWizard.svelte';
@@ -55,6 +58,17 @@
   let recoveryOpen = true;
 
   let showWizard = false;
+  let telegramApiId = '';
+  let telegramApiHash = '';
+  let telegramSessionPath = '';
+  let telegramStorageChatId = '';
+  let telegramProxyUrl = '';
+  let telegramProxyUsername = '';
+  let telegramProxyPassword = '';
+  let telegramProxyMode = 'auto';
+  let telegramSettingsBusy = false;
+  let telegramSettingsError = '';
+  let telegramSettingsMessage = '';
   $: canManageOperators = session?.user?.role === 'superadmin';
 
   function telegramNeedsSetup(): boolean {
@@ -103,6 +117,7 @@
       session = await getSession();
       if (session?.authenticated) {
         overview = await getOverview();
+        await refreshTelegramSettings();
       } else {
         overview = null;
       }
@@ -166,6 +181,53 @@
     showWizard = false;
     message = 'Telegram account authorized.';
     await refreshOverview();
+    await refreshTelegramSettings();
+  }
+
+  async function refreshTelegramSettings() {
+    try {
+      const response = await getTelegramSettings();
+      applyTelegramSettings(response.settings);
+    } catch (cause) {
+      telegramSettingsError = normalizeError(cause);
+    }
+  }
+
+  function applyTelegramSettings(settings: TelegramSettings) {
+    telegramApiId = settings.telegram_api_id ?? '';
+    telegramApiHash = settings.telegram_api_hash ?? '';
+    telegramSessionPath = settings.telegram_session_path ?? '';
+    telegramStorageChatId = settings.telegram_storage_chat_id ?? '';
+    telegramProxyUrl = settings.telegram_proxy_url ?? '';
+    telegramProxyUsername = settings.telegram_proxy_username ?? '';
+    telegramProxyPassword = settings.telegram_proxy_password ?? '';
+    telegramProxyMode = settings.telegram_proxy_mode ?? 'auto';
+    telegramSettingsError = '';
+  }
+
+  async function saveTelegramSettingsForm() {
+    telegramSettingsBusy = true;
+    telegramSettingsError = '';
+    telegramSettingsMessage = '';
+    try {
+      const response = await saveTelegramSettings(session?.csrf_token, {
+        telegram_api_id: telegramApiId.trim(),
+        telegram_api_hash: telegramApiHash.trim(),
+        telegram_session_path: telegramSessionPath.trim(),
+        telegram_storage_chat_id: telegramStorageChatId.trim(),
+        telegram_proxy_url: telegramProxyUrl.trim(),
+        telegram_proxy_username: telegramProxyUsername.trim(),
+        telegram_proxy_password: telegramProxyPassword,
+        telegram_proxy_mode: telegramProxyMode.trim()
+      });
+      applyTelegramSettings(response.settings);
+      telegramSettingsMessage = 'Telegram settings saved.';
+      await refreshOverview();
+    } catch (cause) {
+      telegramSettingsError = normalizeError(cause);
+    } finally {
+      telegramSettingsBusy = false;
+    }
   }
 
   async function switchView(next: 'overview' | 'users' | 'buckets') {
@@ -450,6 +512,51 @@
             </button>
           </div>
         </div>
+        <form class="telegram-settings" on:submit|preventDefault={saveTelegramSettingsForm}>
+          <div class="settings-grid">
+            <label>
+              <span>Telegram API ID</span>
+              <input bind:value={telegramApiId} type="text" autocomplete="off" />
+            </label>
+            <label>
+              <span>Telegram API hash</span>
+              <input bind:value={telegramApiHash} type="password" autocomplete="off" />
+            </label>
+            <label>
+              <span>Session path</span>
+              <input bind:value={telegramSessionPath} type="text" autocomplete="off" />
+            </label>
+            <label>
+              <span>Storage chat ID</span>
+              <input bind:value={telegramStorageChatId} type="text" autocomplete="off" />
+            </label>
+            <label>
+              <span>Proxy mode</span>
+              <input bind:value={telegramProxyMode} type="text" autocomplete="off" placeholder="auto" />
+            </label>
+            <label>
+              <span>Proxy URL</span>
+              <input bind:value={telegramProxyUrl} type="text" autocomplete="off" placeholder="socks5://127.0.0.1:12334" />
+            </label>
+            <label>
+              <span>Proxy username</span>
+              <input bind:value={telegramProxyUsername} type="text" autocomplete="off" />
+            </label>
+            <label>
+              <span>Proxy password</span>
+              <input bind:value={telegramProxyPassword} type="password" autocomplete="off" />
+            </label>
+          </div>
+          <div class="settings-actions">
+            <button class="primary" type="submit" disabled={telegramSettingsBusy}>Save Telegram settings</button>
+          </div>
+          {#if telegramSettingsMessage}
+            <p class="fine-print">{telegramSettingsMessage}</p>
+          {/if}
+          {#if telegramSettingsError}
+            <p class="fine-print error-hint">{telegramSettingsError}</p>
+          {/if}
+        </form>
       </article>
       {#if showWizard}
         <TelegramWizard
