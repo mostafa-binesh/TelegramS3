@@ -87,6 +87,9 @@
    the loopback admin listener for `/healthz` and `/metrics`.
 5. The same restart should also keep the authenticated `/_admin` operator
    frontend available for readiness and recovery checks.
+6. Verify bucket and object visibility through the client class you depend on
+   (`ListObjects` legacy callers as well as `ListObjectsV2` callers) before
+   returning the endpoint to backup tooling.
 
 ## Orphan Cleanup
 

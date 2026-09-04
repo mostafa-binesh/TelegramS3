@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-04
+
+- Added legacy S3 `ListObjects` support on the main data plane, backed by the
+  same ordered local manifest index and delimiter grouping as `ListObjectsV2`,
+  to improve compatibility with older tooling such as Dokploy/rclone.
+
 ## 0.4.2 - 2026-09-03
 
 - Switched release-facing versioning to the semver `0.4.2` across the Rust

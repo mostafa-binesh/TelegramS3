@@ -122,7 +122,9 @@ The database tracks:
 
 The index is a fast path, not the only source of truth. Bucket rows follow the
 same recovery rules as object manifests, so bucket visibility also depends on
-the metadata store and reconciliation path.
+the metadata store and reconciliation path. Both legacy `ListObjects` and
+`ListObjectsV2` read from that same ordered local index rather than deriving
+separate views of the bucket.
 
 ## Commit State
 

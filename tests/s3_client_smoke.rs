@@ -103,6 +103,7 @@ async fn s3_crud_list_and_range_smoke_test() {
 
     let bucket = format!("phase4-{}", uuid::Uuid::new_v4().simple());
     let key = "folder/object.txt";
+    let root_key = "root.txt";
     let body = b"hello phase four";
 
     let create = signed_request(
@@ -128,6 +129,18 @@ async fn s3_crud_list_and_range_smoke_test() {
     )
     .await;
     assert_eq!(put.status, 200, "put object");
+
+    let put_root = signed_request(
+        &tempdir,
+        &bind_addr,
+        "PUT",
+        &format!("/{bucket}/{root_key}"),
+        None,
+        &[],
+        b"root level",
+    )
+    .await;
+    assert_eq!(put_root.status, 200, "put root object");
 
     let head = signed_request(
         &tempdir,
@@ -231,6 +244,53 @@ async fn s3_crud_list_and_range_smoke_test() {
             .contains(key)
     );
 
+    let listed_v1 = signed_request(
+        &tempdir,
+        &bind_addr,
+        "GET",
+        &format!("/{bucket}"),
+        None,
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(listed_v1.status, 200, "legacy list objects");
+    let listed_v1_body = String::from_utf8(listed_v1.body).expect("utf8 list v1 body");
+    assert!(
+        listed_v1_body.contains(key),
+        "legacy list body: {listed_v1_body}"
+    );
+    assert!(
+        listed_v1_body.contains(root_key),
+        "legacy list body should include root object: {listed_v1_body}"
+    );
+
+    let listed_delimited = signed_request(
+        &tempdir,
+        &bind_addr,
+        "GET",
+        &format!("/{bucket}"),
+        Some("delimiter=%2F"),
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(listed_delimited.status, 200, "delimited legacy list");
+    let listed_delimited_body =
+        String::from_utf8(listed_delimited.body).expect("utf8 delimited list body");
+    assert!(
+        listed_delimited_body.contains("<Prefix>folder/</Prefix>"),
+        "delimited list should expose folder prefix: {listed_delimited_body}"
+    );
+    assert!(
+        listed_delimited_body.contains(root_key),
+        "delimited list should still expose root object: {listed_delimited_body}"
+    );
+    assert!(
+        !listed_delimited_body.contains(key),
+        "delimited list should roll nested object into CommonPrefixes: {listed_delimited_body}"
+    );
+
     let delete_object = signed_request(
         &tempdir,
         &bind_addr,
@@ -242,6 +302,18 @@ async fn s3_crud_list_and_range_smoke_test() {
     )
     .await;
     assert!(delete_object.status == 204 || delete_object.status == 200);
+
+    let delete_root_object = signed_request(
+        &tempdir,
+        &bind_addr,
+        "DELETE",
+        &format!("/{bucket}/{root_key}"),
+        None,
+        &[],
+        &[],
+    )
+    .await;
+    assert!(delete_root_object.status == 204 || delete_root_object.status == 200);
 
     let delete_bucket = signed_request(
         &tempdir,

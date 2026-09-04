@@ -34,8 +34,9 @@ committed chunk files on local durable storage; the Telegram transport layer
 ## Features
 
 - **S3-compatible API surface** — buckets, objects, byte-range reads, copy,
-  conditional requests, versioned listings, delete markers, and full multipart
-  upload sessions, served over a RustFS-backed listener.
+  conditional requests, legacy `ListObjects` plus `ListObjectsV2`, versioned
+  listings, delete markers, and full multipart upload sessions, served over a
+  RustFS-backed listener.
 - **Journaled, crash-safe object model** — uploads stage invisibly and commit
   atomically; interrupted writes never appear as objects; startup
   reconciliation repairs, rolls back, or quarantines incomplete state.
@@ -136,7 +137,7 @@ recovery procedures.
 The published image is `ghcr.io/mostafa-binesh/telegrams3`
 (built on every push to `main` and on `v*` tags; see
 [.github/workflows/publish-docker-image.yml](.github/workflows/publish-docker-image.yml)).
-Pinning a version tag such as `v0.4.2` is recommended for production.
+Pinning a version tag such as `v0.5.0` is recommended for production.
 
 ```bash
 export TELEGRAM_API_ID=123456          # from my.telegram.org
@@ -159,7 +160,7 @@ docker run -d --name telegram-s3 \
   -v telegram-s3-metadata:/var/lib/telegram-s3/metadata \
   -v telegram-s3-data:/var/lib/telegram-s3/data \
   -v telegram-s3-session:/var/lib/telegram-s3/session \
-  ghcr.io/mostafa-binesh/telegrams3:v0.4.2
+  ghcr.io/mostafa-binesh/telegrams3:v0.5.0
 ```
 
 Or with the bundled [docker-compose.yml](docker-compose.yml) (local build):
@@ -237,12 +238,12 @@ never from source. Secrets are redacted from logs and diagnostics.
 ## S3 compatibility
 
 Implemented operations include bucket create/delete/list/head, object
-put/get/head/delete/list-v2/copy, byte-range GET, multipart initiate/upload/
-complete/abort/list, conditional requests, versioning with delete markers, and
-checksum enforcement. Presigned URLs, batch delete, bucket policies, object
-tags, retention/object lock, event notifications, and quotas are documented
-**gaps** — they are not silently emulated. The authoritative, per-operation
-matrix is [docs/s3-compatibility.md](docs/s3-compatibility.md).
+put/get/head/delete/list-v1/list-v2/copy, byte-range GET, multipart
+initiate/upload/complete/abort/list, conditional requests, versioning with
+delete markers, and checksum enforcement. Presigned URLs, batch delete, bucket
+policies, object tags, retention/object lock, event notifications, and quotas
+are documented **gaps** — they are not silently emulated. The authoritative,
+per-operation matrix is [docs/s3-compatibility.md](docs/s3-compatibility.md).
 
 ## Security and durability
 

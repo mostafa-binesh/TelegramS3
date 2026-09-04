@@ -17,6 +17,7 @@ surfaces, not S3 compatibility features, so they are documented separately.
 | Get object | implemented | cargo test | Streams from manifest and chunks with checksum verification | Requires chunk fetch and verification | 4 |
 | Head object | implemented | cargo test | Returns committed metadata only | Manifest rebuild may be needed | 4 |
 | Delete object | implemented | cargo test | Tombstones before cleanup | Physical delete is deferred | 4 |
+| List objects v1 | implemented | cargo test | Uses the same ordered local manifest index and delimiter grouping as v2 so older clients can interoperate | Remote reconciliation lag exists | 4 |
 | List objects v2 | implemented | cargo test | Uses the local index and manifest list for ordering | Remote reconciliation lag exists | 4 |
 | Copy object | implemented | cargo check | Reuses the bounded object-format backend for source-to-destination copies | Copy is still local-first rather than remote-atomic | 5 |
 | Byte-range GET | implemented | cargo test | Maps ranges to chunk spans | Requires chunk-aware verification | 4 |

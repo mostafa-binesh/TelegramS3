@@ -14,21 +14,21 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use s3s::S3ErrorCode;
 use s3s::auth::SimpleAuth;
 use s3s::dto::{
-    AbortMultipartUploadInput, AbortMultipartUploadOutput, Bucket, CompleteMultipartUploadInput,
-    CompleteMultipartUploadOutput, CopyObjectInput, CopyObjectOutput, CopySource,
-    CreateBucketInput, CreateBucketOutput, CreateMultipartUploadInput, CreateMultipartUploadOutput,
-    DeleteBucketInput, DeleteBucketOutput, DeleteMarkerEntry, DeleteObjectInput,
-    DeleteObjectOutput, ETag, ETagCondition, GetObjectInput, GetObjectOutput, HeadBucketInput,
-    HeadBucketOutput, HeadObjectInput, HeadObjectOutput, ListBucketsInput, ListBucketsOutput,
-    ListMultipartUploadsInput, ListMultipartUploadsOutput, ListObjectVersionsInput,
-    ListObjectVersionsOutput, ListObjectsV2Input, ListObjectsV2Output, ListPartsInput,
-    ListPartsOutput, MultipartUpload, Object, ObjectStorageClass, ObjectVersion,
-    ObjectVersionStorageClass, Part, StreamingBlob, Timestamp, UploadPartCopyInput,
-    UploadPartCopyOutput, UploadPartInput, UploadPartOutput,
+    AbortMultipartUploadInput, AbortMultipartUploadOutput, Bucket, CommonPrefix,
+    CompleteMultipartUploadInput, CompleteMultipartUploadOutput, CopyObjectInput, CopyObjectOutput,
+    CopySource, CreateBucketInput, CreateBucketOutput, CreateMultipartUploadInput,
+    CreateMultipartUploadOutput, DeleteBucketInput, DeleteBucketOutput, DeleteMarkerEntry,
+    DeleteObjectInput, DeleteObjectOutput, ETag, ETagCondition, GetObjectInput, GetObjectOutput,
+    HeadBucketInput, HeadBucketOutput, HeadObjectInput, HeadObjectOutput, ListBucketsInput,
+    ListBucketsOutput, ListMultipartUploadsInput, ListMultipartUploadsOutput,
+    ListObjectVersionsInput, ListObjectVersionsOutput, ListObjectsInput, ListObjectsOutput,
+    ListObjectsV2Input, ListObjectsV2Output, ListPartsInput, ListPartsOutput, MultipartUpload,
+    Object, ObjectStorageClass, ObjectVersion, ObjectVersionStorageClass, Part, StreamingBlob,
+    Timestamp, UploadPartCopyInput, UploadPartCopyOutput, UploadPartInput, UploadPartOutput,
 };
 use s3s::service::{S3Service, S3ServiceBuilder};
 use s3s::{Body, S3, S3Request, S3Response, S3Result};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
 use std::fmt;
 use std::net::SocketAddr;
@@ -68,6 +68,15 @@ impl fmt::Debug for TelegramS3Backend {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ListedBucketPage {
+    objects: Vec<Object>,
+    common_prefixes: Vec<CommonPrefix>,
+    is_truncated: bool,
+    next_marker: Option<String>,
+    key_count: usize,
+}
+
 impl TelegramS3Backend {
     fn resolve_manifest(
         &self,
@@ -82,6 +91,137 @@ impl TelegramS3Backend {
         } else {
             Ok(self.object_format.get_active_manifest(bucket, key)?)
         }
+    }
+
+    fn list_bucket_page(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        delimiter: Option<&str>,
+        resume_after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<ListedBucketPage, crate::object_format::ObjectFormatError> {
+        let mut manifests = self
+            .object_format
+            .list_bucket_manifests(bucket, Some(prefix))?;
+        manifests.sort_by(|left, right| {
+            left.key
+                .cmp(&right.key)
+                .then(left.object_id.cmp(&right.object_id))
+        });
+
+        let mut objects = Vec::new();
+        let mut common_prefixes = BTreeSet::new();
+        let delimiter = delimiter.filter(|value| !value.is_empty());
+
+        for manifest in manifests {
+            if let Some(delimiter) = delimiter {
+                let relative = manifest.key.strip_prefix(prefix).unwrap_or(&manifest.key);
+                if let Some(offset) = relative.find(delimiter) {
+                    let end = offset + delimiter.len();
+                    common_prefixes.insert(format!("{prefix}{}", &relative[..end]));
+                    continue;
+                }
+            }
+
+            objects.push(Object {
+                key: Some(manifest.key),
+                last_modified: Some(Timestamp::from(manifest.created_at)),
+                size: Some(manifest.content_length as i64),
+                e_tag: Some(ETag::Strong(manifest.checksum.whole_object)),
+                storage_class: Some(ObjectStorageClass::from_static(
+                    ObjectStorageClass::STANDARD,
+                )),
+                ..Default::default()
+            });
+        }
+
+        if let Some(marker) = resume_after.filter(|value| !value.is_empty()) {
+            objects.retain(|object| object.key.as_deref().unwrap_or("") > marker);
+            common_prefixes.retain(|prefix| prefix.as_str() > marker);
+        }
+
+        let common_prefixes = common_prefixes
+            .into_iter()
+            .map(|prefix| CommonPrefix {
+                prefix: Some(prefix),
+            })
+            .collect::<Vec<_>>();
+
+        let mut result_objects = Vec::new();
+        let mut result_prefixes = Vec::new();
+        let mut total_count = 0_usize;
+        let mut last_key: Option<String> = None;
+        let mut object_index = 0_usize;
+        let mut prefix_index = 0_usize;
+
+        while total_count < max_keys {
+            let object_key = objects
+                .get(object_index)
+                .and_then(|item| item.key.as_deref());
+            let prefix_key = common_prefixes
+                .get(prefix_index)
+                .and_then(|item| item.prefix.as_deref());
+
+            match (object_key, prefix_key) {
+                (Some(object_key), Some(prefix_key)) => {
+                    if object_key < prefix_key {
+                        last_key = Some(object_key.to_string());
+                        result_objects.push(objects[object_index].clone());
+                        object_index += 1;
+                    } else {
+                        last_key = Some(prefix_key.to_string());
+                        result_prefixes.push(common_prefixes[prefix_index].clone());
+                        prefix_index += 1;
+                    }
+                    total_count += 1;
+                }
+                (Some(object_key), None) => {
+                    last_key = Some(object_key.to_string());
+                    result_objects.push(objects[object_index].clone());
+                    object_index += 1;
+                    total_count += 1;
+                }
+                (None, Some(prefix_key)) => {
+                    last_key = Some(prefix_key.to_string());
+                    result_prefixes.push(common_prefixes[prefix_index].clone());
+                    prefix_index += 1;
+                    total_count += 1;
+                }
+                (None, None) => break,
+            }
+        }
+
+        let is_truncated =
+            max_keys > 0 && (object_index < objects.len() || prefix_index < common_prefixes.len());
+        let next_marker = if is_truncated {
+            last_key.or_else(|| {
+                let object_key = objects.get(object_index).and_then(|item| item.key.clone());
+                let prefix_key = common_prefixes
+                    .get(prefix_index)
+                    .and_then(|item| item.prefix.clone());
+                match (object_key, prefix_key) {
+                    (Some(object_key), Some(prefix_key)) => Some(if object_key < prefix_key {
+                        object_key
+                    } else {
+                        prefix_key
+                    }),
+                    (Some(object_key), None) => Some(object_key),
+                    (None, Some(prefix_key)) => Some(prefix_key),
+                    (None, None) => None,
+                }
+            })
+        } else {
+            None
+        };
+
+        Ok(ListedBucketPage {
+            objects: result_objects,
+            common_prefixes: result_prefixes,
+            is_truncated,
+            next_marker,
+            key_count: total_count,
+        })
     }
 }
 
@@ -877,6 +1017,47 @@ impl S3 for TelegramS3Backend {
         }))
     }
 
+    async fn list_objects(
+        &self,
+        req: S3Request<ListObjectsInput>,
+    ) -> S3Result<S3Response<ListObjectsOutput>> {
+        let input = req.input;
+        if !self
+            .object_format
+            .bucket_exists(&input.bucket)
+            .map_err(map_object_error)?
+        {
+            return Err(s3s::s3_error!(NoSuchBucket, "bucket does not exist"));
+        }
+
+        let prefix = input.prefix.unwrap_or_default();
+        let marker = input.marker.clone();
+        let max_keys = input.max_keys.unwrap_or(1000).clamp(0, 1000) as usize;
+        let page = self
+            .list_bucket_page(
+                &input.bucket,
+                &prefix,
+                input.delimiter.as_deref(),
+                marker.as_deref(),
+                max_keys,
+            )
+            .map_err(map_object_error)?;
+
+        Ok(S3Response::new(ListObjectsOutput {
+            name: Some(input.bucket),
+            prefix: Some(prefix),
+            marker,
+            max_keys: Some(max_keys as i32),
+            is_truncated: Some(page.is_truncated),
+            contents: Some(page.objects),
+            common_prefixes: Some(page.common_prefixes),
+            delimiter: input.delimiter,
+            next_marker: page.next_marker,
+            encoding_type: input.encoding_type,
+            ..Default::default()
+        }))
+    }
+
     async fn list_objects_v2(
         &self,
         req: S3Request<ListObjectsV2Input>,
@@ -891,56 +1072,39 @@ impl S3 for TelegramS3Backend {
         }
         let prefix = input.prefix.unwrap_or_default();
         let max_keys = input.max_keys.unwrap_or(1000).clamp(0, 1000) as usize;
-        let start_after = input.start_after.clone().unwrap_or_default();
         let start_after_value = input.start_after.clone();
-        let mut manifests = self
-            .object_format
-            .list_bucket_manifests(&input.bucket, Some(&prefix))
-            .map_err(map_object_error)?;
-        let manifest_count = manifests.len();
-        manifests.sort_by(|left, right| {
-            left.key
-                .cmp(&right.key)
-                .then(left.object_id.cmp(&right.object_id))
-        });
-        let mut objects = Vec::new();
-        let mut started = start_after.is_empty();
-        for manifest in manifests {
-            if !started {
-                if manifest.key > start_after {
-                    started = true;
-                } else {
-                    continue;
-                }
+        let resume_after = match (
+            input.continuation_token.as_deref(),
+            input.start_after.as_deref(),
+        ) {
+            (Some(continuation_token), Some(start_after)) => {
+                Some(std::cmp::max(continuation_token, start_after))
             }
-            if objects.len() >= max_keys {
-                break;
-            }
-            objects.push(Object {
-                key: Some(manifest.key),
-                last_modified: Some(Timestamp::from(manifest.created_at)),
-                size: Some(manifest.content_length as i64),
-                e_tag: Some(ETag::Strong(manifest.checksum.whole_object)),
-                storage_class: Some(ObjectStorageClass::from_static(
-                    ObjectStorageClass::STANDARD,
-                )),
-                ..Default::default()
-            });
-        }
-        let is_truncated = objects.len() == max_keys && manifest_count > objects.len();
-        let next_continuation_token = if is_truncated {
-            objects.last().and_then(|object| object.key.clone())
-        } else {
-            None
+            (Some(continuation_token), None) => Some(continuation_token),
+            (None, Some(start_after)) => Some(start_after),
+            (None, None) => None,
         };
+        let page = self
+            .list_bucket_page(
+                &input.bucket,
+                &prefix,
+                input.delimiter.as_deref(),
+                resume_after,
+                max_keys,
+            )
+            .map_err(map_object_error)?;
+
         Ok(S3Response::new(ListObjectsV2Output {
-            is_truncated: Some(is_truncated),
-            key_count: Some(objects.len() as i32),
+            is_truncated: Some(page.is_truncated),
+            key_count: Some(page.key_count as i32),
             max_keys: Some(max_keys as i32),
             name: Some(input.bucket),
             prefix: Some(prefix),
-            contents: Some(objects),
-            next_continuation_token,
+            contents: Some(page.objects),
+            common_prefixes: Some(page.common_prefixes),
+            delimiter: input.delimiter,
+            encoding_type: input.encoding_type,
+            next_continuation_token: page.next_marker,
             continuation_token: input.continuation_token,
             start_after: start_after_value,
             ..Default::default()

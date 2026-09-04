@@ -63,6 +63,7 @@ Completed work:
 
 - the RustFS-backed `server` bootstrap now starts the S3 listener instead of only validating configuration
 - bucket CRUD and object CRUD are routed through the RustFS seam into the Phase 3 object-format service
+- both legacy `ListObjects` and `ListObjectsV2` now read from the same ordered local manifest index, improving compatibility with older S3 tools
 - `doctor` now exercises the same server bootstrap path so Telegram/session and seam mismatches fail fast
 - standard S3 client smoke tests now cover create, put, head, get, range-get, list, and delete flows against the temporary server
 
