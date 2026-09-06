@@ -193,6 +193,19 @@ impl TelegramTransport {
                 })
             })?;
 
+        let plan = resolve_proxy_plan_with(
+            Some(bootstrap.telegram_proxy_mode.as_str()),
+            bootstrap.telegram_proxy_url.as_deref(),
+            bootstrap.telegram_proxy_username.as_deref(),
+            bootstrap.telegram_proxy_password.as_deref(),
+        )?;
+        let api_id = bootstrap.telegram_api_id.parse::<i32>().map_err(|_| {
+            TelegramTransportError::Config(ConfigError::Parse {
+                field: "telegram api id",
+                value: bootstrap.telegram_api_id.clone(),
+            })
+        })?;
+
         let session = if mock_mode {
             if let Some(parent) = session_path.parent() {
                 tokio::fs::create_dir_all(parent).await.ok();
@@ -203,12 +216,6 @@ impl TelegramTransport {
             Some(TelegramSession::open(&session_path).await?)
         };
 
-        let plan = resolve_proxy_plan_with(
-            Some(bootstrap.telegram_proxy_mode.as_str()),
-            bootstrap.telegram_proxy_url.as_deref(),
-            bootstrap.telegram_proxy_username.as_deref(),
-            bootstrap.telegram_proxy_password.as_deref(),
-        )?;
         let materialized = if mock_mode {
             MaterializedProxy {
                 kind: plan.kind,
@@ -219,12 +226,6 @@ impl TelegramTransport {
         } else {
             plan.materialize().await?
         };
-        let api_id = bootstrap.telegram_api_id.parse::<i32>().map_err(|_| {
-            TelegramTransportError::Config(ConfigError::Parse {
-                field: "telegram api id",
-                value: bootstrap.telegram_api_id.clone(),
-            })
-        })?;
 
         let connection_params = grammers_mtsender::ConnectionParams {
             proxy_url: materialized.proxy_url.clone(),

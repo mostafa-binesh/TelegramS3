@@ -1,4 +1,4 @@
-use crate::metadata::MetadataStore;
+use crate::metadata::{MetadataStore, TelegramBootstrapSettings};
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -234,6 +234,7 @@ impl AppConfig {
             .telegram_bootstrap_settings()
             .map_err(|_| ConfigError::Invalid("TELEGRAM_BOOTSTRAP_SETTINGS"))?;
         let merged = persisted.ok_or(ConfigError::Missing("TELEGRAM_BOOTSTRAP_SETTINGS"))?;
+        validate_telegram_bootstrap_settings(&merged)?;
         let telegram_api_id = merged
             .telegram_api_id
             .ok_or(ConfigError::Missing("telegram api id"))?;
@@ -248,10 +249,6 @@ impl AppConfig {
             return Err(ConfigError::Missing("telegram session path"));
         }
         self.validate_path_setting("telegram session path", &telegram_session_path, false)?;
-        validate_proxy_setting(
-            merged.telegram_proxy_url.as_deref(),
-            merged.telegram_proxy_mode.as_deref(),
-        )?;
         Ok(ResolvedTelegramBootstrap {
             telegram_api_id,
             telegram_api_hash,
@@ -352,6 +349,45 @@ impl AppConfig {
         }
         Ok(())
     }
+}
+
+pub fn validate_telegram_bootstrap_settings(
+    settings: &TelegramBootstrapSettings,
+) -> Result<(), ConfigError> {
+    let api_id = required_bootstrap_value(settings.telegram_api_id.as_deref(), "telegram api id")?;
+    let parsed_api_id = api_id.parse::<i32>().map_err(|_| ConfigError::Parse {
+        field: "telegram api id",
+        value: api_id.to_string(),
+    })?;
+    if parsed_api_id <= 0 {
+        return Err(ConfigError::Invalid("telegram api id"));
+    }
+
+    required_bootstrap_value(settings.telegram_api_hash.as_deref(), "telegram api hash")?;
+    let storage_chat_id = required_bootstrap_value(
+        settings.telegram_storage_chat_id.as_deref(),
+        "telegram storage chat id",
+    )?;
+    storage_chat_id
+        .parse::<i64>()
+        .map_err(|_| ConfigError::Parse {
+            field: "telegram storage chat id",
+            value: storage_chat_id.to_string(),
+        })?;
+
+    validate_proxy_setting(
+        settings.telegram_proxy_url.as_deref(),
+        settings.telegram_proxy_mode.as_deref(),
+    )
+}
+
+fn required_bootstrap_value<'a>(
+    value: Option<&'a str>,
+    field: &'static str,
+) -> Result<&'a str, ConfigError> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ConfigError::Missing(field))
 }
 
 fn read(name: &'static str) -> Option<String> {

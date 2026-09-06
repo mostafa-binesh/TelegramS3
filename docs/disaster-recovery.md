@@ -89,14 +89,17 @@
 1. Run `telegram-s3 doctor` to check the shared bootstrap path.
 2. If doctor fails before the listener binds, inspect the Telegram session,
    proxy settings, bucket rows, and recovery markers first.
-3. Fix the underlying object-format or Telegram transport issue before
+3. If admin-side Telegram settings were changed shortly before the failure,
+   verify that the persisted API ID and storage chat ID are numeric before
+   retrying transport startup or login.
+4. Fix the underlying object-format or Telegram transport issue before
    retrying `telegram-s3 server`.
-4. A successful restart should preserve committed objects, keep staged work
+5. A successful restart should preserve committed objects, keep staged work
    invisible, only make repaired data visible after reconciliation, and bind
    the loopback admin listener for `/healthz` and `/metrics`.
-5. The same restart should also keep the authenticated `/_admin` operator
+6. The same restart should also keep the authenticated `/_admin` operator
    frontend available for readiness and recovery checks.
-6. Verify bucket and object visibility through the client class you depend on
+7. Verify bucket and object visibility through the client class you depend on
    (`ListObjects` legacy callers as well as `ListObjectsV2` callers) before
    returning the endpoint to backup tooling.
 

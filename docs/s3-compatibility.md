@@ -66,6 +66,9 @@ features, so they are documented separately.
   drives the real single-account login (phone → code → cloud password when
   required) behind the authenticated, CSRF-protected session. This authorizes
   the storage account for the server, not an operator record in the dashboard.
+- Telegram bootstrap settings are validated by the admin API before they are
+  persisted, so malformed API/storage identifiers remain operator errors and
+  do not change the S3 compatibility contract.
 - Bulk/folder download or server-side ZIP is **not** available at this level
   (avoiding whole-object RAM buffering) and is an explicit future item.
 - The operator UI is not part of the S3 compatibility contract; the `/_admin`

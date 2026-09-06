@@ -106,7 +106,10 @@ argon2id. There is no per-user `.env` entry.
 ## Rotation
 
 - rotate Telegram API credentials only from the authenticated admin panel and
-  persist the new settings before restarting the process if needed
+  persist the new settings before restarting the process if needed. The admin
+  save path rejects malformed numeric identifiers before writing them to
+  `metadata.sqlite`; connection refresh failures are surfaced as JSON API
+  errors for operator correction.
 - rotate S3 credentials independently of Telegram session material
 - rotate encryption keys via versioned envelopes
 

@@ -122,6 +122,8 @@ The database tracks:
 - tombstones
 - orphaned chunks
 - reconciliation state
+- app settings, including validated Telegram bootstrap settings used to resolve
+  the storage session and chat before transport startup
 
 The index is a fast path, not the only source of truth. Bucket rows follow the
 same recovery rules as object manifests, so bucket visibility also depends on

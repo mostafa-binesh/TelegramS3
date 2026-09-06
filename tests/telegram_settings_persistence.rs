@@ -247,6 +247,49 @@ async fn telegram_settings_survive_restart_without_bootstrap_envs() {
     );
     assert!(tempdir.path().join("telegram.session").exists());
 
+    let invalid_payload = serde_json::json!({
+        "telegram_api_id": "asdas",
+        "telegram_api_hash": "hash",
+        "telegram_storage_chat_id": "-1001234567890",
+        "telegram_proxy_url": "",
+        "telegram_proxy_username": "",
+        "telegram_proxy_password": "",
+        "telegram_proxy_mode": "auto"
+    });
+    let (status, _headers, invalid_body) = http_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/telegram/settings",
+        &[
+            ("Cookie", cookie_header.as_str()),
+            ("X-CSRF-Token", csrf.as_str()),
+        ],
+        invalid_payload.to_string().as_bytes(),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(
+        invalid_body.contains("telegram api id"),
+        "invalid response should name the bad field: {invalid_body}"
+    );
+
+    let (status, _headers, settings_body) = http_request(
+        &client,
+        &bind_addr,
+        "GET",
+        "/_admin/api/telegram/settings",
+        &[
+            ("Cookie", cookie_header.as_str()),
+            ("X-CSRF-Token", csrf.as_str()),
+        ],
+        b"",
+    )
+    .await;
+    assert_eq!(status, 200);
+    let settings: Value = serde_json::from_str(&settings_body).expect("settings json");
+    assert_eq!(settings["settings"]["telegram_api_id"], "12345");
+
     let _ = child.kill();
     let _ = child.wait();
 

@@ -14,7 +14,7 @@
 //! ROADMAP).
 
 use crate::auth::{self, AuthError, LoginLimiter};
-use crate::config::AppConfig;
+use crate::config::{AppConfig, validate_telegram_bootstrap_settings};
 use crate::manifest::ObjectManifest;
 use crate::metadata::{MetadataStore, TelegramBootstrapSettings};
 use crate::object_format::{ObjectFormatService, RecoveryIssue as RecoveryIssueModel};
@@ -25,7 +25,7 @@ use crate::telegram::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use http::header::{self, HeaderValue};
 use http::{Method, StatusCode};
 use http_body_util::BodyExt;
@@ -36,6 +36,7 @@ use ring::hmac;
 use s3s::Body;
 use s3s::dto::StreamingBlob;
 use serde::{Deserialize, Serialize};
+use std::panic::AssertUnwindSafe;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use time::{Duration, OffsetDateTime};
@@ -1147,15 +1148,29 @@ impl AdminUiState {
                 "telegram api id, api hash, and storage chat id are required",
             );
         }
+        if let Err(error) = validate_telegram_bootstrap_settings(&next) {
+            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        }
         if let Err(error) = self.store().set_telegram_bootstrap_settings(&next) {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
         }
         if let Some(storage_chat_id) = next.telegram_storage_chat_id.clone() {
             self.object_format.set_storage_chat_id(storage_chat_id);
         }
-        let refresh = self.transport_manager.refresh().await;
-        if let Err(error) = refresh {
-            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        match AssertUnwindSafe(self.transport_manager.refresh())
+            .catch_unwind()
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+            }
+            Err(_) => {
+                return json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "telegram transport refresh failed",
+                );
+            }
         }
 
         json_response(
