@@ -13,7 +13,8 @@ pub use auth::{LoginLimiter, ROLE_ADMIN, ROLE_SUPERADMIN};
 pub use config::AppConfig;
 pub use manifest::{ChunkRef, CommitState, ObjectChecksum, ObjectManifest};
 pub use metadata::{
-    MetadataError, MetadataStatus, MetadataStore, OperationKind, RebuildReport, VerifyReport,
+    MetadataError, MetadataStatus, MetadataStore, OperationKind, RebuildReport,
+    TelegramBootstrapSettings, VerifyReport,
 };
 pub use multipart::{
     MultipartCompletionPlan, MultipartPart, MultipartPartPlan, MultipartReconciliationReport,

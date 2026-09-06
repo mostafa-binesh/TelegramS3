@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.5.2-rc.6 - 2026-09-06
+## 0.5.2-rc.7 - 2026-09-06
 
 - Fixed Telegram settings saves so malformed Telegram API IDs are rejected
   before persistence, preserving the last valid settings.

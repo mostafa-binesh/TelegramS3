@@ -5,6 +5,7 @@ use crate::telegram::proxy::{
 };
 use crate::telegram::retry::{RetryPolicy, parse_flood_wait_seconds};
 use crate::telegram::session::{SessionError, SessionStatus, TelegramSession};
+use futures::FutureExt;
 use grammers_client::Client;
 use grammers_client::SignInError;
 use grammers_mtsender::SenderPool;
@@ -13,6 +14,7 @@ use grammers_session::types::{PeerId, PeerRef};
 use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use thiserror::Error;
@@ -136,6 +138,8 @@ pub enum TelegramTransportError {
     Metadata(#[from] MetadataError),
     #[error("invalid session state: {0}")]
     InvalidState(&'static str),
+    #[error("telegram transport initialization failed")]
+    InitializationPanic,
 }
 
 pub struct TelegramTransport {
@@ -497,16 +501,26 @@ impl TelegramTransport {
 
 impl TelegramTransportManager {
     pub async fn open(config: AppConfig) -> Result<std::sync::Arc<Self>, TelegramTransportError> {
-        let (transport, health) = match open_transport_from_store(&config).await {
-            Ok(transport) => {
+        let opened = AssertUnwindSafe(open_transport_from_store(&config))
+            .catch_unwind()
+            .await;
+        let (transport, health) = match opened {
+            Ok(Ok(transport)) => {
                 let transport = std::sync::Arc::new(transport);
                 let health = evaluate_health(transport.as_ref()).await?;
                 (Some(transport), health)
             }
-            Err(TelegramTransportError::Config(ConfigError::Missing(_))) => {
-                (None, not_configured_health(&config))
+            Ok(Err(TelegramTransportError::Config(error))) => {
+                (None, not_configured_health(&config, error.to_string()))
             }
-            Err(error) => return Err(error),
+            Ok(Err(error)) => return Err(error),
+            Err(_) => (
+                None,
+                not_configured_health(
+                    &config,
+                    "telegram transport initialization failed".to_string(),
+                ),
+            ),
         };
         Ok(std::sync::Arc::new(Self {
             config,
@@ -532,7 +546,14 @@ impl TelegramTransportManager {
     }
 
     pub async fn refresh(&self) -> Result<TelegramConnectionHealth, TelegramTransportError> {
-        let transport = std::sync::Arc::new(open_transport_from_store(&self.config).await?);
+        let opened = AssertUnwindSafe(open_transport_from_store(&self.config))
+            .catch_unwind()
+            .await;
+        let transport = match opened {
+            Ok(Ok(transport)) => std::sync::Arc::new(transport),
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err(TelegramTransportError::InitializationPanic),
+        };
         let health = evaluate_health(transport.as_ref()).await?;
         *self.transport.write().await = Some(transport);
         *self.health.write().await = health.clone();
@@ -663,7 +684,7 @@ async fn open_transport_from_store(
     TelegramTransport::open_with_bootstrap(config.clone(), bootstrap).await
 }
 
-fn not_configured_health(config: &AppConfig) -> TelegramConnectionHealth {
+fn not_configured_health(config: &AppConfig, detail: String) -> TelegramConnectionHealth {
     TelegramConnectionHealth {
         status: TelegramTransportStatus {
             session_path: config.metadata_path().with_file_name("telegram.session"),
@@ -673,7 +694,7 @@ fn not_configured_health(config: &AppConfig) -> TelegramConnectionHealth {
             storage_chat_id: String::new(),
         },
         state: TelegramConnectionState::NotConfigured,
-        detail: "telegram bootstrap settings are not configured".to_string(),
+        detail,
     }
 }
 

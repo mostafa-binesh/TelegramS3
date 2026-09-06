@@ -6,7 +6,9 @@ use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use telegram_s3::manifest::CommittedManifestArgs;
 use telegram_s3::object_format::sha256_hex;
-use telegram_s3::{CommitState, MetadataStore, ObjectManifest, OperationKind};
+use telegram_s3::{
+    CommitState, MetadataStore, ObjectManifest, OperationKind, TelegramBootstrapSettings,
+};
 use tempfile::TempDir;
 
 fn prepare_admin_ui(tempdir: &TempDir) -> std::path::PathBuf {
@@ -94,6 +96,22 @@ fn seed_committed_manifest_without_telegram_settings(tempdir: &TempDir) {
         .commit_manifest(operation_id)
         .expect("commit manifest");
     assert_eq!(committed.commit_state, CommitState::Committed);
+}
+
+fn seed_invalid_telegram_settings(tempdir: &TempDir) {
+    let store = MetadataStore::open(tempdir.path().join("metadata.sqlite")).expect("metadata");
+    store
+        .set_telegram_bootstrap_settings(&TelegramBootstrapSettings {
+            telegram_api_id: Some("asdas".to_string()),
+            telegram_api_hash: Some("hash".to_string()),
+            telegram_session_path: None,
+            telegram_storage_chat_id: Some("-1001234567890".to_string()),
+            telegram_proxy_url: None,
+            telegram_proxy_username: None,
+            telegram_proxy_password: None,
+            telegram_proxy_mode: Some("auto".to_string()),
+        })
+        .expect("invalid settings seed");
 }
 
 fn wait_listening(reader: &mut BufReader<std::process::ChildStdout>) {
@@ -360,6 +378,28 @@ async fn server_boots_existing_metadata_without_telegram_settings() {
 
     let exited = child.try_wait().expect("try wait");
     assert!(exited.is_none(), "server exited before admin setup");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[tokio::test]
+async fn server_boots_with_repairable_invalid_telegram_settings() {
+    let tempdir = TempDir::new().expect("tempdir");
+    seed_admin_users(&tempdir);
+    seed_invalid_telegram_settings(&tempdir);
+
+    let bind_addr = free_bind_addr();
+    let mut server_command = command_for(&tempdir, &bind_addr);
+    server_command.arg("server");
+    server_command.stdout(Stdio::piped());
+    let mut child = server_command.spawn().expect("spawn server");
+    let stdout = child.stdout.take().expect("server stdout");
+    let mut reader = BufReader::new(stdout);
+    wait_listening(&mut reader);
+
+    let exited = child.try_wait().expect("try wait");
+    assert!(exited.is_none(), "server exited before settings repair");
 
     let _ = child.kill();
     let _ = child.wait();
