@@ -1157,25 +1157,21 @@ impl AdminUiState {
         if let Some(storage_chat_id) = next.telegram_storage_chat_id.clone() {
             self.object_format.set_storage_chat_id(storage_chat_id);
         }
-        match AssertUnwindSafe(self.transport_manager.refresh())
+        let refresh_error = match AssertUnwindSafe(self.transport_manager.refresh())
             .catch_unwind()
             .await
         {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                return json_error(StatusCode::BAD_REQUEST, &error.to_string());
-            }
-            Err(_) => {
-                return json_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "telegram transport refresh failed",
-                );
-            }
-        }
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(_) => Some("telegram transport refresh failed".to_string()),
+        };
 
         json_response(
             StatusCode::OK,
-            serde_json::json!({ "settings": self.telegram_settings_wire() }),
+            serde_json::json!({
+                "settings": self.telegram_settings_wire(),
+                "refresh_error": refresh_error,
+            }),
         )
     }
 

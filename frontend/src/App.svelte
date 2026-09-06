@@ -218,7 +218,9 @@
         telegram_proxy_mode: telegramProxyMode.trim()
       });
       applyTelegramSettings(response.settings);
-      telegramSettingsMessage = 'Telegram settings saved.';
+      telegramSettingsMessage = response.refresh_error
+        ? `Telegram settings saved. Refresh warning: ${response.refresh_error}`
+        : 'Telegram settings saved.';
       await refreshOverview();
     } catch (cause) {
       telegramSettingsError = normalizeError(cause);

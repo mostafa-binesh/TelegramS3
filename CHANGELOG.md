@@ -2,12 +2,13 @@
 
 ## Unreleased
 
-## 0.5.2-rc.7 - 2026-09-06
+## 0.5.2-rc.8 - 2026-09-06
 
 - Fixed Telegram settings saves so malformed Telegram API IDs are rejected
   before persistence, preserving the last valid settings.
 - Hardened the admin settings refresh path so transport/session failures return
-  JSON errors instead of dropping the HTTP connection and surfacing as 502.
+  JSON warnings after persistence instead of dropping the HTTP connection and
+  surfacing as 502.
 
 ## 0.5.2-rc.1 - 2026-09-04
 

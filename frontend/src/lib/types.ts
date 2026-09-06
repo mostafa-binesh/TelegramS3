@@ -97,6 +97,7 @@ export interface TelegramSettings {
 
 export interface TelegramSettingsState {
   settings: TelegramSettings;
+  refresh_error?: string | null;
 }
 
 export type WizardPhase = 'idle' | 'code' | 'two_fa' | 'authorized';

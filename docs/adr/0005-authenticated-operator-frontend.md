@@ -35,7 +35,7 @@ the object-store contract or imply extra S3 semantics.
 - The frontend can guide first-run setup and connection checks while the CLI
   remains available for Telegram login and recovery flows.
 - Admin-side Telegram settings changes are validated before persistence and
-  refresh failures are reported as JSON API errors, keeping operator mistakes
+  refresh failures are reported as JSON API warnings, keeping operator mistakes
   visible without weakening the S3 data-plane contract.
 - The S3 compatibility matrix stays focused on S3 behavior, while operator UI
   behavior is documented separately.
