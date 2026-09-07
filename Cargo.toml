@@ -1,6 +1,6 @@
 [package]
 name = "telegram-s3"
-version = "0.5.2-rc.12"
+version = "0.5.2-rc.13"
 edition = "2024"
 license = "Apache-2.0"
 description = "Telegram-backed S3-compatible object storage"
@@ -15,7 +15,7 @@ clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 grammers-client = { version = "0.10", features = ["proxy"] }
 grammers-mtsender = { version = "0.10", features = ["proxy"] }
-grammers-session = { version = "0.10", features = ["serde"] }
+grammers-session = { version = "0.10", default-features = false, features = ["serde"] }
 grammers-tl-types = "0.10"
 hex = "0.4"
 http = "1"
