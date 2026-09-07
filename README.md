@@ -131,15 +131,15 @@ recovery procedures.
 ### Prerequisites
 
 - Telegram `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org)
-- A **dedicated** private Telegram channel or chat to act as the storage peer
-  (id like `-100xxxxxxxxxx`)
+- A **dedicated** private Telegram channel or group chat to act as the storage
+  peer (id like `-100xxxxxxxxxx`; plain user ids will not work)
 
 ### 1. Run with Docker
 
 The published image is `ghcr.io/mostafa-binesh/telegrams3`
 (built on `v*` tags and manual workflow dispatch; see
 [.github/workflows/publish-docker-image.yml](.github/workflows/publish-docker-image.yml)).
-Pinning a version tag such as `v0.5.2-rc.8` is recommended when validating a
+Pinning a version tag such as `v0.5.2-rc.10` is recommended when validating a
 release candidate. Release-candidate tags publish only their explicit RC tags;
 the floating `latest`, major, and major-minor tags are reserved for stable
 version tags without a prerelease suffix.
@@ -159,7 +159,7 @@ docker run -d --name telegram-s3 \
   -e TELEGRAM_DATA_DIR=/var/lib/telegram-s3/data \
   -v telegram-s3-metadata:/var/lib/telegram-s3/metadata \
   -v telegram-s3-data:/var/lib/telegram-s3/data \
-  ghcr.io/mostafa-binesh/telegrams3:v0.5.2-rc.8
+  ghcr.io/mostafa-binesh/telegrams3:v0.5.2-rc.10
 ```
 
 Or with the bundled [docker-compose.yml](docker-compose.yml) (local build):

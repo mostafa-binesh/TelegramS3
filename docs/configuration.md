@@ -119,6 +119,8 @@ argon2id. There is no per-user `.env` entry.
   metadata path, the object-format bootstrap state, the Telegram transport,
   the RustFS-backed S3 seam in live mode, and the loopback admin listener
   address. Telegram bootstrap values are read from persisted admin settings.
+  The storage peer must resolve to a reachable private channel or group chat;
+  a plain Telegram user id will not work for object uploads.
 - `server` performs the same bootstrap checks before binding the S3 listener
   and starting request processing. It also binds the loopback admin listener
   for `/healthz` and `/metrics`, while the authenticated operator frontend is

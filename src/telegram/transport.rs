@@ -306,11 +306,63 @@ impl TelegramTransport {
             return Ok(peer);
         }
 
-        // Fall back to the configured peer id directly so a valid storage chat
-        // stays usable even when it is not present in the current dialog list.
-        let peer = self.storage_peer_id.to_ambient_ref();
-        *self.storage_peer.lock().expect("storage peer mutex") = Some(peer);
-        Ok(peer)
+        if let Some(peer) = self.resolve_storage_peer_from_dialogs().await? {
+            *self.storage_peer.lock().expect("storage peer mutex") = Some(peer);
+            return Ok(peer);
+        }
+
+        if let Some(peer) = self.resolve_storage_peer_live().await? {
+            *self.storage_peer.lock().expect("storage peer mutex") = Some(peer);
+            return Ok(peer);
+        }
+
+        if self.storage_peer_id.kind() == grammers_session::types::PeerKind::Chat {
+            let peer = self.storage_peer_id.to_ambient_ref();
+            *self.storage_peer.lock().expect("storage peer mutex") = Some(peer);
+            return Ok(peer);
+        }
+
+        Err(TelegramTransportError::InvalidState(
+            "telegram storage chat is not cached yet; open the storage chat once in Telegram and retry",
+        ))
+    }
+
+    async fn resolve_storage_peer_from_dialogs(
+        &self,
+    ) -> Result<Option<PeerRef>, TelegramTransportError> {
+        let client = self.client()?;
+        let mut dialogs = client.iter_dialogs();
+        while let Some(dialog) = dialogs.next().await.map_err(map_rpc_error)? {
+            if dialog.peer_id() == self.storage_peer_id {
+                return Ok(Some(dialog.peer_ref()));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn resolve_storage_peer_live(&self) -> Result<Option<PeerRef>, TelegramTransportError> {
+        let client = self.client()?;
+
+        if self.storage_peer_id.kind() == grammers_session::types::PeerKind::User
+            && let Ok(peer) = client
+                .resolve_peer(grammers_session::types::PeerId::self_user().to_ambient_ref())
+                .await
+            && peer.id() == self.storage_peer_id
+            && let Ok(Some(peer_ref)) = peer.to_ref().await
+        {
+            return Ok(Some(peer_ref));
+        }
+
+        if let Ok(peer) = client
+            .resolve_peer(self.storage_peer_id.to_ambient_ref())
+            .await
+            && peer.id() == self.storage_peer_id
+            && let Ok(Some(peer_ref)) = peer.to_ref().await
+        {
+            return Ok(Some(peer_ref));
+        }
+
+        Ok(None)
     }
 
     pub async fn auth_state(&self) -> Result<AuthState, TelegramTransportError> {
