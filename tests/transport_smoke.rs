@@ -3,7 +3,9 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use telegram_s3::AppConfig;
 use telegram_s3::metadata::{MetadataStore, TelegramBootstrapSettings};
+use telegram_s3::telegram::{SessionState, TelegramConnectionState, TelegramTransportManager};
 use tempfile::TempDir;
 
 fn prepare_admin_ui(tempdir: &TempDir) -> PathBuf {
@@ -61,6 +63,25 @@ fn seed_telegram_settings(tempdir: &TempDir) {
         .expect("telegram settings");
 }
 
+fn transport_config(tempdir: &TempDir) -> AppConfig {
+    let metadata_path = tempdir.path().join("metadata.sqlite");
+    let data_dir = tempdir.path().join("data");
+    let ui_dir = prepare_admin_ui(tempdir);
+    fs::create_dir_all(&data_dir).expect("data dir");
+
+    AppConfig {
+        telegram_metadata_path: Some(metadata_path.display().to_string()),
+        telegram_data_dir: Some(data_dir.display().to_string()),
+        telegram_s3_master_key: Some("master-key".to_string()),
+        rustfs_access_key: Some("access-key".to_string()),
+        rustfs_secret_key: Some("secret-key".to_string()),
+        telegram_admin_bootstrap_secret: Some("bootstrap-secret".to_string()),
+        telegram_admin_ui_dist_dir: Some(ui_dir.display().to_string()),
+        telegram_admin_bind_addr: Some("127.0.0.1:0".to_string()),
+        ..AppConfig::default()
+    }
+}
+
 #[test]
 fn auth_status_logout_doctor_and_server_bootstrap_smoke_test() {
     let tempdir = TempDir::new().expect("tempdir");
@@ -108,4 +129,41 @@ fn auth_status_logout_doctor_and_server_bootstrap_smoke_test() {
     assert!(saw_listening);
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[tokio::test]
+async fn transport_manager_reloads_settings_after_startup() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config = transport_config(&tempdir);
+    let previous_runtime = std::env::var("TELEGRAM_TRANSPORT_RUNTIME").ok();
+    unsafe {
+        std::env::set_var("TELEGRAM_TRANSPORT_RUNTIME", "mock");
+    }
+
+    let manager = TelegramTransportManager::open(config)
+        .await
+        .expect("manager");
+    assert_eq!(
+        manager.health().await.state,
+        TelegramConnectionState::NotConfigured
+    );
+
+    seed_telegram_settings(&tempdir);
+
+    let transport = manager.current().await.expect("transport");
+    let status = transport.status().await.expect("status");
+    assert_eq!(status.session_state, SessionState::Reused);
+    assert_eq!(
+        manager.health().await.state,
+        TelegramConnectionState::Connected
+    );
+
+    match previous_runtime {
+        Some(value) => unsafe {
+            std::env::set_var("TELEGRAM_TRANSPORT_RUNTIME", value);
+        },
+        None => unsafe {
+            std::env::remove_var("TELEGRAM_TRANSPORT_RUNTIME");
+        },
+    }
 }

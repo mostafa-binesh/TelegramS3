@@ -532,6 +532,12 @@ impl TelegramTransportManager {
     pub async fn current(
         &self,
     ) -> Result<std::sync::Arc<TelegramTransport>, TelegramTransportError> {
+        if let Some(transport) = self.transport.read().await.clone() {
+            return Ok(transport);
+        }
+
+        self.refresh().await?;
+
         self.transport
             .read()
             .await
@@ -542,6 +548,10 @@ impl TelegramTransportManager {
     }
 
     pub async fn health(&self) -> TelegramConnectionHealth {
+        let needs_refresh = self.transport.read().await.is_none();
+        if needs_refresh {
+            let _ = self.refresh().await;
+        }
         self.health.read().await.clone()
     }
 
