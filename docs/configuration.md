@@ -127,7 +127,8 @@ argon2id. There is no per-user `.env` entry.
   served from the main listener under `/_admin`. If Telegram storage
   reconciliation cannot run because the storage peer is missing or unhealthy,
   startup stays up and the admin surfaces the degraded state instead of
-  exiting.
+  exiting. Storage chat ids are normalized to the signed Telegram dialog form,
+  so `5582642885` is stored as `-5582642885` and `-1001234567890` stays as-is.
 - The Docker image uses the same `server` path for foreground startup; the
   container entrypoint runs `config check` first and then starts the server in
   the foreground.

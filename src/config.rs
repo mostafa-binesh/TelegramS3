@@ -1,4 +1,5 @@
 use crate::metadata::{MetadataStore, TelegramBootstrapSettings};
+use grammers_session::types::PeerId;
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -241,9 +242,8 @@ impl AppConfig {
         let telegram_api_hash = merged
             .telegram_api_hash
             .ok_or(ConfigError::Missing("telegram api hash"))?;
-        let telegram_storage_chat_id = merged
-            .telegram_storage_chat_id
-            .ok_or(ConfigError::Missing("telegram storage chat id"))?;
+        let telegram_storage_chat_id =
+            normalize_telegram_storage_chat_id(merged.telegram_storage_chat_id.as_deref())?;
         let telegram_session_path = default_session_path(&self.metadata_path());
         if telegram_session_path.as_os_str().is_empty() {
             return Err(ConfigError::Missing("telegram session path"));
@@ -364,21 +364,38 @@ pub fn validate_telegram_bootstrap_settings(
     }
 
     required_bootstrap_value(settings.telegram_api_hash.as_deref(), "telegram api hash")?;
-    let storage_chat_id = required_bootstrap_value(
-        settings.telegram_storage_chat_id.as_deref(),
-        "telegram storage chat id",
-    )?;
-    storage_chat_id
-        .parse::<i64>()
-        .map_err(|_| ConfigError::Parse {
-            field: "telegram storage chat id",
-            value: storage_chat_id.to_string(),
-        })?;
+    let _ = normalize_telegram_storage_chat_id(settings.telegram_storage_chat_id.as_deref())?;
 
     validate_proxy_setting(
         settings.telegram_proxy_url.as_deref(),
         settings.telegram_proxy_mode.as_deref(),
     )
+}
+
+pub fn normalize_telegram_storage_chat_id(value: Option<&str>) -> Result<String, ConfigError> {
+    let storage_chat_id = required_bootstrap_value(value, "telegram storage chat id")?;
+    let parsed = storage_chat_id
+        .parse::<i64>()
+        .map_err(|_| ConfigError::Parse {
+            field: "telegram storage chat id",
+            value: storage_chat_id.to_string(),
+        })?;
+    let peer = PeerId::from_bot_api_dialog_id(parsed).ok_or_else(|| ConfigError::Parse {
+        field: "telegram storage chat id",
+        value: storage_chat_id.to_string(),
+    })?;
+    if parsed == 0 {
+        return Err(ConfigError::Invalid("telegram storage chat id"));
+    }
+    if parsed > 0 {
+        debug_assert!(matches!(
+            peer.kind(),
+            grammers_session::types::PeerKind::User
+        ));
+        Ok((-parsed).to_string())
+    } else {
+        Ok(peer.bot_api_dialog_id_unchecked().to_string())
+    }
 }
 
 fn required_bootstrap_value<'a>(
@@ -533,5 +550,17 @@ mod tests {
         assert_eq!(config.retry_count().expect("retry"), 4);
         assert_eq!(config.retry_backoff_ms().expect("backoff"), 250);
         assert!(!config.respect_flood_wait().expect("respect"));
+    }
+
+    #[test]
+    fn storage_chat_id_is_canonicalized_to_signed_dialog_form() {
+        assert_eq!(
+            normalize_telegram_storage_chat_id(Some("5582642885")).expect("normalize"),
+            "-5582642885"
+        );
+        assert_eq!(
+            normalize_telegram_storage_chat_id(Some("-1001234567890")).expect("normalize"),
+            "-1001234567890"
+        );
     }
 }

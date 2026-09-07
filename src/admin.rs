@@ -14,7 +14,9 @@
 //! ROADMAP).
 
 use crate::auth::{self, AuthError, LoginLimiter};
-use crate::config::{AppConfig, validate_telegram_bootstrap_settings};
+use crate::config::{
+    AppConfig, normalize_telegram_storage_chat_id, validate_telegram_bootstrap_settings,
+};
 use crate::manifest::ObjectManifest;
 use crate::metadata::{MetadataStore, TelegramBootstrapSettings};
 use crate::object_format::{ObjectFormatService, RecoveryIssue as RecoveryIssueModel};
@@ -1151,12 +1153,18 @@ impl AdminUiState {
         if let Err(error) = validate_telegram_bootstrap_settings(&next) {
             return json_error(StatusCode::BAD_REQUEST, &error.to_string());
         }
+        let normalized_storage_chat_id =
+            match normalize_telegram_storage_chat_id(next.telegram_storage_chat_id.as_deref()) {
+                Ok(value) => value,
+                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error.to_string()),
+            };
+        let mut next = next;
+        next.telegram_storage_chat_id = Some(normalized_storage_chat_id.clone());
         if let Err(error) = self.store().set_telegram_bootstrap_settings(&next) {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
         }
-        if let Some(storage_chat_id) = next.telegram_storage_chat_id.clone() {
-            self.object_format.set_storage_chat_id(storage_chat_id);
-        }
+        self.object_format
+            .set_storage_chat_id(normalized_storage_chat_id);
         let refresh_error = match AssertUnwindSafe(self.transport_manager.refresh())
             .catch_unwind()
             .await
