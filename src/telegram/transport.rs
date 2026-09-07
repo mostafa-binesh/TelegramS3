@@ -581,6 +581,19 @@ impl TelegramTransportManager {
         }))
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        config: AppConfig,
+        transport: Option<std::sync::Arc<TelegramTransport>>,
+        health: TelegramConnectionHealth,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            config,
+            transport: std::sync::Arc::new(RwLock::new(transport)),
+            health: std::sync::Arc::new(RwLock::new(health)),
+        })
+    }
+
     pub async fn current(
         &self,
     ) -> Result<std::sync::Arc<TelegramTransport>, TelegramTransportError> {

@@ -124,7 +124,10 @@ argon2id. There is no per-user `.env` entry.
 - `server` performs the same bootstrap checks before binding the S3 listener
   and starting request processing. It also binds the loopback admin listener
   for `/healthz` and `/metrics`, while the authenticated operator frontend is
-  served from the main listener under `/_admin`.
+  served from the main listener under `/_admin`. If Telegram storage
+  reconciliation cannot run because the storage peer is missing or unhealthy,
+  startup stays up and the admin surfaces the degraded state instead of
+  exiting.
 - The Docker image uses the same `server` path for foreground startup; the
   container entrypoint runs `config check` first and then starts the server in
   the foreground.

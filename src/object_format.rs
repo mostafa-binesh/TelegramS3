@@ -4,7 +4,7 @@ use crate::metadata::{
     BucketRecord, JournalEntry, MetadataError, MetadataStatus, MetadataStore, OperationKind,
 };
 use crate::multipart::{MultipartCompletionPlan, MultipartPart, MultipartSession, MultipartState};
-use crate::telegram::TelegramTransportManager;
+use crate::telegram::{TelegramConnectionState, TelegramTransportManager};
 use bytes::Bytes;
 use futures::StreamExt;
 use grammers_client::media::Media;
@@ -721,18 +721,28 @@ impl ObjectFormatService {
     }
 
     pub async fn bootstrap(&self) -> Result<ObjectFormatStatus, ObjectFormatError> {
-        if self.transport_manager.current().await.is_err() {
+        let transport_health = self.transport_manager.health().await;
+        if !matches!(transport_health.state, TelegramConnectionState::Connected) {
             warn!(
-                "object-format bootstrap deferred remote reconciliation because Telegram is not configured"
+                "object-format bootstrap deferred remote reconciliation because Telegram is unavailable: {}",
+                transport_health.detail
             );
             return self.status();
         }
-        let report = self.reconcile().await?;
-        if report.staged_objects > 0 || report.recovery_required_objects > 0 {
-            warn!(
-                "object-format bootstrap completed with recovery state: staged_objects={}, recovery_required_objects={}",
-                report.staged_objects, report.recovery_required_objects
-            );
+        match self.reconcile().await {
+            Ok(report) => {
+                if report.staged_objects > 0 || report.recovery_required_objects > 0 {
+                    warn!(
+                        "object-format bootstrap completed with recovery state: staged_objects={}, recovery_required_objects={}",
+                        report.staged_objects, report.recovery_required_objects
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    "object-format bootstrap skipped remote reconciliation after Telegram error: {error}"
+                );
+            }
         }
         self.status()
     }
@@ -2311,6 +2321,9 @@ mod tests {
     use crate::config::AppConfig;
     use crate::manifest::CommittedManifestArgs;
     use crate::metadata::TelegramBootstrapSettings;
+    use crate::telegram::{
+        TelegramConnectionHealth, TelegramConnectionState, TelegramTransportManager,
+    };
     use std::env;
     use tempfile::TempDir;
     use time::Duration;
@@ -2412,6 +2425,56 @@ mod tests {
         let service = ObjectFormatService::open(&test_config(&tempdir))
             .await
             .expect("service");
+        let manifest = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "bucket".to_string(),
+            key: "old.txt".to_string(),
+            content_length: 3,
+            content_type: "text/plain".to_string(),
+            checksum_algorithm: CHECKSUM_ALGORITHM.to_string(),
+            whole_object: sha256_hex(b"old"),
+            peer_id: "-1001234567890".to_string(),
+            message_id: 1,
+        });
+        let operation_id = service
+            .metadata
+            .stage_manifest(OperationKind::Put, manifest)
+            .expect("stage manifest");
+        service
+            .metadata
+            .commit_manifest(operation_id)
+            .expect("commit manifest");
+
+        let status = service.bootstrap().await.expect("bootstrap status");
+        assert_eq!(status.committed_objects, 1);
+        assert_eq!(status.recovery_required_objects, 0);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_returns_status_when_telegram_is_disconnected() {
+        let tempdir = TempDir::new().expect("tempdir");
+        unsafe {
+            env::set_var("TELEGRAM_TRANSPORT_RUNTIME", "mock");
+        }
+        seed_telegram_settings(&tempdir);
+        let config = test_config(&tempdir);
+        let transport = crate::telegram::TelegramTransport::open(config.clone())
+            .await
+            .expect("transport");
+        let status = transport.status().await.expect("status");
+        let health = TelegramConnectionHealth {
+            status: status.clone(),
+            state: TelegramConnectionState::Disconnected,
+            detail: "storage peer lookup failed: not reachable".to_string(),
+        };
+        let transport_manager = TelegramTransportManager::from_parts(
+            config.clone(),
+            Some(std::sync::Arc::new(transport)),
+            health,
+        );
+        let service = ObjectFormatService::open_with_transport_manager(&config, transport_manager)
+            .await
+            .expect("service");
+
         let manifest = ObjectManifest::committed(CommittedManifestArgs {
             bucket: "bucket".to_string(),
             key: "old.txt".to_string(),
