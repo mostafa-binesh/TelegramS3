@@ -13,6 +13,7 @@ pub struct AppConfig {
     pub telegram_metadata_path: Option<String>,
     pub telegram_data_dir: Option<String>,
     pub telegram_chunk_size: Option<String>,
+    pub telegram_staging_max_bytes: Option<String>,
     pub telegram_connection_timeout_secs: Option<String>,
     pub telegram_request_timeout_secs: Option<String>,
     pub telegram_transfer_timeout_secs: Option<String>,
@@ -68,6 +69,7 @@ impl AppConfig {
             telegram_metadata_path: read("TELEGRAM_METADATA_PATH"),
             telegram_data_dir: read("TELEGRAM_DATA_DIR"),
             telegram_chunk_size: read("TELEGRAM_CHUNK_SIZE"),
+            telegram_staging_max_bytes: read("TELEGRAM_STAGING_MAX_BYTES"),
             telegram_connection_timeout_secs: read("TELEGRAM_CONNECTION_TIMEOUT_SECS"),
             telegram_request_timeout_secs: read("TELEGRAM_REQUEST_TIMEOUT_SECS"),
             telegram_transfer_timeout_secs: read("TELEGRAM_TRANSFER_TIMEOUT_SECS"),
@@ -96,6 +98,16 @@ impl AppConfig {
             .as_deref()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR))
+    }
+
+    pub fn staging_budget(&self) -> Result<u64, ConfigError> {
+        parse_u64(
+            "TELEGRAM_STAGING_MAX_BYTES",
+            self.telegram_staging_max_bytes.as_deref(),
+            1,
+            i64::MAX as u64,
+            10 * 1024 * 1024 * 1024,
+        )
     }
 
     pub fn chunk_size(&self) -> Result<u64, ConfigError> {
@@ -217,6 +229,7 @@ impl AppConfig {
             return Err(ConfigError::Missing("TELEGRAM_ADMIN_BOOTSTRAP_SECRET"));
         }
 
+        self.staging_budget()?;
         self.validate_runtime_settings()?;
         self.validate_path_setting("TELEGRAM_METADATA_PATH", &self.metadata_path(), false)?;
         self.validate_path_setting("TELEGRAM_DATA_DIR", &self.data_dir(), true)?;

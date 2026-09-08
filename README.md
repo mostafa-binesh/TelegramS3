@@ -27,6 +27,7 @@ staging, and recovery artifacts, not committed payloads.
 - [S3 compatibility](#s3-compatibility)
 - [Security and durability](#security-and-durability)
 - [Operator web UI](#operator-web-ui)
+- [Roadmap](#roadmap)
 - [Development](#development)
 - [Documentation](#documentation)
 - [License and acknowledgements](#license-and-acknowledgements)
@@ -273,6 +274,17 @@ full/range download -
 streamed through the same bounded, checksum-verified chunk paths as the S3 data
 plane. Guests see only the sign-in screen; every management and content API is
 gated behind a user-bound session with CSRF protection.
+
+## Roadmap
+
+The near-term backlog focuses on two areas:
+
+- object durability hardening, including a durable upload worker / queue and
+  stronger reconciliation for missing or orphaned staged chunks
+- a major frontend refresh, including a login-first shell, a first-run
+  superadmin setup wizard, and a clearer Telegram health indicator
+
+The detailed version-by-version plan lives in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 

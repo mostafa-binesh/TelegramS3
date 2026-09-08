@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod auth;
 pub mod config;
+pub mod durable;
 pub mod manifest;
 pub mod metadata;
 pub mod multipart;

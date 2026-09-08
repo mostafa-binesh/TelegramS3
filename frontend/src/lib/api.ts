@@ -1,6 +1,6 @@
 import type {
+  TransferJob,
   BucketsState,
-  FileUploadResult,
   ObjectsState,
   OverviewState,
   SessionState,
@@ -163,11 +163,11 @@ export async function uploadObject(
   file: Blob,
   csrf?: string | null,
   onProgress?: (sent: number, total: number) => void
-): Promise<FileUploadResult> {
+): Promise<{job_id:string}> {
   const total = file.size;
-  return new Promise<FileUploadResult>((resolve, reject) => {
+  return new Promise<{job_id:string}>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', contentUrl(bucket, key));
+    xhr.open('POST', `${API_PREFIX}/uploads?${new URLSearchParams({bucket,key})}`);
     xhr.responseType = 'json';
     xhr.withCredentials = true;
     if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
@@ -178,9 +178,9 @@ export async function uploadObject(
     }
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        const body = xhr.response as Partial<FileUploadResult> | null;
-        if (body && typeof body.size === 'number' && body.etag && body.version_id) {
-          resolve(body as FileUploadResult);
+        const body = xhr.response as Partial<{job_id:string}> | null;
+        if (body && body.job_id) {
+          resolve(body as {job_id:string});
         } else {
           reject(new Error('upload succeeded but returned an unexpected payload'));
         }
@@ -229,3 +229,9 @@ export function wizardSubmitPassword(password: string, csrf?: string | null) {
 export function wizardCancel(csrf?: string | null) {
   return requestJson<{ ok: boolean }>('/telegram/wizard/cancel', csrf, { method: 'POST' });
 }
+
+export function getSetup(){return requestJson<{setup_required:boolean}>('/setup');}
+export function setupAccount(username:string,password:string){return requestJson<SessionState>('/setup',null,{method:'POST',body:{username,password}});}
+export function listJobs(offset=0){return requestJson<{jobs:TransferJob[];next_offset:number|null}>(`/jobs?offset=${offset}&limit=50`);}
+export function getJob(id:string){return requestJson<TransferJob>(`/jobs/${id}`);}
+export function jobAction(id:string,action:'retry'|'cancel',csrf?:string|null){return requestJson(`/jobs/${id}/${action}`,csrf,{method:'POST'});}

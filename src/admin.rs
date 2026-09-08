@@ -13,6 +13,7 @@
 //! wizard are now wired here as the landed follow-up increment (see ADR-0006 /
 //! ROADMAP).
 
+mod phase10;
 use crate::auth::{self, AuthError, LoginLimiter};
 use crate::config::{
     AppConfig, normalize_telegram_storage_chat_id, validate_telegram_bootstrap_settings,
@@ -276,6 +277,21 @@ impl AdminUiState {
             .strip_prefix(ADMIN_API_PREFIX)
             .unwrap_or(&path[..ADMIN_API_PREFIX.len().min(path.len())]);
 
+        if method == Method::GET && rest == "setup" {
+            return match self.store().setup_required() {
+                Ok(required) => json_response(
+                    StatusCode::OK,
+                    serde_json::json!({"setup_required":required}),
+                ),
+                Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "setup state unavailable"),
+            };
+        }
+        if method == Method::POST && rest == "setup" {
+            return self.setup_account(request).await;
+        }
+        if method == Method::POST && !phase10::same_origin(&request) {
+            return json_error(StatusCode::FORBIDDEN, "cross-origin request rejected");
+        }
         if method == Method::GET && rest == "session" {
             return match self.principal_from_headers(request.headers()) {
                 Ok(Some(principal)) => json_response(
@@ -315,6 +331,19 @@ impl AdminUiState {
             return json_error(StatusCode::FORBIDDEN, "invalid csrf token");
         }
 
+        if rest == "jobs" || rest.starts_with("jobs/") {
+            return self.job_api(request, rest);
+        }
+        if method == Method::POST && rest == "uploads" {
+            return self.enqueue_upload(request).await;
+        }
+        if method == Method::POST && rest == "recovery/repair" {
+            self.object_format.ensure_workers();
+            return json_response(
+                StatusCode::ACCEPTED,
+                serde_json::json!({"message":"Retry individual recoverable jobs from Transfers; legacy staging is scanned every 60 seconds"}),
+            );
+        }
         match (method, rest) {
             (Method::POST, "session/logout") => self.handle_logout(&principal).await,
             (Method::POST, "session/refresh") => self.handle_refresh(&principal).await,
@@ -652,7 +681,8 @@ impl AdminUiState {
         let Ok(Some(target)) = self.store().get_user_by_id(id) else {
             return json_error(StatusCode::NOT_FOUND, "user not found");
         };
-        if auth::is_superadmin(&target) && self.store().user_count().unwrap_or(0) <= 1 {
+        if auth::is_superadmin(&target) && self.store().enabled_superadmin_count().unwrap_or(0) <= 1
+        {
             return json_error(StatusCode::CONFLICT, "cannot delete the last superadmin");
         }
         if let Err(error) = self.store().delete_user(id) {
@@ -1301,6 +1331,7 @@ impl AdminUiState {
             .object_format
             .status()
             .unwrap_or_else(|_| empty_object());
+        let durable = self.object_format.durable_metrics().unwrap_or_default();
         let recovery = match self.object_format.recovery_issues().await {
             Ok(issues) => RecoveryWire::from_issues(issues),
             Err(error) => RecoveryWire::failed(error.to_string()),
@@ -1342,9 +1373,14 @@ impl AdminUiState {
         json_response(
             StatusCode::OK,
             serde_json::json!({
-                "checked_at": rfc3339(OffsetDateTime::now_utc()),
+                "checked_at": OffsetDateTime::from_unix_timestamp(health.checked_at)
+                    .map(rfc3339)
+                    .unwrap_or_else(|_| rfc3339(OffsetDateTime::now_utc())),
+                "telegram_last_success_at": health.last_success_at.and_then(|value|
+                    OffsetDateTime::from_unix_timestamp(value).ok().map(rfc3339)),
                 "session": {"authenticated": true, "user": UserWire::from_user(&principal.user)},
                 "storage": storage,
+                "transfers": durable,
                 "recovery": recovery,
                 "telegram": telegram,
                 "checks": checks,

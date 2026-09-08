@@ -1,3 +1,4 @@
+mod workflow;
 use crate::config::AppConfig;
 use crate::manifest::{ChunkRef, CommitState, ObjectChecksum, ObjectManifest, TelegramLocation};
 use crate::metadata::{
@@ -17,8 +18,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tokio::fs as async_fs;
@@ -36,6 +36,7 @@ const CHUNK_ROOT: &str = "chunks";
 const QUARANTINE_ROOT: &str = "quarantine";
 const MULTIPART_ROOT: &str = "multipart";
 const MOCK_TELEGRAM_ROOT: &str = "mock-telegram";
+const CLEANUP_EVIDENCE_ROOT: &str = "cleanup-evidence";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkPlan {
@@ -239,13 +240,74 @@ pub enum ObjectFormatError {
     InvalidChecksum(String),
 }
 
+#[derive(Clone)]
 pub struct ObjectFormatService {
-    metadata: MetadataStore,
+    metadata: Arc<MetadataStore>,
     transport_manager: std::sync::Arc<TelegramTransportManager>,
     data_dir: PathBuf,
     chunk_size: u64,
-    storage_chat_id: RwLock<String>,
+    storage_chat_id: Arc<RwLock<String>>,
+    worker_runtime: Arc<WorkerRuntime>,
+    read_pins: Arc<Mutex<HashMap<Uuid, u64>>>,
+    recovery_snapshot: Arc<RwLock<(Option<i64>, Vec<RecoveryIssue>, Option<String>)>>,
+    staging_budget: u64,
     encryption: ObjectEncryption,
+}
+
+#[derive(Default)]
+struct WorkerRuntime {
+    started: std::sync::atomic::AtomicBool,
+    shutdown: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
+    handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+struct ReadPinGuard {
+    object_id: Uuid,
+    pins: Arc<Mutex<HashMap<Uuid, u64>>>,
+}
+
+impl Drop for ReadPinGuard {
+    fn drop(&mut self) {
+        if let Ok(mut pins) = self.pins.lock()
+            && let Some(count) = pins.get_mut(&self.object_id)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                pins.remove(&self.object_id);
+            }
+        }
+    }
+}
+
+struct ReceivingGuard {
+    metadata: Arc<MetadataStore>,
+    job_id: String,
+    path: PathBuf,
+    armed: bool,
+}
+
+impl ReceivingGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReceivingGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let files_removed = match fs::remove_dir_all(&self.path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+            Err(_) => false,
+        };
+        let _ = self.metadata.fail_reception(
+            &self.job_id,
+            files_removed,
+            "Upload reception failed before durable acceptance; resend the source file",
+        );
+    }
 }
 
 impl ObjectFormatService {
@@ -269,7 +331,7 @@ impl ObjectFormatService {
             .ok()
             .map(|bootstrap| bootstrap.telegram_storage_chat_id)
             .unwrap_or_default();
-        let service = Self::new(
+        let mut service = Self::new(
             metadata,
             transport_manager,
             config.data_dir(),
@@ -277,6 +339,7 @@ impl ObjectFormatService {
             storage_chat_id,
             ObjectEncryption::from_master_key(&master_key),
         )?;
+        service.staging_budget = config.staging_budget()?;
         Ok(service)
     }
 
@@ -294,18 +357,35 @@ impl ObjectFormatService {
         fs::create_dir_all(data_dir.join(CHUNK_ROOT))?;
         fs::create_dir_all(data_dir.join(QUARANTINE_ROOT))?;
         fs::create_dir_all(data_dir.join(MULTIPART_ROOT))?;
+        fs::create_dir_all(data_dir.join(CLEANUP_EVIDENCE_ROOT))?;
         Ok(Self {
-            metadata,
+            metadata: Arc::new(metadata),
             transport_manager,
             data_dir,
             chunk_size,
-            storage_chat_id: RwLock::new(storage_chat_id),
+            storage_chat_id: Arc::new(RwLock::new(storage_chat_id)),
+            worker_runtime: Arc::new(WorkerRuntime::default()),
+            read_pins: Arc::new(Mutex::new(HashMap::new())),
+            recovery_snapshot: Arc::new(RwLock::new((
+                None,
+                Vec::new(),
+                Some("Recovery scan pending".into()),
+            ))),
+            staging_budget: 10 * 1024 * 1024 * 1024,
             encryption,
         })
     }
 
     pub fn metadata_status(&self) -> Result<MetadataStatus, ObjectFormatError> {
         Ok(self.metadata.status()?)
+    }
+
+    pub fn durable_metrics(&self) -> Result<crate::durable::DurableMetrics, ObjectFormatError> {
+        Ok(self.metadata.durable_metrics()?)
+    }
+
+    pub fn staging_budget(&self) -> u64 {
+        self.staging_budget
     }
 
     /// Reach the shared SQLite store (single writer) for operator/auth tables.
@@ -382,14 +462,9 @@ impl ObjectFormatService {
         bucket: &str,
         key: &str,
     ) -> Result<Option<ObjectManifest>, ObjectFormatError> {
-        let manifest = match self.metadata.get_active_manifest(bucket, key)? {
-            Some(manifest) => manifest,
-            None => return Ok(None),
-        };
-        Ok(Some(self.metadata.tombstone_manifest(
-            manifest.object_id,
-            "deleted via S3",
-        )?))
+        Ok(self
+            .metadata
+            .delete_active_key(bucket, key, "deleted via S3")?)
     }
 
     pub fn tombstone_manifest(
@@ -456,49 +531,19 @@ impl ObjectFormatService {
             )));
         }
 
-        let part_path = self.multipart_part_path(upload_id, part_number);
-        if let Some(parent) = part_path.parent() {
-            async_fs::create_dir_all(parent).await?;
-        }
-        let mut writer = async_fs::File::create(&part_path).await?;
-        let mut body = body.unwrap_or_else(|| StreamingBlob::new(Body::empty()));
-        let mut hasher = Sha256::new();
-        let mut size = 0_u64;
-        while let Some(chunk) = body.next().await {
-            let bytes = chunk.map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
-            hasher.update(&bytes);
-            size = size
-                .checked_add(bytes.len() as u64)
-                .ok_or_else(|| ObjectFormatError::InvalidPlan("part size overflow".to_string()))?;
-            let encrypted = self.encrypt_chunk(upload_id, part_number, &bytes)?;
-            writer.write_all(&encrypted).await?;
-        }
-        writer.sync_all().await?;
-        let checksum_value = hex::encode(hasher.finalize());
-        if let Some(expected) = checksum
-            && expected != checksum_value
-        {
-            return Err(ObjectFormatError::ChecksumMismatch {
-                scope: format!("multipart part {}", part_number),
-                expected: expected.to_string(),
-                actual: checksum_value,
-            });
-        }
-        let telegram = self
-            .upload_local_file_to_telegram(&part_path, &part_file_name(part_number))
+        let job = self
+            .enqueue_with_part(
+                &session.bucket,
+                &session.key,
+                &session.content_type,
+                body,
+                Some((upload_id, part_number, checksum.map(str::to_string))),
+            )
             .await?;
-        fs::remove_file(&part_path)?;
-        let part = MultipartPart {
-            upload_id,
-            part_number,
-            size,
-            checksum: checksum_value.clone(),
-            e_tag: checksum_value,
-            telegram,
-            created_at: OffsetDateTime::now_utc(),
-        };
-        self.metadata.put_multipart_part(part.clone())?;
-        Ok(part)
+        self.wait_transfer(&job.id).await?;
+        self.metadata
+            .get_multipart_part(upload_id, part_number)?
+            .ok_or_else(|| ObjectFormatError::InvalidPlan("completed part missing".into()))
     }
 
     pub fn list_multipart_uploads(
@@ -540,6 +585,26 @@ impl ObjectFormatService {
                 "multipart completion target mismatch".to_string(),
             ));
         }
+        if session.state == MultipartState::Completed {
+            return self
+                .metadata
+                .get_active_manifest(&plan.bucket, &plan.key)?
+                .ok_or_else(|| {
+                    ObjectFormatError::InvalidPlan(
+                        "completed multipart object is not visible".into(),
+                    )
+                });
+        }
+        if matches!(
+            session.state,
+            MultipartState::Aborted
+                | MultipartState::Quarantined
+                | MultipartState::RecoveryRequired
+        ) {
+            return Err(ObjectFormatError::InvalidPlan(
+                "multipart upload is not completable".into(),
+            ));
+        }
 
         let stored_parts = self.metadata.list_multipart_parts(plan.upload_id)?;
         let stored_parts_by_number: HashMap<u32, MultipartPart> = stored_parts
@@ -553,117 +618,51 @@ impl ObjectFormatService {
             ));
         }
 
-        let object_id = plan.object_id;
-        let mut chunk_refs = Vec::with_capacity(plan.parts.len());
-        let mut whole_hasher = Sha256::new();
-
-        let mut offset = 0_u64;
-        for (index, part_plan) in plan.parts.iter().enumerate() {
-            let stored_part = stored_parts_by_number
+        let mut sources = Vec::new();
+        for part_plan in &plan.parts {
+            let stored = stored_parts_by_number
                 .get(&part_plan.part_number)
-                .ok_or_else(|| {
-                    ObjectFormatError::InvalidPlan(format!(
-                        "missing multipart part {}",
-                        part_plan.part_number
-                    ))
-                })?;
-            if stored_part.e_tag != part_plan.e_tag {
-                return Err(ObjectFormatError::ChecksumMismatch {
-                    scope: format!("multipart part {}", part_plan.part_number),
-                    expected: part_plan.e_tag.clone(),
-                    actual: stored_part.e_tag.clone(),
-                });
+                .ok_or_else(|| ObjectFormatError::InvalidPlan("missing multipart part".into()))?;
+            if stored.e_tag != part_plan.e_tag {
+                return Err(ObjectFormatError::InvalidPlan(
+                    "multipart ETag mismatch".into(),
+                ));
             }
-            let message_id = i32::try_from(stored_part.telegram.message_id).map_err(|_| {
-                ObjectFormatError::InvalidPlan(format!(
-                    "telegram message id out of range for part {}",
-                    part_plan.part_number
-                ))
-            })?;
-            let ciphertext = self.download_message_bytes(message_id).await?;
-            let plaintext = self.decrypt_chunk(object_id, part_plan.part_number, &ciphertext)?;
-            let actual_checksum = sha256_hex(&plaintext);
-            if actual_checksum != stored_part.checksum {
-                return Err(ObjectFormatError::ChecksumMismatch {
-                    scope: format!("multipart part {}", part_plan.part_number),
-                    expected: stored_part.checksum.clone(),
-                    actual: actual_checksum,
-                });
-            }
-            whole_hasher.update(&plaintext);
-
-            chunk_refs.push(ChunkRef {
-                order: index as u32,
-                offset,
-                size: stored_part.size,
-                checksum: stored_part.checksum.clone(),
-                telegram_peer_id: stored_part.telegram.peer_id.clone(),
-                telegram_message_id: stored_part.telegram.message_id,
-                telegram_document_id: stored_part.telegram.document_id.clone(),
-            });
-            offset = offset
-                .checked_add(stored_part.size)
-                .ok_or_else(|| ObjectFormatError::InvalidPlan("offset overflow".to_string()))?;
+            let Some(manifest) = stored.manifest.clone() else {
+                self.metadata.update_multipart_session_state(
+                    plan.upload_id,
+                    MultipartState::RecoveryRequired,
+                )?;
+                return Err(ObjectFormatError::InvalidPlan(
+                    "legacy multipart framing requires recovery or source re-upload".into(),
+                ));
+            };
+            sources.push(manifest);
         }
-
-        let whole_checksum = hex::encode(whole_hasher.finalize());
-        let mut manifest = self.new_manifest(ManifestBuildArgs {
-            object_id,
-            bucket: plan.bucket.clone(),
-            key: plan.key.clone(),
-            content_type: plan.content_type.clone(),
-            commit_state: CommitState::Staging,
-            chunks: chunk_refs,
-            whole_checksum,
+        let service = Arc::new(self.clone());
+        let stream = futures::stream::iter(sources).flat_map(move |manifest| {
+            let spans = Self::plan_read(&manifest, 0..manifest.content_length)
+                .expect("validated part spans");
+            Self::read_spans_to_stream(Arc::clone(&service), &manifest, spans.chunks)
         });
-        let operation_id = self
-            .metadata
-            .stage_manifest(OperationKind::Put, manifest.clone())?;
-        let staging_dir = self.staging_dir(operation_id);
-        if staging_dir.exists() {
-            fs::remove_dir_all(&staging_dir)?;
-        }
-        fs::create_dir_all(&staging_dir)?;
-        let stage_manifest_path = staging_dir.join(MANIFEST_FILE_NAME);
-        write_json_file(&stage_manifest_path, &manifest)?;
-        let manifest_blob = self
-            .upload_local_file_to_telegram(&stage_manifest_path, MANIFEST_FILE_NAME)
+        let body: StreamingBlob = Body::http_body_unsync(http_body_util::StreamBody::new(
+            stream.map(|chunk| chunk.map(hyper::body::Frame::data)),
+        ))
+        .into();
+        let job = self
+            .enqueue_with_part(
+                &plan.bucket,
+                &plan.key,
+                &plan.content_type,
+                Some(body),
+                Some((plan.upload_id, 0, None)),
+            )
             .await?;
-        manifest.telegram = manifest_blob;
-        manifest.commit_state = CommitState::Committed;
-        write_json_file(&stage_manifest_path, &manifest)?;
-        self.metadata.update_manifest(manifest.clone())?;
-        let committed = self.metadata.commit_manifest(operation_id)?;
-        self.metadata
-            .update_multipart_session_state(plan.upload_id, MultipartState::Completed)?;
-        self.metadata.delete_multipart_parts(plan.upload_id)?;
-        match fs::remove_dir_all(&staging_dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
-            Err(_) => {}
-        }
-        Ok(committed)
+        self.wait_transfer(&job.id).await
     }
 
     pub async fn abort_multipart_upload(&self, upload_id: Uuid) -> Result<(), ObjectFormatError> {
-        let parts = self.metadata.list_multipart_parts(upload_id)?;
-        let message_ids: Vec<i32> = parts
-            .iter()
-            .filter_map(|part| i32::try_from(part.telegram.message_id).ok())
-            .collect();
-        if !message_ids.is_empty() {
-            self.delete_telegram_messages(&message_ids).await?;
-        }
-        self.metadata
-            .update_multipart_session_state(upload_id, MultipartState::Aborted)?;
-        self.metadata.delete_multipart_parts(upload_id)?;
-        self.metadata.delete_multipart_session(upload_id)?;
-        let multipart_stage_dir = self.multipart_dir(upload_id);
-        match fs::remove_dir_all(&multipart_stage_dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
-            Err(_) => {}
-        }
+        self.metadata.abort_parts(upload_id)?;
         Ok(())
     }
 
@@ -756,7 +755,7 @@ impl ObjectFormatService {
             .collect();
         let mut issues = Vec::new();
 
-        for manifest in manifests {
+        for manifest in manifests.into_iter().take(100) {
             match manifest.commit_state {
                 CommitState::Staging => {
                     let operation_id = journal_by_operation
@@ -790,7 +789,7 @@ impl ObjectFormatService {
         }
 
         if let Ok(entries) = fs::read_dir(self.data_dir.join(STAGING_ROOT)) {
-            for entry in entries {
+            for entry in entries.take(100) {
                 let entry = entry?;
                 if !entry.file_type()?.is_dir() {
                     continue;
@@ -813,7 +812,7 @@ impl ObjectFormatService {
         }
 
         if let Ok(entries) = fs::read_dir(self.data_dir.join(MANIFEST_ROOT)) {
-            for entry in entries {
+            for entry in entries.take(100) {
                 let entry = entry?;
                 if !entry.file_type()?.is_file() {
                     continue;
@@ -837,7 +836,7 @@ impl ObjectFormatService {
         }
 
         if let Ok(entries) = fs::read_dir(self.data_dir.join(CHUNK_ROOT)) {
-            for entry in entries {
+            for entry in entries.take(100) {
                 let entry = entry?;
                 if !entry.file_type()?.is_dir() {
                     continue;
@@ -869,6 +868,17 @@ impl ObjectFormatService {
         Ok(issues)
     }
 
+    pub fn cached_recovery_issues(&self) -> Result<Vec<RecoveryIssue>, String> {
+        let snapshot = self
+            .recovery_snapshot
+            .read()
+            .map_err(|_| "recovery cache unavailable".to_string())?;
+        match &snapshot.2 {
+            Some(error) => Err(error.clone()),
+            None => Ok(snapshot.1.clone()),
+        }
+    }
+
     pub fn plan_upload(&self, content_length: u64) -> Result<ChunkPlan, ObjectFormatError> {
         Self::plan_chunks(content_length, self.chunk_size)
     }
@@ -892,10 +902,17 @@ impl ObjectFormatService {
         reader: &mut R,
     ) -> Result<StagedObject, ObjectFormatError> {
         let object_id = Uuid::new_v4();
+        let job_id = self.metadata.begin_transfer(object_id, bucket, key)?;
         let scratch_dir = self
             .data_dir
             .join(STAGING_ROOT)
             .join(format!("upload-{object_id}"));
+        let mut receiving = ReceivingGuard {
+            metadata: Arc::clone(&self.metadata),
+            job_id: job_id.clone(),
+            path: scratch_dir.clone(),
+            armed: true,
+        };
         fs::create_dir_all(&scratch_dir)?;
 
         let mut chunk_plan = ChunkPlan {
@@ -916,6 +933,8 @@ impl ObjectFormatService {
             let chunk_bytes = &buffer[..read];
             let chunk_checksum = sha256_hex(chunk_bytes);
             let chunk_path = scratch_dir.join(chunk_file_name(chunk_plan.chunks.len() as u32));
+            self.metadata
+                .reserve_staging(&job_id, read as u64 + 16, self.staging_budget)?;
             let mut chunk_file = File::create(&chunk_path)?;
             let encrypted =
                 self.encrypt_chunk(object_id, chunk_plan.chunks.len() as u32, chunk_bytes)?;
@@ -968,10 +987,14 @@ impl ObjectFormatService {
                 fs::remove_dir_all(&staging_dir)?;
             }
             fs::rename(&scratch_dir, &staging_dir)?;
+            receiving.path = staging_dir.clone();
         }
         let stage_manifest_path = staging_dir.join(MANIFEST_FILE_NAME);
         write_json_file(&stage_manifest_path, &manifest)?;
         verify_staged_chunks(&staging_dir, &manifest, &self.encryption)?;
+        self.metadata
+            .queue_transfer(&job_id, operation_id, manifest.chunks.len())?;
+        receiving.disarm();
         Ok(StagedObject {
             operation_id,
             object_id,
@@ -984,70 +1007,7 @@ impl ObjectFormatService {
         &self,
         staged: &StagedObject,
     ) -> Result<ObjectManifest, ObjectFormatError> {
-        let staging_dir = self.staging_dir(staged.operation_id);
-        let mut final_chunks = Vec::with_capacity(staged.manifest.chunks.len());
-        let mut uploaded_message_ids = Vec::new();
-        for chunk in &staged.manifest.chunks {
-            let staged_path = staging_dir.join(chunk_file_name(chunk.order));
-            if !staged_path.exists() {
-                return Err(ObjectFormatError::MissingChunk {
-                    object_id: staged.object_id,
-                    order: chunk.order,
-                });
-            }
-            let location = match self
-                .upload_local_file_to_telegram(&staged_path, &chunk_file_name(chunk.order))
-                .await
-            {
-                Ok(location) => location,
-                Err(error) => {
-                    let _ = self.delete_telegram_messages(&uploaded_message_ids).await;
-                    return Err(error);
-                }
-            };
-            if let Ok(message_id) = i32::try_from(location.message_id) {
-                uploaded_message_ids.push(message_id);
-            }
-            final_chunks.push(ChunkRef {
-                order: chunk.order,
-                offset: chunk.offset,
-                size: chunk.size,
-                checksum: chunk.checksum.clone(),
-                telegram_peer_id: location.peer_id,
-                telegram_message_id: location.message_id,
-                telegram_document_id: location.document_id,
-            });
-            if let Err(error) = fs::remove_file(&staged_path) {
-                let _ = self.delete_telegram_messages(&uploaded_message_ids).await;
-                return Err(error.into());
-            }
-        }
-
-        let mut committed_manifest = staged.manifest.clone();
-        committed_manifest.telegram = TelegramLocation {
-            peer_id: self.storage_chat_id()?,
-            message_id: 0,
-            document_id: None,
-        };
-        committed_manifest.chunks = final_chunks;
-        committed_manifest.commit_state = CommitState::Committed;
-        let manifest_path = staging_dir.join(MANIFEST_FILE_NAME);
-        write_json_file(&manifest_path, &committed_manifest)?;
-        let manifest_blob = self
-            .upload_local_file_to_telegram(&manifest_path, MANIFEST_FILE_NAME)
-            .await?;
-        committed_manifest.telegram = manifest_blob;
-        write_json_file(&manifest_path, &committed_manifest)?;
-        self.metadata.update_manifest(committed_manifest.clone())?;
-        let committed = self.metadata.commit_manifest(staged.operation_id)?;
-        match fs::remove_dir_all(&staging_dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                return Err(error.into());
-            }
-            Err(_) => {}
-        }
-        Ok(committed)
+        self.wait_transfer(&staged.object_id.to_string()).await
     }
 
     pub async fn put_bytes(
@@ -1068,91 +1028,8 @@ impl ObjectFormatService {
         content_type: &str,
         body: Option<StreamingBlob>,
     ) -> Result<ObjectManifest, ObjectFormatError> {
-        let mut body = body.unwrap_or_else(|| StreamingBlob::new(Body::empty()));
-        let object_id = Uuid::new_v4();
-        let scratch_dir = self
-            .data_dir
-            .join(STAGING_ROOT)
-            .join(format!("upload-{object_id}"));
-        async_fs::create_dir_all(&scratch_dir).await?;
-
-        let mut chunk_plan = ChunkPlan {
-            chunk_size: self.chunk_size,
-            content_length: 0,
-            chunks: Vec::new(),
-        };
-        let mut chunk_refs = Vec::new();
-        let mut whole_hasher = Sha256::new();
-        let mut offset = 0_u64;
-
-        while let Some(chunk) = body.next().await {
-            let chunk_bytes =
-                chunk.map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
-            let chunk_checksum = sha256_hex(&chunk_bytes);
-            let chunk_path = scratch_dir.join(chunk_file_name(chunk_plan.chunks.len() as u32));
-            let mut chunk_file = async_fs::File::create(&chunk_path).await?;
-            let encrypted =
-                self.encrypt_chunk(object_id, chunk_plan.chunks.len() as u32, &chunk_bytes)?;
-            chunk_file.write_all(&encrypted).await?;
-            chunk_file.sync_all().await?;
-
-            whole_hasher.update(&chunk_bytes);
-            let order = chunk_plan.chunks.len() as u32;
-            let size = chunk_bytes.len() as u64;
-            chunk_plan.chunks.push(PlannedChunk {
-                order,
-                offset,
-                size,
-            });
-            chunk_refs.push(ChunkRef {
-                order,
-                offset,
-                size,
-                checksum: chunk_checksum,
-                telegram_peer_id: self.storage_chat_id()?,
-                telegram_message_id: i64::from(order) + 1,
-                telegram_document_id: Some(format!("local:{object_id}:{order}")),
-            });
-            chunk_plan.content_length =
-                chunk_plan.content_length.checked_add(size).ok_or_else(|| {
-                    ObjectFormatError::InvalidPlan("content length overflow".to_string())
-                })?;
-            offset = offset
-                .checked_add(size)
-                .ok_or_else(|| ObjectFormatError::InvalidPlan("offset overflow".to_string()))?;
-        }
-
-        let whole_checksum = hex::encode(whole_hasher.finalize());
-        let manifest = self.new_manifest(ManifestBuildArgs {
-            object_id,
-            bucket: bucket.to_string(),
-            key: key.to_string(),
-            content_type: content_type.to_string(),
-            commit_state: CommitState::Staging,
-            chunks: chunk_refs,
-            whole_checksum,
-        });
-
-        let operation_id = self
-            .metadata
-            .stage_manifest(OperationKind::Put, manifest.clone())?;
-        let staging_dir = self.staging_dir(operation_id);
-        if staging_dir != scratch_dir {
-            if staging_dir.exists() {
-                fs::remove_dir_all(&staging_dir)?;
-            }
-            fs::rename(&scratch_dir, &staging_dir)?;
-        }
-        let stage_manifest_path = staging_dir.join(MANIFEST_FILE_NAME);
-        write_json_file(&stage_manifest_path, &manifest)?;
-        verify_staged_chunks(&staging_dir, &manifest, &self.encryption)?;
-        self.commit_staged_object(&StagedObject {
-            operation_id,
-            object_id,
-            manifest,
-            chunk_plan,
-        })
-        .await
+        let job = self.enqueue_stream(bucket, key, content_type, body).await?;
+        self.wait_transfer(&job.id).await
     }
 
     pub async fn read_bytes(
@@ -1186,6 +1063,7 @@ impl ObjectFormatService {
                 bucket, key
             )));
         }
+        let _pin = self.pin_object(manifest.object_id);
         let plan = Self::plan_read(&manifest, range.clone())?;
         for span in plan.chunks {
             let chunk = manifest.chunks.get(span.order as usize).ok_or(
@@ -1238,6 +1116,13 @@ impl ObjectFormatService {
             .map(|manifest| (manifest.object_id, manifest))
             .collect();
         for manifest in &manifests {
+            if self
+                .metadata
+                .transfer(&manifest.object_id.to_string())?
+                .is_some()
+            {
+                continue;
+            }
             match manifest.commit_state {
                 CommitState::Staging => {
                     if let Some(entry) = journal_by_operation.values().find(|entry| {
@@ -1289,6 +1174,15 @@ impl ObjectFormatService {
             let dir_name = entry.file_name().to_string_lossy().to_string();
             let operation_id = match Uuid::parse_str(&dir_name) {
                 Ok(operation_id) => operation_id,
+                Err(_)
+                    if dir_name.starts_with("upload-")
+                        && self
+                            .metadata
+                            .transfer(dir_name.trim_start_matches("upload-"))?
+                            .is_some() =>
+                {
+                    continue;
+                }
                 Err(_) => {
                     self.quarantine_path(&entry.path())?;
                     quarantined_objects += 1;
@@ -1382,40 +1276,34 @@ impl ObjectFormatService {
             }
             eligible_objects += 1;
             let object_id = record.manifest.object_id;
-            let mut message_ids: Vec<i32> = record
-                .manifest
-                .chunks
-                .iter()
-                .filter_map(|chunk| i32::try_from(chunk.telegram_message_id).ok())
-                .collect();
-            if let Ok(manifest_message_id) = i32::try_from(record.manifest.telegram.message_id)
-                && manifest_message_id > 0
-            {
-                message_ids.push(manifest_message_id);
-            }
-            if !dry_run && !message_ids.is_empty() {
-                self.delete_telegram_messages(&message_ids).await?;
-            }
-
             let manifest_path = self.manifest_path(object_id);
             if manifest_path.exists() {
                 bytes_removed = bytes_removed.saturating_add(fs::metadata(&manifest_path)?.len());
-                if !dry_run {
-                    fs::remove_file(&manifest_path)?;
-                }
                 manifests_removed += 1;
             }
 
             let chunk_dir = self.chunk_dir(object_id);
             if chunk_dir.exists() {
                 bytes_removed = bytes_removed.saturating_add(self.directory_size(&chunk_dir)?);
-                if !dry_run {
-                    fs::remove_dir_all(&chunk_dir)?;
-                }
                 chunk_directories_removed += 1;
             }
 
             bytes_removed = bytes_removed.saturating_add(record.manifest.content_length);
+            if !dry_run {
+                self.metadata.make_cleanup_due(&object_id.to_string())?;
+                loop {
+                    if self
+                        .metadata
+                        .cleanup_complete_for_object(&object_id.to_string())?
+                    {
+                        break;
+                    }
+                    let Some(target) = self.metadata.claim_cleanup()? else {
+                        break;
+                    };
+                    self.process_cleanup_target(&target).await?;
+                }
+            }
             quarantine_entries_removed += self.cleanup_quarantine_entries(object_id, dry_run)?;
         }
 
@@ -1483,10 +1371,18 @@ impl ObjectFormatService {
         this: Arc<Self>,
         manifest: &ObjectManifest,
         spans: Vec<ReadSpan>,
-    ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + 'static {
+    ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + 'static + use<> {
+        let pin = this.pin_object(manifest.object_id);
         futures::stream::unfold(
-            (Arc::clone(&this), manifest.clone(), 0usize, spans, false),
-            move |(object_format, manifest, index, spans, done)| async move {
+            (
+                Arc::clone(&this),
+                manifest.clone(),
+                0usize,
+                spans,
+                false,
+                pin,
+            ),
+            move |(object_format, manifest, index, spans, done, pin)| async move {
                 if done {
                     return None;
                 }
@@ -1499,7 +1395,7 @@ impl ObjectFormatService {
                                 io::ErrorKind::NotFound,
                                 format!("missing chunk {}", span.order),
                             )),
-                            (object_format, manifest, index + 1, spans, true),
+                            (object_format, manifest, index + 1, spans, true, pin),
                         ));
                     }
                 };
@@ -1514,7 +1410,7 @@ impl ObjectFormatService {
                                     span.order
                                 ),
                             )),
-                            (object_format, manifest, index + 1, spans, true),
+                            (object_format, manifest, index + 1, spans, true, pin),
                         ));
                     }
                 };
@@ -1523,7 +1419,7 @@ impl ObjectFormatService {
                     Err(error) => {
                         return Some((
                             Err(io::Error::other(error.to_string())),
-                            (object_format, manifest, index + 1, spans, true),
+                            (object_format, manifest, index + 1, spans, true, pin),
                         ));
                     }
                 };
@@ -1536,7 +1432,7 @@ impl ObjectFormatService {
                                     io::ErrorKind::InvalidData,
                                     error.to_string(),
                                 )),
-                                (object_format, manifest, index + 1, spans, true),
+                                (object_format, manifest, index + 1, spans, true, pin),
                             ));
                         }
                     }
@@ -1554,7 +1450,7 @@ impl ObjectFormatService {
                                 sha256_hex(&plaintext)
                             ),
                         )),
-                        (object_format, manifest, index + 1, spans, true),
+                        (object_format, manifest, index + 1, spans, true, pin),
                     ));
                 }
                 let start = span.offset_within_chunk as usize;
@@ -1571,15 +1467,34 @@ impl ObjectFormatService {
                                 end
                             ),
                         )),
-                        (object_format, manifest, index + 1, spans, true),
+                        (object_format, manifest, index + 1, spans, true, pin),
                     ));
                 }
                 Some((
                     Ok(Bytes::copy_from_slice(&plaintext[start..end])),
-                    (object_format, manifest, index + 1, spans, false),
+                    (object_format, manifest, index + 1, spans, false, pin),
                 ))
             },
         )
+    }
+
+    fn pin_object(&self, object_id: Uuid) -> ReadPinGuard {
+        if let Ok(mut pins) = self.read_pins.lock() {
+            *pins.entry(object_id).or_default() += 1;
+        }
+        ReadPinGuard {
+            object_id,
+            pins: Arc::clone(&self.read_pins),
+        }
+    }
+
+    pub(super) fn is_read_pinned(&self, object_id: Uuid) -> bool {
+        self.read_pins
+            .lock()
+            .ok()
+            .and_then(|pins| pins.get(&object_id).copied())
+            .unwrap_or(0)
+            > 0
     }
 
     pub fn plan_chunks(
@@ -2049,11 +1964,6 @@ impl ObjectFormatService {
             .join(upload_id.to_string())
     }
 
-    fn multipart_part_path(&self, upload_id: Uuid, part_number: u32) -> PathBuf {
-        self.multipart_dir(upload_id)
-            .join(part_file_name(part_number))
-    }
-
     fn quarantine_dir(&self) -> PathBuf {
         self.data_dir.join(QUARANTINE_ROOT)
     }
@@ -2219,7 +2129,7 @@ impl ObjectFormatService {
     fn next_mock_message_id(&self) -> Result<i32, ObjectFormatError> {
         let mock_dir = self.mock_telegram_dir();
         fs::create_dir_all(&mock_dir)?;
-        let mut next = 1_i32;
+        let mut observed_max = 0_i32;
         for entry in fs::read_dir(&mock_dir)? {
             let entry = entry?;
             let stem = entry
@@ -2228,12 +2138,12 @@ impl ObjectFormatService {
                 .and_then(|value| value.to_str())
                 .and_then(|value| value.parse::<i32>().ok());
             if let Some(message_id) = stem
-                && message_id >= next
+                && message_id > observed_max
             {
-                next = message_id + 1;
+                observed_max = message_id;
             }
         }
-        Ok(next)
+        Ok(self.metadata.allocate_mock_message_id(observed_max)?)
     }
 }
 
@@ -2291,10 +2201,16 @@ fn write_json_file(path: &Path, value: &ObjectManifest) -> Result<(), ObjectForm
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = File::create(path)?;
+    let temporary = path.with_extension("json.tmp");
+    let mut file = File::create(&temporary)?;
     let bytes = serde_json::to_vec_pretty(value)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
+    drop(file);
+    fs::rename(&temporary, path)?;
+    if let Some(parent) = path.parent() {
+        workflow::sync_directory(parent)?;
+    }
     Ok(())
 }
 
@@ -2309,10 +2225,6 @@ pub fn parse_checksum_hex(value: &str) -> Result<Vec<u8>, ObjectFormatError> {
 
 fn chunk_file_name(order: u32) -> String {
     format!("chunk-{order:08}.bin")
-}
-
-fn part_file_name(part_number: u32) -> String {
-    format!("part-{part_number:08}.bin")
 }
 
 #[cfg(test)]
@@ -2362,9 +2274,16 @@ mod tests {
             env::set_var("TELEGRAM_TRANSPORT_RUNTIME", "mock");
         }
         seed_telegram_settings(tempdir);
-        ObjectFormatService::open(&test_config(tempdir))
+        let service = ObjectFormatService::open(&test_config(tempdir))
             .await
-            .expect("service")
+            .expect("service");
+        if !service
+            .bucket_exists("bucket")
+            .expect("inspect test bucket")
+        {
+            service.create_bucket("bucket").expect("create test bucket");
+        }
+        service
     }
 
     #[test]
@@ -2411,8 +2330,14 @@ mod tests {
             .stage_bytes("bucket", "key.txt", "text/plain", b"hello world")
             .expect("stage");
         assert_eq!(staged.manifest.commit_state, CommitState::Staging);
+        drop(service);
+        let service = sample_service(&tempdir).await;
+        service
+            .wait_transfer(&staged.object_id.to_string())
+            .await
+            .expect("resume queued upload");
         let report = service.reconcile().await.expect("reconcile");
-        assert_eq!(report.repaired_objects, 1);
+        assert_eq!(report.committed_objects, 1);
         assert_eq!(report.staged_objects, 0);
     }
 
@@ -2465,6 +2390,8 @@ mod tests {
             status: status.clone(),
             state: TelegramConnectionState::Disconnected,
             detail: "storage peer lookup failed: not reachable".to_string(),
+            checked_at: OffsetDateTime::now_utc().unix_timestamp(),
+            last_success_at: None,
         };
         let transport_manager = TelegramTransportManager::from_parts(
             config.clone(),

@@ -17,6 +17,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -118,6 +119,8 @@ pub struct TelegramConnectionHealth {
     pub status: TelegramTransportStatus,
     pub state: TelegramConnectionState,
     pub detail: String,
+    pub checked_at: i64,
+    pub last_success_at: Option<i64>,
 }
 
 #[derive(Debug, Error)]
@@ -159,6 +162,10 @@ pub struct TelegramTransportManager {
     config: AppConfig,
     transport: std::sync::Arc<RwLock<Option<std::sync::Arc<TelegramTransport>>>>,
     health: std::sync::Arc<RwLock<TelegramConnectionHealth>>,
+    refresh_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    monitor_started: std::sync::Arc<AtomicBool>,
+    monitor_shutdown: std::sync::Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
+    monitor_handle: std::sync::Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl TelegramTransport {
@@ -553,31 +560,17 @@ impl TelegramTransport {
 
 impl TelegramTransportManager {
     pub async fn open(config: AppConfig) -> Result<std::sync::Arc<Self>, TelegramTransportError> {
-        let opened = AssertUnwindSafe(open_transport_from_store(&config))
-            .catch_unwind()
-            .await;
-        let (transport, health) = match opened {
-            Ok(Ok(transport)) => {
-                let transport = std::sync::Arc::new(transport);
-                let health = evaluate_health(transport.as_ref()).await?;
-                (Some(transport), health)
-            }
-            Ok(Err(TelegramTransportError::Config(error))) => {
-                (None, not_configured_health(&config, error.to_string()))
-            }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => (
-                None,
-                not_configured_health(
-                    &config,
-                    "telegram transport initialization failed".to_string(),
-                ),
-            ),
-        };
+        let transport = None;
+        let health =
+            not_configured_health(&config, "Telegram connection check pending".to_string());
         Ok(std::sync::Arc::new(Self {
             config,
             transport: std::sync::Arc::new(RwLock::new(transport)),
             health: std::sync::Arc::new(RwLock::new(health)),
+            refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            monitor_started: std::sync::Arc::new(AtomicBool::new(false)),
+            monitor_shutdown: std::sync::Arc::new(Mutex::new(None)),
+            monitor_handle: std::sync::Arc::new(Mutex::new(None)),
         }))
     }
 
@@ -591,6 +584,10 @@ impl TelegramTransportManager {
             config,
             transport: std::sync::Arc::new(RwLock::new(transport)),
             health: std::sync::Arc::new(RwLock::new(health)),
+            refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            monitor_started: std::sync::Arc::new(AtomicBool::new(false)),
+            monitor_shutdown: std::sync::Arc::new(Mutex::new(None)),
+            monitor_handle: std::sync::Arc::new(Mutex::new(None)),
         })
     }
 
@@ -613,14 +610,81 @@ impl TelegramTransportManager {
     }
 
     pub async fn health(&self) -> TelegramConnectionHealth {
-        let needs_refresh = self.transport.read().await.is_none();
-        if needs_refresh {
-            let _ = self.refresh().await;
-        }
         self.health.read().await.clone()
     }
 
+    pub fn start_health_monitor(self: &std::sync::Arc<Self>) {
+        if self.monitor_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        if let Ok(mut shutdown) = self.monitor_shutdown.lock() {
+            *shutdown = Some(shutdown_tx);
+        }
+        let manager = std::sync::Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+                let transport = { manager.transport.read().await.clone() };
+                let result = if let Some(transport) = transport {
+                    match tokio::time::timeout(Duration::from_secs(10), evaluate_health(&transport))
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(TelegramTransportError::Rpc("health probe timed out".into())),
+                    }
+                } else {
+                    manager.refresh().await
+                };
+                match result {
+                    Ok(health) => *manager.health.write().await = health,
+                    Err(_) => {
+                        let mut health = manager.health.write().await;
+                        health.state = TelegramConnectionState::Disconnected;
+                        health.detail = "Telegram connection check failed; inspect connection settings or reauthorize".into();
+                        health.checked_at = time::OffsetDateTime::now_utc().unix_timestamp();
+                    }
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {},
+                    _ = shutdown_rx.changed() => {},
+                }
+            }
+        });
+        if let Ok(mut stored) = self.monitor_handle.lock() {
+            *stored = Some(handle);
+        }
+    }
+
+    pub async fn shutdown_health_monitor(&self) {
+        if let Ok(shutdown) = self.monitor_shutdown.lock()
+            && let Some(sender) = shutdown.as_ref()
+        {
+            let _ = sender.send(true);
+        }
+        let handle = self
+            .monitor_handle
+            .lock()
+            .ok()
+            .and_then(|mut handle| handle.take());
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+        if let Ok(mut shutdown) = self.monitor_shutdown.lock() {
+            *shutdown = None;
+        }
+        self.monitor_started.store(false, Ordering::SeqCst);
+    }
+
     pub async fn refresh(&self) -> Result<TelegramConnectionHealth, TelegramTransportError> {
+        let _refresh = self.refresh_lock.lock().await;
+        if let Some(transport) = self.transport.read().await.clone() {
+            let health = evaluate_health(transport.as_ref()).await?;
+            *self.health.write().await = health.clone();
+            return Ok(health);
+        }
         let opened = AssertUnwindSafe(open_transport_from_store(&self.config))
             .catch_unwind()
             .await;
@@ -696,10 +760,24 @@ async fn evaluate_health(
     let status = transport.status().await?;
     let (state, detail) = match status.session_state {
         SessionState::Authorized | SessionState::Reused => match transport.storage_peer().await {
-            Ok(_) => (
+            Ok(_) if transport.is_mock() => (
                 TelegramConnectionState::Connected,
-                "storage chat reachable".to_string(),
+                "mock storage chat reachable".to_string(),
             ),
+            Ok(_) => match transport
+                .client()?
+                .invoke(&grammers_tl_types::functions::help::GetConfig {})
+                .await
+            {
+                Ok(_) => (
+                    TelegramConnectionState::Connected,
+                    "live Telegram probe and storage chat lookup succeeded".to_string(),
+                ),
+                Err(error) => (
+                    TelegramConnectionState::Disconnected,
+                    format!("live Telegram probe failed: {error}"),
+                ),
+            },
             Err(error) => (
                 TelegramConnectionState::Disconnected,
                 format!("storage peer lookup failed: {error}"),
@@ -714,10 +792,14 @@ async fn evaluate_health(
             "telegram session is logged out".to_string(),
         ),
     };
+    let connected = matches!(state, TelegramConnectionState::Connected);
+    let checked_at = time::OffsetDateTime::now_utc().unix_timestamp();
     Ok(TelegramConnectionHealth {
         status,
         state,
         detail,
+        checked_at,
+        last_success_at: connected.then_some(checked_at),
     })
 }
 
@@ -770,6 +852,8 @@ fn not_configured_health(config: &AppConfig, detail: String) -> TelegramConnecti
         },
         state: TelegramConnectionState::NotConfigured,
         detail,
+        checked_at: time::OffsetDateTime::now_utc().unix_timestamp(),
+        last_success_at: None,
     }
 }
 

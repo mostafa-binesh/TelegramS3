@@ -173,3 +173,29 @@ Completed work (content streaming + wizard increment):
 Remaining Phase-9 follow-ups (explicitly out of this increment, see ADR-0006 / ROADMAP): bulk/folder download or server-side ZIP (no whole-RAM buffering), drag-in of nested directory trees, and browser resumable-multipart upload negotiation.
 
 Rejected alternatives this phase (see `docs/adr/0006-...md`): keeping MinIO-time `TELEGRAM_ADMIN_BOOTSTRAP_SECRET` as a shared login secret; per-user `.env` accounts; a separate credentials SQLite file; `governor`-style thundering rate limiters; site-replication peering of Telegram S3 (documented unsupported).
+
+## Phase 10 - Durability and frontend refresh
+
+- Status: planned
+- Exit criteria:
+  - object uploads are protected by a durable background workflow and can survive restart, retry, and partial-failure cases without losing staged chunks
+  - the operator UI is redesigned around a modern login-first flow with a first-run superadmin wizard
+  - the dashboard shows live Telegram connection health at a glance
+  - recovery, repair, and upload-failure states are explainable from the UI and docs
+
+Planned work:
+
+- introduce a durable upload worker / queue so staging is not tied to a single foreground request path; the worker should own chunk fan-out, retry, and final commit
+- add a durable cleanup worker / outbox for object deletes so Telegram message removal happens asynchronously and survives restart, instead of trying to do all cleanup in the foreground request path
+- add periodic reconciliation for staged uploads so missing chunks, orphaned staging trees, and interrupted commits are repaired or quarantined before they become user-visible corruption
+- make the startup path fail soft for recoverable upload issues: the app should boot, expose health, and let operators inspect or repair state instead of disappearing when staging is damaged
+- replace the current admin shell with a cleaner login-first experience, tighter navigation, and a more modern dashboard layout
+- add a first-run setup wizard that provisions the initial superadmin account when no operator exists yet
+- surface Telegram status with a persistent health dot / badge and a short explanation of the latest connection state
+- break the frontend into smaller, reusable components and align styling, spacing, and interaction patterns across all pages
+
+Notes:
+
+- `100 staged chunk(s) missing` is a durability symptom, not just a UI issue; the long-term fix is a worker-backed upload lifecycle plus reconciliation, not only a prettier error message.
+- object delete cleanup should also be worker-backed: tombstone first, then let a durable cleanup job remove Telegram payloads later, so deletes stay recoverable and retryable.
+- the redesigned UI should keep health and recovery visible even when Telegram bootstrap is degraded, so operators can fix settings without losing the whole control plane.

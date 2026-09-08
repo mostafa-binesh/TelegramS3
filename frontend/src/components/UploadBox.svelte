@@ -11,6 +11,7 @@
     fullKey: string;
     progress: number; // 0..1
     busy: boolean;
+    jobId?: string;
     error?: string;
   }
 
@@ -56,11 +57,11 @@
 
   async function doUpload(index: number) {
     const item = items[index];
-    if (!item) return;
+    if (!item || item.jobId) return;
     setItem(index, { busy: true, error: undefined });
     try {
       const total = item.file.size;
-      await uploadObject(
+      const accepted = await uploadObject(
         bucket,
         item.fullKey,
         item.file,
@@ -69,7 +70,7 @@
           setItem(index, { progress: total > 0 ? sent / total : 1 });
         }
       );
-      setItem(index, { progress: 1, busy: false });
+      setItem(index, { progress: 1, busy: false, jobId: accepted.job_id });
       onUploaded();
     } catch (cause) {
       setItem(index, {
@@ -137,7 +138,7 @@
           <div class="queue-meta">
             <span class="queue-name">{item.file.name}</span>
             <span class="queue-sub">
-              {item.error ? 'failed' : item.busy ? 'uploading' : item.progress === 1 ? 'done' : 'queued'}
+              {item.error ? 'failed' : item.jobId ? 'Staged - follow progress in Transfers' : item.busy ? 'Sending to server' : 'Ready to send'}
             </span>
             <button class="queue-remove" type="button" on:click={() => removeItem(i)} disabled={item.busy}>
               ✕

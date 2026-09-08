@@ -7,7 +7,7 @@ use crate::telegram::TelegramTransportManager;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use http::{StatusCode, header};
+use http::{Method, StatusCode, header};
 use http_body_util::StreamBody;
 use hyper::body::{Frame, Incoming};
 use hyper::server::conn::http1;
@@ -249,6 +249,8 @@ pub struct S3Server {
     addr: SocketAddr,
     admin_addr: SocketAddr,
     service: S3Service,
+    request_timeout: u64,
+    transfer_timeout: u64,
     object_format: Arc<ObjectFormatService>,
     transport_manager: Arc<TelegramTransportManager>,
     admin_ui_state: Arc<AdminUiState>,
@@ -266,7 +268,7 @@ impl S3Server {
             )
             .await?,
         );
-        let object_status = object_format.bootstrap().await?;
+        let object_status = object_format.status()?;
         let admin_addr = config.admin_bind_addr()?;
         let admin_ui_dist_dir = config.admin_ui_dist_dir();
         let admin_index = admin_ui_dist_dir.join("index.html");
@@ -310,6 +312,8 @@ impl S3Server {
             addr: config.s3_bind_addr()?,
             admin_addr,
             service,
+            request_timeout: config.request_timeout_secs()?,
+            transfer_timeout: config.transfer_timeout_secs()?,
             object_format,
             transport_manager,
             admin_ui_state,
@@ -330,6 +334,10 @@ impl S3Server {
         let admin_listener = TcpListener::bind(self.admin_addr).await?;
         let admin_addr = admin_listener.local_addr()?;
         println!("admin listening on {}", admin_addr);
+        self.object_format.ensure_workers();
+        self.transport_manager.start_health_monitor();
+        let request_timeout = self.request_timeout;
+        let transfer_timeout = self.transfer_timeout;
         let service = self.service.clone();
         let admin_ui_state = Arc::clone(&self.admin_ui_state);
         let admin_state = AdminState {
@@ -347,7 +355,7 @@ impl S3Server {
                     let admin_ui_state = Arc::clone(&admin_ui_state);
                     connections.spawn(async move {
                         let handler = service_fn(move |request| {
-                            handle_request(request, service.clone(), Arc::clone(&admin_ui_state))
+                            handle_request(request, service.clone(), Arc::clone(&admin_ui_state), request_timeout, transfer_timeout)
                         });
                         let mut connection = http1::Builder::new();
                         connection.keep_alive(false).timer(TokioTimer::new());
@@ -370,6 +378,8 @@ impl S3Server {
         }
         connections.abort_all();
         while connections.join_next().await.is_some() {}
+        self.object_format.shutdown_workers().await;
+        self.transport_manager.shutdown_health_monitor().await;
         Ok(())
     }
 }
@@ -378,6 +388,8 @@ async fn handle_request(
     request: hyper::Request<Incoming>,
     service: S3Service,
     admin_ui_state: Arc<AdminUiState>,
+    request_timeout: u64,
+    transfer_timeout: u64,
 ) -> Result<hyper::Response<Body>, Box<dyn Error + Send + Sync>> {
     if request.uri().path() == "/favicon.ico" {
         let mut response = hyper::Response::new(Body::from(Bytes::new()));
@@ -387,8 +399,16 @@ async fn handle_request(
     if AdminUiState::is_admin_route(request.uri().path()) {
         return Ok(admin_ui_state.handle_request(request).await);
     }
+    let timeout_secs = if matches!(
+        request.method(),
+        &Method::PUT | &Method::POST | &Method::DELETE
+    ) {
+        transfer_timeout
+    } else {
+        request_timeout
+    };
     match timeout(
-        Duration::from_secs(60),
+        Duration::from_secs(timeout_secs),
         service.call(request.map(Body::from)),
     )
     .await
@@ -419,6 +439,45 @@ async fn handle_admin_request(
 ) -> Result<hyper::Response<Body>, Box<dyn Error + Send + Sync>> {
     let path = request.uri().path();
     match path {
+        "/readyz" => {
+            let health = state.transport_manager.health().await;
+            let object = state.object_format.status()?;
+            let durable = state.object_format.durable_metrics()?;
+            let mut reasons = Vec::new();
+            if !matches!(
+                health.state,
+                crate::telegram::TelegramConnectionState::Connected
+            ) {
+                reasons.push("Telegram unavailable");
+            }
+            if OffsetDateTime::now_utc()
+                .unix_timestamp()
+                .saturating_sub(health.checked_at)
+                > 90
+            {
+                reasons.push("Telegram health check is stale");
+            }
+            if durable.staging_bytes >= state.object_format.staging_budget() {
+                reasons.push("staging capacity exhausted");
+            }
+            if object.recovery_required_objects > 0 || durable.cleanup_recovery_required > 0 {
+                reasons.push("storage recovery required");
+            }
+            let ready = reasons.is_empty();
+            Ok(text_response(
+                if ready {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                },
+                if ready {
+                    "ready\n".to_string()
+                } else {
+                    format!("not ready: {}\n", reasons.join("; "))
+                },
+                "text/plain; charset=utf-8",
+            ))
+        }
         "/healthz" => Ok(text_response(
             StatusCode::OK,
             format!(
@@ -433,6 +492,7 @@ async fn handle_admin_request(
             let metadata_status = state.object_format.metadata_status()?;
             let object_status = state.object_format.status()?;
             let transport_health = state.transport_manager.health().await;
+            let durable = state.object_format.durable_metrics()?;
             let body = format!(
                 concat!(
                     "# HELP telegram_s3_bootstrap_ok Bootstrap completion state\n",
@@ -458,7 +518,31 @@ async fn handle_admin_request(
                     "telegram_s3_object_format_orphaned_chunks {}\n",
                     "# HELP telegram_s3_transport_session_state Telegram session state snapshot\n",
                     "# TYPE telegram_s3_transport_session_state gauge\n",
-                    "telegram_s3_transport_session_state{{state=\"{:?}\"}} 1\n"
+                    "telegram_s3_transport_session_state{{state=\"{:?}\"}} 1\n",
+                    "# HELP telegram_s3_transfer_jobs_pending Durable transfer jobs awaiting completion\n",
+                    "# TYPE telegram_s3_transfer_jobs_pending gauge\n",
+                    "telegram_s3_transfer_jobs_pending {}\n",
+                    "# HELP telegram_s3_transfer_oldest_pending_age_seconds Age of the oldest pending transfer\n",
+                    "# TYPE telegram_s3_transfer_oldest_pending_age_seconds gauge\n",
+                    "telegram_s3_transfer_oldest_pending_age_seconds {}\n",
+                    "# HELP telegram_s3_transfer_retries_total Durable transfer retries\n",
+                    "# TYPE telegram_s3_transfer_retries_total gauge\n",
+                    "telegram_s3_transfer_retries_total {}\n",
+                    "# HELP telegram_s3_transfer_failed_jobs Jobs requiring recovery or failed reception\n",
+                    "# TYPE telegram_s3_transfer_failed_jobs gauge\n",
+                    "telegram_s3_transfer_failed_jobs {}\n",
+                    "# HELP telegram_s3_staging_bytes Bytes reserved by local staging\n",
+                    "# TYPE telegram_s3_staging_bytes gauge\n",
+                    "telegram_s3_staging_bytes {}\n",
+                    "# HELP telegram_s3_cleanup_backlog Durable cleanup targets awaiting completion\n",
+                    "# TYPE telegram_s3_cleanup_backlog gauge\n",
+                    "telegram_s3_cleanup_backlog {}\n",
+                    "# HELP telegram_s3_cleanup_recovery_required Cleanup targets quarantined for operator recovery\n",
+                    "# TYPE telegram_s3_cleanup_recovery_required gauge\n",
+                    "telegram_s3_cleanup_recovery_required {}\n",
+                    "# HELP telegram_s3_telegram_health_checked_at_seconds Last Telegram probe time as Unix seconds\n",
+                    "# TYPE telegram_s3_telegram_health_checked_at_seconds gauge\n",
+                    "telegram_s3_telegram_health_checked_at_seconds {}\n"
                 ),
                 metadata_status.buckets,
                 metadata_status.committed_objects,
@@ -467,6 +551,14 @@ async fn handle_admin_request(
                 object_status.recovery_required_objects,
                 object_status.orphaned_chunks,
                 transport_health.status.session_state,
+                durable.pending_jobs,
+                durable.oldest_pending_age_seconds,
+                durable.retries,
+                durable.failed_jobs,
+                durable.staging_bytes,
+                durable.cleanup_backlog,
+                durable.cleanup_recovery_required,
+                transport_health.checked_at,
             );
             Ok(text_response(
                 StatusCode::OK,
@@ -877,18 +969,23 @@ impl S3 for TelegramS3Backend {
             input.copy_source_if_unmodified_since.as_ref(),
             &manifest,
         )?;
-        let bytes = self
-            .object_format
-            .read_bytes(&manifest.bucket, &manifest.key, 0..manifest.content_length)
-            .await
+        let spans = ObjectFormatService::plan_read(&manifest, 0..manifest.content_length)
             .map_err(map_object_error)?;
+        let stream = ObjectFormatService::read_spans_to_stream(
+            Arc::clone(&self.object_format),
+            &manifest,
+            spans.chunks,
+        );
+        let body: StreamingBlob =
+            Body::http_body_unsync(StreamBody::new(stream.map(|chunk| chunk.map(Frame::data))))
+                .into();
         let content_type = input
             .content_type
             .clone()
             .unwrap_or(manifest.content_type.clone());
         let copied = self
             .object_format
-            .put_bytes(&input.bucket, &input.key, &content_type, &bytes)
+            .put_stream(&input.bucket, &input.key, &content_type, Some(body))
             .await
             .map_err(map_object_error)?;
         let copy_result = s3s::dto::CopyObjectResult {

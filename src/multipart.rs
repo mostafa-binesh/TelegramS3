@@ -50,6 +50,8 @@ pub struct MultipartPart {
     pub checksum: String,
     pub e_tag: String,
     pub telegram: TelegramLocation,
+    #[serde(default)]
+    pub manifest: Option<crate::manifest::ObjectManifest>,
     pub created_at: OffsetDateTime,
 }
 

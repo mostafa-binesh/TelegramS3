@@ -115,3 +115,9 @@ export interface FileUploadResult {
   etag: string;
   version_id: string;
 }
+
+export interface TransferJob {
+  id:string; object_id:string; operation_id:string|null; bucket:string; key:string; state:string;
+  bytes:number; chunks_done:number; chunks_total:number; attempts:number; next_retry:number;
+  error:string|null; created_at:number; updated_at:number;
+}

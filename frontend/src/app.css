@@ -1,35 +1,9 @@
-:root {
-  color-scheme: light;
-  font-family:
-    'Trebuchet MS',
-    'Gill Sans',
-    'Avenir Next',
-    sans-serif;
-  --bg: #f4efe7;
-  --bg-alt: #efe7da;
-  --surface: rgba(255, 255, 255, 0.82);
-  --surface-strong: #fffaf2;
-  --border: rgba(28, 41, 64, 0.12);
-  --text: #172033;
-  --muted: #5d6575;
-  --accent: #0d7a6d;
-  --accent-2: #d77a52;
-  --danger: #b03838;
-  --ok: #0f8c61;
-  --shadow: 0 22px 50px rgba(30, 41, 59, 0.12);
+ :root {
+  color-scheme:light;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  --bg:#f5f7fa;--bg-alt:#f5f7fa;--surface:#fff;--surface-strong:#fff;--border:#e1e7ee;--text:#182637;--muted:#596b7e;--accent:#216dba;--accent-2:#417992;--danger:#b33838;--ok:#167858;--shadow:0 2px 8px #172b4d06;
 }
-
-html,
-body {
-  margin: 0;
-  min-height: 100%;
-  background:
-    radial-gradient(circle at top left, rgba(13, 122, 109, 0.18), transparent 28%),
-    radial-gradient(circle at top right, rgba(215, 122, 82, 0.18), transparent 24%),
-    linear-gradient(180deg, var(--bg), var(--bg-alt));
-  color: var(--text);
-}
-
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text)}
+:focus-visible{outline:3px solid #4b98dd;outline-offset:3px}
 body {
   min-height: 100vh;
 }
@@ -45,7 +19,7 @@ input {
 
 button {
   border: 0;
-  border-radius: 999px;
+  border-radius: 7px;
   padding: 0.88rem 1.2rem;
   background: #22324d;
   color: #fff;
@@ -66,7 +40,7 @@ button:disabled {
 }
 
 button.primary {
-  background: linear-gradient(135deg, var(--accent), #12648d);
+  background: var(--accent);
 }
 
 button.ghost {
@@ -168,7 +142,7 @@ input:focus {
   align-items: center;
   justify-content: center;
   min-width: 7rem;
-  border-radius: 999px;
+  border-radius: 7px;
   padding: 0.36rem 0.75rem;
   font-size: 0.86rem;
   font-weight: 700;

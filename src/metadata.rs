@@ -8,12 +8,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::time::Duration as StdDuration;
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Error)]
 pub enum MetadataError {
@@ -174,7 +175,10 @@ impl MetadataStore {
         create_private_metadata_file(&path)?;
 
         let connection = Connection::open(&path)?;
+        connection.busy_timeout(StdDuration::from_secs(30))?;
         connection.pragma_update(None, "foreign_keys", true)?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
 
         let store = Self {
             path: Some(path),
@@ -182,6 +186,7 @@ impl MetadataStore {
         };
         store.with_connection(|connection| {
             apply_migrations(connection)?;
+            backfill_cleanup_outbox(connection)?;
             rebuild_index_internal(connection)?;
             Ok(())
         })?;
@@ -190,7 +195,9 @@ impl MetadataStore {
 
     pub fn open_in_memory() -> Result<Self, MetadataError> {
         let connection = Connection::open_in_memory()?;
+        connection.busy_timeout(StdDuration::from_secs(30))?;
         connection.pragma_update(None, "foreign_keys", true)?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
 
         let store = Self {
             path: None,
@@ -198,6 +205,7 @@ impl MetadataStore {
         };
         store.with_connection(|connection| {
             apply_migrations(connection)?;
+            backfill_cleanup_outbox(connection)?;
             rebuild_index_internal(connection)?;
             Ok(())
         })?;
@@ -421,6 +429,8 @@ impl MetadataStore {
     pub fn delete_bucket(&self, bucket: &str) -> Result<(), MetadataError> {
         self.with_connection(|connection| {
             let tx = connection.transaction()?;
+            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM transfer_jobs WHERE bucket=?1 AND state NOT IN ('completed','cancelled','cleaned'))",[bucket],|r|r.get(0))?;
+            if pending { return Err(MetadataError::BucketNotEmpty(bucket.into())); }
             let active_objects: u64 = tx.query_row(
                 "SELECT COUNT(*) FROM active_objects WHERE bucket = ?1",
                 params![bucket],
@@ -511,7 +521,7 @@ impl MetadataStore {
             .validate()
             .map_err(MetadataError::InvalidManifest)?;
 
-        let operation_id = Uuid::new_v4();
+        let operation_id = manifest.object_id;
         let created_at = timestamp_now()?;
         let object_id = manifest.object_id.to_string();
         let bucket = manifest.bucket.clone();
@@ -608,9 +618,28 @@ impl MetadataStore {
     }
 
     pub fn commit_manifest(&self, operation_id: Uuid) -> Result<ObjectManifest, MetadataError> {
+        self.commit_manifest_inner(operation_id, None, None)
+    }
+
+    pub(crate) fn commit_transfer_manifest(
+        &self,
+        operation_id: Uuid,
+        job_id: &str,
+        lease: &str,
+        published: ObjectManifest,
+    ) -> Result<ObjectManifest, MetadataError> {
+        self.commit_manifest_inner(operation_id, Some((job_id, lease)), Some(published))
+    }
+
+    fn commit_manifest_inner(
+        &self,
+        operation_id: Uuid,
+        transfer: Option<(&str, &str)>,
+        published: Option<ObjectManifest>,
+    ) -> Result<ObjectManifest, MetadataError> {
         let operation_id = operation_id.to_string();
         self.with_connection(|connection| {
-            let tx = connection.transaction()?;
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let journal = load_journal_entry(&tx, &operation_id)?
                 .ok_or_else(|| MetadataError::JournalNotFound(operation_id.clone()))?;
             let mut manifest = load_manifest_by_object_id(&tx, &journal.object_id)?
@@ -620,6 +649,78 @@ impl MetadataStore {
                 return Ok(manifest);
             }
 
+            if let Some(published) = published {
+                published.validate().map_err(MetadataError::InvalidManifest)?;
+                if published.object_id.to_string() != journal.object_id
+                    || published.bucket != journal.bucket
+                    || published.key != journal.object_key
+                {
+                    return Err(MetadataError::InvalidManifest(
+                        "published manifest identity changed".into(),
+                    ));
+                }
+                manifest = published;
+            }
+
+            let mut strict_job_sequence = None;
+            if let Some((job_id, lease)) = transfer {
+                let row: Option<(String, Option<String>, i64, i64, String, String, Option<String>)> = tx
+                    .query_row(
+                        "SELECT state,lease,lease_until,sequence,bucket,object_key,operation_id FROM transfer_jobs WHERE id=?1",
+                        [job_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                    )
+                    .optional()?;
+                let Some((state, actual_lease, lease_until, sequence, bucket, key, job_operation)) = row else {
+                    return Err(MetadataError::InvalidManifest("transfer job missing".into()));
+                };
+                if state != "committing"
+                    || actual_lease.as_deref() != Some(lease)
+                    || lease_until < crate::durable::now()
+                    || job_operation.as_deref() != Some(operation_id.as_str())
+                {
+                    return Err(MetadataError::InvalidManifest("publication fence lost".into()));
+                }
+                let older_pending: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM transfer_jobs WHERE bucket=?1 AND object_key=?2 AND sequence<?3 AND state NOT IN ('completed','cleaned','cancelled','reception_failed','superseded'))",
+                    params![bucket, key, sequence],
+                    |r| r.get(0),
+                )?;
+                let newer_committed: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM transfer_jobs WHERE bucket=?1 AND object_key=?2 AND sequence>?3 AND state IN ('completed','cleaned'))",
+                    params![bucket, key, sequence],
+                    |r| r.get(0),
+                )?;
+                if older_pending || newer_committed {
+                    return Err(MetadataError::InvalidManifest(
+                        "per-key publication order changed".into(),
+                    ));
+                }
+                strict_job_sequence = Some((job_id, lease));
+            } else {
+                let job_state: Option<String> = tx.query_row("SELECT state FROM transfer_jobs WHERE operation_id=?1", [&operation_id], |r| r.get(0)).optional()?;
+                if job_state.as_deref().is_some_and(|s| !matches!(s, "uploading" | "committing")) {
+                    return Err(MetadataError::InvalidManifest("transfer cannot commit in current state".into()));
+                }
+            }
+            let completion_job = transfer.map(|(job_id, _)| job_id).unwrap_or(&journal.object_id);
+            let completion: Option<String> = tx.query_row(
+                "SELECT upload_id FROM multipart_jobs WHERE job_id=?1 AND part_number=0",
+                [completion_job],
+                |r| r.get(0),
+            ).optional()?;
+            if let Some(upload) = completion.as_deref() {
+                let active: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM multipart_uploads WHERE upload_id=?1 AND state IN ('initiated','uploading'))",
+                    [upload],
+                    |r| r.get(0),
+                )?;
+                if !active {
+                    return Err(MetadataError::InvalidManifest(
+                        "multipart completion session is closed".into(),
+                    ));
+                }
+            }
             let committed_at = timestamp_now()?;
             let object_id = manifest.object_id.to_string();
             let bucket = manifest.bucket.clone();
@@ -661,6 +762,25 @@ impl MetadataStore {
                 "#,
                 params![operation_id, committed_at],
             )?;
+            if let Some((job_id, lease)) = strict_job_sequence {
+                if tx.execute(
+                    "UPDATE transfer_jobs SET state='completed',error=NULL,lease=NULL,lease_until=0,updated_at=?3 WHERE id=?1 AND lease=?2 AND state='committing'",
+                    params![job_id, lease, crate::durable::now()],
+                )? != 1 {
+                    return Err(MetadataError::InvalidManifest("publication fence lost".into()));
+                }
+            } else {
+                tx.execute("UPDATE transfer_jobs SET state='completed',error=NULL,lease=NULL,lease_until=0,updated_at=?2 WHERE operation_id=?1", params![operation_id, crate::durable::now()])?;
+            }
+            if let Some(upload)=completion {
+                for row in tx.prepare("SELECT part_json FROM multipart_parts WHERE upload_id=?1")?.query_map([&upload],|r|r.get::<_,String>(0))? {
+                    crate::durable::enqueue_part_cleanup(&tx,&serde_json::from_str(&row?)?)?;
+                }
+                if tx.execute("UPDATE multipart_uploads SET state='completed',session_json=json_set(session_json,'$.state','completed') WHERE upload_id=?1 AND state IN ('initiated','uploading')",[&upload])? != 1 {
+                    return Err(MetadataError::InvalidManifest("multipart completion session is closed".into()));
+                }
+                tx.execute("DELETE FROM multipart_parts WHERE upload_id=?1",[upload])?;
+            }
             tx.commit()?;
             Ok(manifest)
         })
@@ -704,6 +824,7 @@ impl MetadataStore {
             let object_key = manifest.key.clone();
             let manifest_object_id = manifest.object_id.to_string();
             manifest.commit_state = CommitState::Tombstoned;
+            crate::durable::enqueue_manifest_cleanup(&tx, &manifest)?;
             let manifest_json = serde_json::to_string(&manifest)?;
 
             tx.execute(
@@ -1218,7 +1339,7 @@ impl MetadataStore {
         })
     }
 
-    fn with_connection<T>(
+    pub(crate) fn with_connection<T>(
         &self,
         f: impl FnOnce(&mut Connection) -> Result<T, MetadataError>,
     ) -> Result<T, MetadataError> {
@@ -1344,8 +1465,12 @@ impl MetadataStore {
         display_name: &str,
     ) -> Result<DbUser, MetadataError> {
         let now = timestamp_now()?;
+        let id = id.to_string();
         self.with_connection(|connection| {
-            connection.execute(
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let first: bool = tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM users)", [], |r| r.get(0))?;
+            let effective_role = if first { "superadmin" } else { role };
+            tx.execute(
                 r#"
                 INSERT INTO users (
                     id, username, password_hash, role, display_name,
@@ -1353,11 +1478,16 @@ impl MetadataStore {
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?6)
                 "#,
-                params![id, username, password_hash, role, display_name, now],
+                params![id, username, password_hash, effective_role, display_name, now],
             )?;
+            tx.execute(
+                "INSERT INTO app_settings(key,value,updated_at) VALUES ('setup_complete','true',?1) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",
+                [now],
+            )?;
+            tx.commit()?;
             Ok(())
         })?;
-        self.get_user(username)?
+        self.get_user_by_id(&id)?
             .ok_or_else(|| MetadataError::InvalidManifest("created user not readable".to_string()))
     }
 
@@ -1404,10 +1534,97 @@ impl MetadataStore {
         })
     }
 
+    pub fn enabled_superadmin_count(&self) -> Result<u64, MetadataError> {
+        self.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM users WHERE role='superadmin' AND disabled=0",
+                [],
+                |r| r.get::<_, u64>(0),
+            )?)
+        })
+    }
+
     pub fn delete_user(&self, id: &str) -> Result<(), MetadataError> {
         self.with_connection(|connection| {
-            connection.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+            let tx =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let role: Option<String> = tx
+                .query_row("SELECT role FROM users WHERE id=?1", [id], |r| r.get(0))
+                .optional()?;
+            if role.as_deref() == Some("superadmin") {
+                let superadmins: u64 = tx.query_row(
+                    "SELECT COUNT(*) FROM users WHERE role='superadmin' AND disabled=0",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if superadmins <= 1 {
+                    return Err(MetadataError::InvalidManifest(
+                        "cannot delete the last enabled superadmin".into(),
+                    ));
+                }
+            }
+            tx.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+            tx.commit()?;
             Ok(())
+        })
+    }
+
+    /// Delete the current key generation and cancel only work accepted before
+    /// this delete. Version-targeted deletion continues to use
+    /// `tombstone_manifest` and therefore cannot cancel unrelated uploads.
+    pub fn delete_active_key(
+        &self,
+        bucket: &str,
+        object_key: &str,
+        reason: &str,
+    ) -> Result<Option<ObjectManifest>, MetadataError> {
+        self.with_connection(|connection| {
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let active_transfer: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM transfer_jobs WHERE bucket=?1 AND object_key=?2 AND state IN ('uploading','committing'))",
+                params![bucket, object_key],
+                |r| r.get(0),
+            )?;
+            if active_transfer {
+                return Err(MetadataError::InvalidManifest(
+                    "object publication in progress; retry delete".into(),
+                ));
+            }
+            tx.execute(
+                "UPDATE transfer_jobs SET state='cancelled',lease=NULL,lease_until=0,error='Superseded by deletion',updated_at=?3 WHERE bucket=?1 AND object_key=?2 AND state IN ('receiving','queued','retry_wait','recovery_required')",
+                params![bucket, object_key, crate::durable::now()],
+            )?;
+
+            let object_id: Option<String> = tx.query_row(
+                "SELECT object_id FROM active_objects WHERE bucket=?1 AND object_key=?2",
+                params![bucket, object_key],
+                |r| r.get(0),
+            ).optional()?;
+            let Some(object_id) = object_id else {
+                tx.commit()?;
+                return Ok(None);
+            };
+            let mut manifest = load_manifest_by_object_id(&tx, &object_id)?
+                .ok_or_else(|| MetadataError::ManifestNotFound(object_id.clone()))?;
+            let tombstoned_at = timestamp_now()?;
+            manifest.commit_state = CommitState::Tombstoned;
+            crate::durable::enqueue_manifest_cleanup(&tx, &manifest)?;
+            let manifest_json = serde_json::to_string(&manifest)?;
+            tx.execute(
+                "UPDATE object_manifests SET commit_state='tombstoned',manifest_json=?2,tombstoned_at=?3 WHERE object_id=?1",
+                params![object_id, manifest_json, tombstoned_at],
+            )?;
+            tx.execute(
+                "DELETE FROM active_objects WHERE bucket=?1 AND object_key=?2 AND object_id=?3",
+                params![bucket, object_key, object_id],
+            )?;
+            tx.execute("DELETE FROM recovery_markers WHERE object_id=?1", [object_id.as_str()])?;
+            tx.execute(
+                "UPDATE operation_journal SET state='tombstoned',error=?2,updated_at=?3 WHERE object_id=?1",
+                params![object_id, reason, tombstoned_at],
+            )?;
+            tx.commit()?;
+            Ok(Some(manifest))
         })
     }
 
@@ -1429,10 +1646,34 @@ impl MetadataStore {
     pub fn set_user_disabled(&self, id: &str, disabled: bool) -> Result<(), MetadataError> {
         let now = timestamp_now()?;
         self.with_connection(|connection| {
-            connection.execute(
+            let tx =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if disabled {
+                let role: Option<String> = tx
+                    .query_row(
+                        "SELECT role FROM users WHERE id=?1 AND disabled=0",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if role.as_deref() == Some("superadmin") {
+                    let superadmins: u64 = tx.query_row(
+                        "SELECT COUNT(*) FROM users WHERE role='superadmin' AND disabled=0",
+                        [],
+                        |r| r.get(0),
+                    )?;
+                    if superadmins <= 1 {
+                        return Err(MetadataError::InvalidManifest(
+                            "cannot disable the last enabled superadmin".into(),
+                        ));
+                    }
+                }
+            }
+            tx.execute(
                 "UPDATE users SET disabled = ?2, updated_at = ?3 WHERE id = ?1",
                 params![id, disabled, now],
             )?;
+            tx.commit()?;
             Ok(())
         })
     }
@@ -1546,6 +1787,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         return Err(MetadataError::UnsupportedSchemaVersion(current_version));
     }
     if current_version >= SCHEMA_VERSION {
+        ensure_phase10_schema(connection)?;
         return Ok(());
     }
 
@@ -1689,6 +1931,72 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS transfer_jobs (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
+            object_id TEXT NOT NULL,
+            operation_id TEXT,
+            bucket TEXT NOT NULL,
+            object_key TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'receiving',
+            bytes INTEGER NOT NULL DEFAULT 0,
+            chunks_done INTEGER NOT NULL DEFAULT 0,
+            chunks_total INTEGER NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_retry INTEGER NOT NULL DEFAULT 0,
+            lease TEXT,
+            lease_until INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_transfer_due ON transfer_jobs(state, next_retry, sequence);
+        CREATE TABLE IF NOT EXISTS transfer_chunks (
+            job_id TEXT NOT NULL REFERENCES transfer_jobs(id),
+            chunk_order INTEGER NOT NULL,
+            location_json TEXT NOT NULL,
+            PRIMARY KEY(job_id, chunk_order)
+        );
+        CREATE TABLE IF NOT EXISTS transfer_send_attempts (
+            job_id TEXT NOT NULL REFERENCES transfer_jobs(id),
+            chunk_order INTEGER NOT NULL,
+            attempt_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            started_at INTEGER NOT NULL,
+            finished_at INTEGER,
+            location_json TEXT,
+            PRIMARY KEY(job_id, chunk_order, attempt_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_transfer_send_attempt_state
+            ON transfer_send_attempts(job_id, state);
+        CREATE TABLE IF NOT EXISTS multipart_jobs (
+            job_id TEXT PRIMARY KEY REFERENCES transfer_jobs(id),
+            upload_id TEXT NOT NULL,
+            part_number INTEGER NOT NULL,
+            expected_checksum TEXT
+        );
+        CREATE TABLE IF NOT EXISTS cleanup_targets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            object_id TEXT NOT NULL,
+            peer_id TEXT NOT NULL,
+            message_id INTEGER NOT NULL,
+            target_kind TEXT NOT NULL DEFAULT 'message',
+            due_at INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_retry INTEGER NOT NULL DEFAULT 0,
+            lease TEXT,
+            lease_until INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            evidence_location_json TEXT,
+            completed INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(peer_id, message_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_cleanup_due
+            ON cleanup_targets(state, due_at, next_retry, id);
+        INSERT OR IGNORE INTO app_settings(key, value, updated_at)
+            SELECT 'setup_complete', CASE WHEN EXISTS(SELECT 1 FROM users) THEN 'true' ELSE 'false' END, '';
         "#,
     )?;
     tx.execute(
@@ -1701,6 +2009,70 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         "#,
         params![SCHEMA_VERSION, timestamp_now()?],
     )?;
+    tx.commit()?;
+    ensure_phase10_schema(connection)?;
+    Ok(())
+}
+
+fn ensure_phase10_schema(connection: &mut Connection) -> Result<(), MetadataError> {
+    if !table_exists(connection, "cleanup_targets")? {
+        return Ok(());
+    }
+    for (column, definition) in [
+        ("target_kind", "TEXT NOT NULL DEFAULT 'message'"),
+        ("state", "TEXT NOT NULL DEFAULT 'pending'"),
+        ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("next_retry", "INTEGER NOT NULL DEFAULT 0"),
+        ("lease", "TEXT"),
+        ("lease_until", "INTEGER NOT NULL DEFAULT 0"),
+        ("error", "TEXT"),
+        ("evidence_location_json", "TEXT"),
+    ] {
+        if !column_exists(connection, "cleanup_targets", column)? {
+            connection.execute(
+                &format!("ALTER TABLE cleanup_targets ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
+    }
+    connection.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_cleanup_due
+            ON cleanup_targets(state, due_at, next_retry, id);
+        CREATE TABLE IF NOT EXISTS transfer_send_attempts (
+            job_id TEXT NOT NULL REFERENCES transfer_jobs(id),
+            chunk_order INTEGER NOT NULL,
+            attempt_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            started_at INTEGER NOT NULL,
+            finished_at INTEGER,
+            location_json TEXT,
+            PRIMARY KEY(job_id, chunk_order, attempt_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_transfer_send_attempt_state
+            ON transfer_send_attempts(job_id, state);
+        "#,
+    )?;
+    Ok(())
+}
+
+fn backfill_cleanup_outbox(connection: &mut Connection) -> Result<(), MetadataError> {
+    if !table_exists(connection, "cleanup_targets")? {
+        return Ok(());
+    }
+    let manifests = {
+        let mut statement = connection.prepare(
+            "SELECT manifest_json FROM object_manifests WHERE commit_state='tombstoned'",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let tx = connection.transaction()?;
+    for json in manifests {
+        let manifest: ObjectManifest = serde_json::from_str(&json)?;
+        crate::durable::enqueue_manifest_cleanup(&tx, &manifest)?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -2049,6 +2421,21 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool, MetadataErr
     Ok(exists)
 }
 
+fn column_exists(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, MetadataError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn timestamp_now() -> Result<String, MetadataError> {
     Ok(OffsetDateTime::now_utc().format(&Rfc3339)?)
 }
@@ -2326,9 +2713,12 @@ mod tests {
                 revoked_at: None,
             })
             .expect("session");
+        store
+            .create_user("u10", "backup", "hash", "superadmin", "")
+            .expect("backup superadmin");
         store.delete_user(&user.id).expect("delete");
         assert!(store.get_session("c2").expect("session").is_none());
-        assert_eq!(store.user_count().expect("count"), 0);
+        assert_eq!(store.user_count().expect("count"), 1);
     }
 
     #[test]

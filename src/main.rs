@@ -340,7 +340,9 @@ fn run_users(command: UsersCommand) -> Result<(), String> {
                 .get_user(&normalized)
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("no such account: {username}"))?;
-            if telegram_s3::auth::is_superadmin(&user) && store.user_count().unwrap_or(0) <= 1 {
+            if telegram_s3::auth::is_superadmin(&user)
+                && store.enabled_superadmin_count().unwrap_or(0) <= 1
+            {
                 return Err("refusing to delete the last superadmin account".to_string());
             }
             store

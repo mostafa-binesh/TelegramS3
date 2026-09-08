@@ -1,5 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import Sidebar from './components/Sidebar.svelte';
+  import HealthBadge from './components/HealthBadge.svelte';
+  import SetupWizard from './components/SetupWizard.svelte';
+  import Transfers from './components/Transfers.svelte';
+  import {getSetup} from './lib/api';
   import {
     createBucket,
     createFolder,
@@ -33,8 +38,9 @@
 
   let session: SessionState | null = null;
   let overview: OverviewState | null = null;
-  let view: 'overview' | 'users' | 'buckets' = 'overview';
+  let view: 'overview' | 'users' | 'buckets' | 'transfers' | 'recovery' | 'telegram' = 'overview';
   let loading = true;
+  let setupRequired = false;
   let busy = false;
   let message = '';
   let error = '';
@@ -79,6 +85,10 @@
 
   onMount(() => {
     void bootstrapApp();
+    let disposed=false; let timer:ReturnType<typeof setTimeout>;
+    const poll=async()=>{if(session?.authenticated&&!document.hidden)await refreshOverview();if(!disposed)timer=setTimeout(poll,error?30000:10000);};
+    timer=setTimeout(poll,10000);
+    return ()=>{disposed=true;clearTimeout(timer);};
   });
 
   function normalizeError(cause: unknown) {
@@ -114,6 +124,7 @@
     error = '';
     try {
       session = await getSession();
+      if(!session.authenticated) setupRequired=(await getSetup()).setup_required;
       if (session?.authenticated) {
         overview = await getOverview();
         await refreshTelegramSettings();
@@ -229,10 +240,11 @@
     }
   }
 
-  async function switchView(next: 'overview' | 'users' | 'buckets') {
+  async function switchView(next: 'overview' | 'users' | 'buckets' | 'transfers' | 'recovery' | 'telegram') {
     view = next;
     error = '';
-    if (next === 'overview') await refreshOverview();
+    if (next === 'overview' || next === 'recovery') await refreshOverview();
+    if (next === 'telegram') await refreshTelegramSettings();
     if (next === 'users') await refreshUsers();
     if (next === 'buckets') {
       await refreshBuckets();
@@ -405,49 +417,21 @@
   <title>Telegram S3 — Management</title>
 </svelte:head>
 
-<main class="shell">
-  <section class="hero">
-    <div class="hero-copy">
-      <p class="eyebrow">Authenticated management console</p>
-      <h1>Telegram-backed storage.</h1>
-      <p class="lede">
-        Authorize the Telegram storage account, manage operator access, and browse
-        buckets and objects behind a signed-in admin session.
-      </p>
-    </div>
-    <div class="hero-panel">
-      <div class="panel-row">
-        <span class="panel-label">Session</span>
-        <span class:badge-ok={session?.authenticated} class:badge-warn={!session?.authenticated} class="badge">
-          {session?.authenticated ? 'Authenticated' : 'Locked'}
-        </span>
-      </div>
-      <div class="panel-row">
-        <span class="panel-label">Signed in as</span>
-        <span class="panel-value">{session?.user?.username ?? '—'}</span>
-      </div>
-    </div>
-  </section>
-
+<main class="shell" class:signed-in={session?.authenticated}>
+  {#if session?.authenticated}
+    <Sidebar {view} username={session.user?.username ?? ''} onNavigate={switchView} onLogout={handleLogout}/>
+    <header class="console-header"><div><p class="card-label">Workspace</p><h1>{view==='users'?'Operators':view==='telegram'?'Telegram settings':view.charAt(0).toUpperCase()+view.slice(1)}</h1></div><HealthBadge state={overview?.telegram?.connection_state ?? 'checking'} detail={overview?.telegram?.detail ?? 'Waiting for a connection check'} checkedAt={overview?.checked_at}/></header>
+  {/if}
   {#if loading}
     <section class="card surface"><p>Loading…</p></section>
+  {:else if setupRequired && !session?.authenticated}
+    <SetupWizard onCreated={(created)=>{session=created;setupRequired=false;view='telegram';void refreshOverview();void refreshTelegramSettings();}}/>
   {:else if !session?.authenticated}
     <section class="login-grid">
       <div class="card surface intro-card">
         <p class="card-label">Operator access</p>
         <h2>Sign in to manage storage</h2>
-        <p>
-          Accounts live in the local metadata store and are added by an existing
-          superadmin or via the <code>telegram-s3 users</code> CLI. Guests only see
-          this screen.
-        </p>
-        <div class="callout">
-          <strong>Security notes</strong>
-          <ul>
-            <li>All management APIs require a signed-in session.</li>
-            <li>Login attempts are rate-limited and locked out after repeated failures.</li>
-          </ul>
-        </div>
+        <p>Sign in to browse files, follow transfers, and manage your Telegram storage connection.</p>
       </div>
 
       <form class="card form-card surface" on:submit|preventDefault={handleLogin}>
@@ -463,26 +447,15 @@
           <p class="fine-print error-hint">{loginError}</p>
         {/if}
         <button class="primary" type="submit" disabled={busy}>Sign in</button>
-        <p class="fine-print">
-          The session cookie is HTTP-only and scoped to <code>/_admin</code>.
-        </p>
+
       </form>
     </section>
   {:else}
-    <section class="toolbar card surface">
-      <div>
-        <p class="card-label">Operator</p>
-        <strong>{session.user?.username}</strong>
-      </div>
-      <div class="toolbar-actions">
-        <button class:active={view === 'overview'} on:click={() => switchView('overview')}>Overview</button>
-        <button class:active={view === 'buckets'} on:click={() => switchView('buckets')}>Buckets</button>
-        <button class:active={view === 'users'} on:click={() => switchView('users')}>Operators</button>
-        <button class="ghost" on:click={handleLogout} disabled={busy}>Logout</button>
-      </div>
-    </section>
-
-    {#if view === 'overview'}
+    {#if view === 'transfers'}
+      <Transfers csrf={session?.csrf_token}/>
+    {:else if view === 'recovery'}
+      <Transfers csrf={session?.csrf_token} recoveryOnly/>
+    {:else if view === 'telegram'}
       <article class="card surface tg-callout">
         <div class="tg-banner">
           <div class="tg-copy">
@@ -560,6 +533,7 @@
         />
         <button class="ghost" type="button" on:click={() => toggleWizard(false)}>Close wizard</button>
       {/if}
+    {:else if view === 'overview'}
       <section class="cards">
         <article class="card metric">
           <p class="card-label">Buckets</p>
@@ -815,10 +789,11 @@
 </main>
 
 <style>
-  .active {
-    font-weight: 700;
-    text-decoration: underline;
-  }
+  .shell.signed-in{max-width:none;margin-left:230px;padding:30px 40px;min-height:100vh}
+  .console-header{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:30px}
+  .console-header h1{font-size:26px;letter-spacing:-.04em;margin:4px 0}
+  @media(max-width:760px){.shell.signed-in{margin-left:0;padding:0 16px 24px}.console-header{margin-top:24px;align-items:flex-start;flex-direction:column}}
+
   .error-hint {
     color: var(--danger, #b00020);
   }
