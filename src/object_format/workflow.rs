@@ -1,5 +1,5 @@
 use super::*;
-use crate::durable::{CleanupTarget, TransferJob};
+use crate::durable::{CleanupTarget, TransferJob, TransferWriteConditionals};
 use std::sync::atomic::Ordering;
 
 impl ObjectFormatService {
@@ -10,8 +10,9 @@ impl ObjectFormatService {
         key: &str,
         content_type: &str,
         body: Option<StreamingBlob>,
+        conditionals: Option<TransferWriteConditionals>,
     ) -> Result<TransferJob, ObjectFormatError> {
-        self.enqueue_with_part(bucket, key, content_type, body, None)
+        self.enqueue_with_part(bucket, key, content_type, body, None, conditionals)
             .await
     }
 
@@ -22,6 +23,7 @@ impl ObjectFormatService {
         content_type: &str,
         body: Option<StreamingBlob>,
         part: Option<(Uuid, u32, Option<String>)>,
+        conditionals: Option<TransferWriteConditionals>,
     ) -> Result<TransferJob, ObjectFormatError> {
         let object_id = Uuid::new_v4();
         let id = self.metadata.begin_transfer(object_id, bucket, key)?;
@@ -91,19 +93,21 @@ impl ObjectFormatService {
                 chunks,
                 whole_checksum: hex::encode(hasher.finalize()),
             });
-            if let Some((_, _, Some(expected))) = &part {
-                if *expected != manifest.checksum.whole_object {
-                    return Err(ObjectFormatError::ChecksumMismatch {
-                        scope: "multipart part".into(),
-                        expected: expected.clone(),
-                        actual: manifest.checksum.whole_object.clone(),
-                    });
-                }
+            if let Some((_, _, Some(expected))) = &part
+                && *expected != manifest.checksum.whole_object
+            {
+                return Err(ObjectFormatError::ChecksumMismatch {
+                    scope: "multipart part".into(),
+                    expected: expected.clone(),
+                    actual: manifest.checksum.whole_object.clone(),
+                });
             }
             write_json_file(&dir.join(MANIFEST_FILE_NAME), &manifest)?;
             let operation = self
                 .metadata
                 .stage_manifest(OperationKind::Put, manifest.clone())?;
+            self.metadata
+                .set_transfer_conditionals(&id, conditionals.as_ref())?;
             self.metadata
                 .queue_transfer(&id, operation, manifest.chunks.len())?;
             self.metadata
@@ -243,6 +247,22 @@ impl ObjectFormatService {
             }
         });
         let service = self.clone();
+        let mut recovery_shutdown = shutdown_rx.clone();
+        let recovery_handle = tokio::spawn(async move {
+            let _ = service.refresh_recovery_snapshot().await;
+            loop {
+                if *recovery_shutdown.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                        let _ = service.refresh_recovery_snapshot().await;
+                    }
+                    _ = recovery_shutdown.changed() => {}
+                }
+            }
+        });
+        let service = self.clone();
         let mut cleanup_shutdown = shutdown_rx;
         let cleanup_handle = tokio::spawn(async move {
             loop {
@@ -277,6 +297,7 @@ impl ObjectFormatService {
         });
         if let Ok(mut handles) = self.worker_runtime.handles.lock() {
             handles.push(transfer_handle);
+            handles.push(recovery_handle);
             handles.push(cleanup_handle);
         }
     }
@@ -613,20 +634,19 @@ impl ObjectFormatService {
         if self
             .metadata
             .cleanup_complete_for_object(&target.object_id)?
+            && let Ok(object_id) = Uuid::parse_str(&target.object_id)
         {
-            if let Ok(object_id) = Uuid::parse_str(&target.object_id) {
-                let manifest_path = self.manifest_path(object_id);
-                match fs::remove_file(manifest_path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
-                let chunk_dir = self.chunk_dir(object_id);
-                match fs::remove_dir_all(chunk_dir) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
+            let manifest_path = self.manifest_path(object_id);
+            match fs::remove_file(manifest_path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            let chunk_dir = self.chunk_dir(object_id);
+            match fs::remove_dir_all(chunk_dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
             }
         }
         Ok(())

@@ -26,6 +26,8 @@ use tokio::io::AsyncWriteExt;
 use tracing::warn;
 use uuid::Uuid;
 
+pub(crate) type RecoverySnapshot = (Option<i64>, Vec<RecoveryIssue>, Option<String>);
+
 const CHECKSUM_ALGORITHM: &str = "sha256";
 const ENCRYPTION_FORMAT: &str = "chacha20poly1305-v1";
 pub const GARBAGE_COLLECTION_RETENTION_SECONDS: i64 = 7 * 24 * 60 * 60;
@@ -68,7 +70,7 @@ pub struct ReadSpan {
     pub checksum: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ReconciliationReport {
     pub staged_objects: u64,
     pub committed_objects: u64,
@@ -249,7 +251,7 @@ pub struct ObjectFormatService {
     storage_chat_id: Arc<RwLock<String>>,
     worker_runtime: Arc<WorkerRuntime>,
     read_pins: Arc<Mutex<HashMap<Uuid, u64>>>,
-    recovery_snapshot: Arc<RwLock<(Option<i64>, Vec<RecoveryIssue>, Option<String>)>>,
+    recovery_snapshot: Arc<RwLock<RecoverySnapshot>>,
     staging_budget: u64,
     encryption: ObjectEncryption,
 }
@@ -340,6 +342,7 @@ impl ObjectFormatService {
             ObjectEncryption::from_master_key(&master_key),
         )?;
         service.staging_budget = config.staging_budget()?;
+        let _ = service.refresh_recovery_snapshot().await;
         Ok(service)
     }
 
@@ -461,10 +464,18 @@ impl ObjectFormatService {
         &self,
         bucket: &str,
         key: &str,
+        if_match: Option<&s3s::dto::ETagCondition>,
+        if_match_last_modified_time: Option<&s3s::dto::Timestamp>,
+        if_match_size: Option<i64>,
     ) -> Result<Option<ObjectManifest>, ObjectFormatError> {
-        Ok(self
-            .metadata
-            .delete_active_key(bucket, key, "deleted via S3")?)
+        Ok(self.metadata.delete_active_key(
+            bucket,
+            key,
+            "deleted via S3",
+            if_match,
+            if_match_last_modified_time,
+            if_match_size,
+        )?)
     }
 
     pub fn tombstone_manifest(
@@ -473,6 +484,23 @@ impl ObjectFormatService {
         reason: &str,
     ) -> Result<ObjectManifest, ObjectFormatError> {
         Ok(self.metadata.tombstone_manifest(object_id, reason)?)
+    }
+
+    pub fn tombstone_manifest_with_conditionals(
+        &self,
+        object_id: Uuid,
+        reason: &str,
+        if_match: Option<&s3s::dto::ETagCondition>,
+        if_match_last_modified_time: Option<&s3s::dto::Timestamp>,
+        if_match_size: Option<i64>,
+    ) -> Result<ObjectManifest, ObjectFormatError> {
+        Ok(self.metadata.tombstone_manifest_with_conditionals(
+            object_id,
+            reason,
+            if_match,
+            if_match_last_modified_time,
+            if_match_size,
+        )?)
     }
 
     pub fn initiate_multipart_upload(
@@ -538,6 +566,7 @@ impl ObjectFormatService {
                 &session.content_type,
                 body,
                 Some((upload_id, part_number, checksum.map(str::to_string))),
+                None,
             )
             .await?;
         self.wait_transfer(&job.id).await?;
@@ -656,6 +685,7 @@ impl ObjectFormatService {
                 &plan.content_type,
                 Some(body),
                 Some((plan.upload_id, 0, None)),
+                None,
             )
             .await?;
         self.wait_transfer(&job.id).await
@@ -868,15 +898,37 @@ impl ObjectFormatService {
         Ok(issues)
     }
 
-    pub fn cached_recovery_issues(&self) -> Result<Vec<RecoveryIssue>, String> {
+    pub async fn refresh_recovery_snapshot(&self) -> Result<(), ObjectFormatError> {
+        let checked_at = OffsetDateTime::now_utc().unix_timestamp();
+        match self.recovery_issues().await {
+            Ok(issues) => {
+                if let Ok(mut snapshot) = self.recovery_snapshot.write() {
+                    *snapshot = (Some(checked_at), issues, None);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let previous_issues = self
+                    .recovery_snapshot
+                    .read()
+                    .ok()
+                    .map(|snapshot| snapshot.1.clone())
+                    .unwrap_or_default();
+                if let Ok(mut snapshot) = self.recovery_snapshot.write() {
+                    *snapshot = (Some(checked_at), previous_issues, Some(message.clone()));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn cached_recovery_snapshot(&self) -> Result<RecoverySnapshot, String> {
         let snapshot = self
             .recovery_snapshot
             .read()
             .map_err(|_| "recovery cache unavailable".to_string())?;
-        match &snapshot.2 {
-            Some(error) => Err(error.clone()),
-            None => Ok(snapshot.1.clone()),
-        }
+        Ok(snapshot.clone())
     }
 
     pub fn plan_upload(&self, content_length: u64) -> Result<ChunkPlan, ObjectFormatError> {
@@ -1027,8 +1079,11 @@ impl ObjectFormatService {
         key: &str,
         content_type: &str,
         body: Option<StreamingBlob>,
+        conditionals: Option<crate::durable::TransferWriteConditionals>,
     ) -> Result<ObjectManifest, ObjectFormatError> {
-        let job = self.enqueue_stream(bucket, key, content_type, body).await?;
+        let job = self
+            .enqueue_stream(bucket, key, content_type, body, conditionals)
+            .await?;
         self.wait_transfer(&job.id).await
     }
 
@@ -2424,6 +2479,32 @@ mod tests {
         let status = service.bootstrap().await.expect("bootstrap status");
         assert_eq!(status.committed_objects, 1);
         assert_eq!(status.recovery_required_objects, 0);
+    }
+
+    #[tokio::test]
+    async fn recovery_snapshot_refreshes_cached_issue_list() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        let orphan_dir = tempdir
+            .path()
+            .join("data")
+            .join(STAGING_ROOT)
+            .join("manual-orphan");
+        std::fs::create_dir_all(&orphan_dir).expect("orphan dir");
+
+        service
+            .refresh_recovery_snapshot()
+            .await
+            .expect("refresh snapshot");
+        let snapshot = service.cached_recovery_snapshot().expect("snapshot");
+        assert!(snapshot.0.is_some());
+        assert!(
+            snapshot
+                .1
+                .iter()
+                .any(|issue| issue.kind == "orphaned_staging_dir")
+        );
+        assert!(snapshot.2.is_none());
     }
 
     #[tokio::test]

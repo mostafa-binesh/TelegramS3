@@ -68,6 +68,7 @@ export interface RecoveryState {
   issue_count: number;
   scan_ok: boolean;
   scan_error?: string | null;
+  checked_at?: string | null;
   issues: RecoveryIssue[];
 }
 

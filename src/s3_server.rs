@@ -1,5 +1,6 @@
 use crate::admin::AdminUiState;
 use crate::config::AppConfig;
+use crate::durable::TransferWriteConditionals;
 use crate::multipart::MultipartPartPlan;
 use crate::object_format::ObjectFormatService;
 use crate::redact;
@@ -668,12 +669,20 @@ impl S3 for TelegramS3Backend {
             input.if_none_match.as_ref(),
             current_manifest.as_ref(),
         )?;
+        let conditionals =
+            write_conditionals_snapshot(input.if_match.as_ref(), input.if_none_match.as_ref());
         let content_type = input
             .content_type
             .unwrap_or_else(|| "application/octet-stream".to_string());
         let manifest = self
             .object_format
-            .put_stream(&input.bucket, &input.key, &content_type, input.body)
+            .put_stream(
+                &input.bucket,
+                &input.key,
+                &content_type,
+                input.body,
+                conditionals,
+            )
             .await
             .map_err(map_object_error)?;
         Ok(S3Response::new(s3s::dto::PutObjectOutput {
@@ -985,7 +994,7 @@ impl S3 for TelegramS3Backend {
             .unwrap_or(manifest.content_type.clone());
         let copied = self
             .object_format
-            .put_stream(&input.bucket, &input.key, &content_type, Some(body))
+            .put_stream(&input.bucket, &input.key, &content_type, Some(body), None)
             .await
             .map_err(map_object_error)?;
         let copy_result = s3s::dto::CopyObjectResult {
@@ -1106,7 +1115,13 @@ impl S3 for TelegramS3Backend {
             )?;
             Some(
                 self.object_format
-                    .tombstone_manifest(manifest.object_id, "deleted via S3")
+                    .tombstone_manifest_with_conditionals(
+                        manifest.object_id,
+                        "deleted via S3",
+                        input.if_match.as_ref(),
+                        input.if_match_last_modified_time.as_ref(),
+                        input.if_match_size,
+                    )
                     .map_err(map_object_error)?,
             )
         } else {
@@ -1123,7 +1138,13 @@ impl S3 for TelegramS3Backend {
                 )?;
             }
             self.object_format
-                .delete_object(&input.bucket, &input.key)
+                .delete_object(
+                    &input.bucket,
+                    &input.key,
+                    input.if_match.as_ref(),
+                    input.if_match_last_modified_time.as_ref(),
+                    input.if_match_size,
+                )
                 .map_err(map_object_error)?
         };
         let version_id = deleted.map(|manifest| manifest.object_id.to_string());
@@ -1315,6 +1336,9 @@ fn map_object_error(error: crate::object_format::ObjectFormatError) -> s3s::S3Er
         crate::object_format::ObjectFormatError::Metadata(
             crate::metadata::MetadataError::ManifestNotFound(_),
         ) => s3s::S3Error::with_message(S3ErrorCode::NoSuchKey, "object does not exist"),
+        crate::object_format::ObjectFormatError::Metadata(
+            crate::metadata::MetadataError::PreconditionFailed(message),
+        ) => s3s::S3Error::with_message(S3ErrorCode::PreconditionFailed, message),
         other => s3s::S3Error::with_message(S3ErrorCode::InternalError, other.to_string()),
     }
 }
@@ -1458,6 +1482,33 @@ fn enforce_write_conditionals(
         ));
     }
     Ok(())
+}
+
+fn write_conditionals_snapshot(
+    if_match: Option<&ETagCondition>,
+    if_none_match: Option<&ETagCondition>,
+) -> Option<TransferWriteConditionals> {
+    if if_match.is_none() && if_none_match.is_none() {
+        return None;
+    }
+    Some(TransferWriteConditionals {
+        if_match: if_match.map(|condition| {
+            condition
+                .to_http_header()
+                .expect("valid if-match header")
+                .to_str()
+                .expect("utf8 if-match header")
+                .to_string()
+        }),
+        if_none_match: if_none_match.map(|condition| {
+            condition
+                .to_http_header()
+                .expect("valid if-none-match header")
+                .to_str()
+                .expect("utf8 if-none-match header")
+                .to_string()
+        }),
+    })
 }
 
 fn enforce_copy_source_conditionals(

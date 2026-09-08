@@ -2,7 +2,7 @@
 use crate::manifest::TelegramLocation;
 use crate::metadata::{DbUser, MetadataError, MetadataStore};
 use rusqlite::{OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -25,9 +25,17 @@ pub struct TransferJob {
     pub next_retry: i64,
     #[serde(skip)]
     pub lease: Option<String>,
+    #[serde(skip)]
+    pub write_conditionals_json: Option<String>,
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TransferWriteConditionals {
+    pub if_match: Option<String>,
+    pub if_none_match: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,12 +73,13 @@ fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferJob> {
         attempts: row.get(9)?,
         next_retry: row.get(10)?,
         lease: row.get(11)?,
-        error: row.get(12)?,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
+        write_conditionals_json: row.get(12)?,
+        error: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }
-const COLUMNS: &str = "id,object_id,operation_id,bucket,object_key,state,bytes,chunks_done,chunks_total,attempts,next_retry,lease,error,created_at,updated_at";
+const COLUMNS: &str = "id,object_id,operation_id,bucket,object_key,state,bytes,chunks_done,chunks_total,attempts,next_retry,lease,write_conditionals_json,error,created_at,updated_at";
 
 pub(crate) fn enqueue_part_cleanup(
     tx: &rusqlite::Transaction<'_>,
@@ -99,12 +108,25 @@ pub(crate) fn enqueue_part_cleanup(
     Ok(())
 }
 
+pub(crate) fn serialize_write_conditionals(
+    conditionals: &TransferWriteConditionals,
+) -> Result<String, MetadataError> {
+    Ok(serde_json::to_string(conditionals)?)
+}
+
 pub(crate) fn enqueue_manifest_cleanup(
     tx: &rusqlite::Transaction<'_>,
     manifest: &crate::manifest::ObjectManifest,
 ) -> Result<(), MetadataError> {
+    enqueue_manifest_cleanup_at(tx, manifest, now() + 7 * 86400)
+}
+
+pub(crate) fn enqueue_manifest_cleanup_at(
+    tx: &rusqlite::Transaction<'_>,
+    manifest: &crate::manifest::ObjectManifest,
+    due_at: i64,
+) -> Result<(), MetadataError> {
     let object_id = manifest.object_id.to_string();
-    let due_at = now() + 7 * 86400;
     tx.execute(
         "INSERT OR IGNORE INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,0,'evidence',?3)",
         params![object_id, format!("evidence:{object_id}"), due_at],
@@ -413,6 +435,25 @@ impl MetadataStore {
         self.with_connection(|c| {
             if c.execute("UPDATE transfer_jobs SET operation_id=?2,chunks_total=?3,state='queued',updated_at=?4,lease_until=0 WHERE id=?1 AND state='receiving'",params![id,operation.to_string(),chunks as i64,now()])? != 1 {
                 return Err(MetadataError::InvalidManifest("upload cannot be queued".into()));
+            }
+            Ok(())
+        })
+    }
+
+    pub fn set_transfer_conditionals(
+        &self,
+        id: &str,
+        conditionals: Option<&TransferWriteConditionals>,
+    ) -> Result<(), MetadataError> {
+        let json = conditionals.map(serialize_write_conditionals).transpose()?;
+        self.with_connection(|c| {
+            if c.execute(
+                "UPDATE transfer_jobs SET write_conditionals_json=?2,updated_at=?3 WHERE id=?1 AND state='receiving'",
+                params![id, json, now()],
+            )? != 1 {
+                return Err(MetadataError::InvalidManifest(
+                    "transfer conditionals could not be recorded".into(),
+                ));
             }
             Ok(())
         })

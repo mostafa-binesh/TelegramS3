@@ -339,10 +339,7 @@ impl AdminUiState {
         }
         if method == Method::POST && rest == "recovery/repair" {
             self.object_format.ensure_workers();
-            return json_response(
-                StatusCode::ACCEPTED,
-                serde_json::json!({"message":"Retry individual recoverable jobs from Transfers; legacy staging is scanned every 60 seconds"}),
-            );
+            return self.handle_recovery_repair().await;
         }
         match (method, rest) {
             (Method::POST, "session/logout") => self.handle_logout(&principal).await,
@@ -852,7 +849,10 @@ impl AdminUiState {
         if key.is_empty() {
             return json_error(StatusCode::BAD_REQUEST, "key is required");
         }
-        match self.object_format.delete_object(&bucket, &key) {
+        match self
+            .object_format
+            .delete_object(&bucket, &key, None, None, None)
+        {
             Ok(_) => json_response(StatusCode::OK, serde_json::json!({ "ok": true })),
             Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         }
@@ -1304,7 +1304,7 @@ impl AdminUiState {
         let body = body_to_streaming_blob(request.into_body());
         let manifest = match self
             .object_format
-            .put_stream(&bucket, &key, &content_type, Some(body))
+            .put_stream(&bucket, &key, &content_type, Some(body), None)
             .await
         {
             Ok(manifest) => manifest,
@@ -1332,9 +1332,9 @@ impl AdminUiState {
             .status()
             .unwrap_or_else(|_| empty_object());
         let durable = self.object_format.durable_metrics().unwrap_or_default();
-        let recovery = match self.object_format.recovery_issues().await {
-            Ok(issues) => RecoveryWire::from_issues(issues),
-            Err(error) => RecoveryWire::failed(error.to_string()),
+        let recovery = match self.object_format.cached_recovery_snapshot() {
+            Ok(snapshot) => RecoveryWire::from_snapshot(snapshot),
+            Err(error) => RecoveryWire::failed(error),
         };
         let health = self.telegram_health_snapshot().await;
         let session_state = health.status.session_state.clone();
@@ -1386,6 +1386,19 @@ impl AdminUiState {
                 "checks": checks,
             }),
         )
+    }
+
+    async fn handle_recovery_repair(&self) -> Response<Body> {
+        match self.object_format.reconcile().await {
+            Ok(report) => json_response(
+                StatusCode::OK,
+                serde_json::json!({
+                    "ok": true,
+                    "report": report,
+                }),
+            ),
+            Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        }
     }
 
     // ---- static (SPA) serving ------------------------------------------------
@@ -1881,6 +1894,7 @@ impl From<RecoveryIssueModel> for RecoveryIssueWire {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 struct RecoveryWire {
+    checked_at: Option<String>,
     issue_count: u64,
     scan_ok: bool,
     scan_error: Option<String>,
@@ -1888,11 +1902,14 @@ struct RecoveryWire {
 }
 
 impl RecoveryWire {
-    fn from_issues(issues: Vec<RecoveryIssueModel>) -> Self {
+    fn from_snapshot(snapshot: crate::object_format::RecoverySnapshot) -> Self {
+        let (checked_at, issues, scan_error) = snapshot;
         Self {
             issue_count: issues.len() as u64,
-            scan_ok: true,
-            scan_error: None,
+            scan_ok: scan_error.is_none(),
+            scan_error,
+            checked_at: checked_at
+                .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok().map(rfc3339)),
             issues: issues.into_iter().map(Into::into).collect(),
         }
     }
@@ -1902,6 +1919,7 @@ impl RecoveryWire {
             issue_count: 0,
             scan_ok: false,
             scan_error: Some(error),
+            checked_at: None,
             issues: Vec::new(),
         }
     }

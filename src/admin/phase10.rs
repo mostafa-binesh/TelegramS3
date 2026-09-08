@@ -91,6 +91,7 @@ impl AdminUiState {
                 &key,
                 &content_type,
                 Some(body_to_streaming_blob(request.into_body())),
+                None,
             )
             .await
         {

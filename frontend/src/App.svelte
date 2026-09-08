@@ -108,6 +108,16 @@
     }
     return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
   }
+  function formatTimestamp(value?: string | null) {
+    if (!value) return 'unknown';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+      ? value
+      : new Intl.DateTimeFormat('en-US', {
+          dateStyle: 'medium',
+          timeStyle: 'short'
+        }).format(date);
+  }
   function crumbs() {
     return currentPrefix.split('/').filter(Boolean);
   }
@@ -564,6 +574,9 @@
               Click an issue to see the exact files or Telegram objects that are missing,
               unreadable, or corrupted.
             </p>
+            {#if overview?.recovery?.checked_at}
+              <p class="fine-print">Snapshot refreshed {formatTimestamp(overview.recovery.checked_at)}.</p>
+            {/if}
           </div>
           {#if (overview?.recovery?.issues ?? []).length > 0 || overview?.recovery?.scan_error}
             <button class="ghost" type="button" on:click={() => (recoveryOpen = !recoveryOpen)}>

@@ -158,6 +158,31 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     assert!(!overview.body.contains("\"endpoint\""));
     assert!(overview.body.contains("\"checks\""));
 
+    let orphaned_staging = tempdir
+        .path()
+        .join("data")
+        .join("staging")
+        .join("orphaned-repair");
+    fs::create_dir_all(&orphaned_staging).expect("orphaned staging dir");
+    fs::write(orphaned_staging.join("note.txt"), "orphaned").expect("orphaned staging file");
+
+    let repair = http_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/recovery/repair",
+        &[
+            ("Cookie", cookie_header.as_str()),
+            ("X-CSRF-Token", csrf.as_str()),
+        ],
+        b"",
+    )
+    .await;
+    assert_eq!(repair.status, 200);
+    assert!(repair.body.contains("\"ok\":true"));
+    assert!(repair.body.contains("\"report\""));
+    assert!(repair.body.contains("\"quarantined_objects\""));
+
     let users = http_request(
         &client,
         &bind_addr,
