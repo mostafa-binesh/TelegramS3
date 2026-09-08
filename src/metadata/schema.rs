@@ -440,7 +440,7 @@ fn column_exists(
 fn create_private_metadata_file(path: &std::path::Path) -> Result<(), MetadataError> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let _ = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
