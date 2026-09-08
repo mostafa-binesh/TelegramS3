@@ -125,6 +125,23 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     assert_eq!(session.status, 200);
     assert!(session.body.contains("\"authenticated\":false"));
 
+    for attempt in 0..7 {
+        let failed_login = http_request(
+            &client,
+            &bind_addr,
+            "POST",
+            "/_admin/api/session/login",
+            &[],
+            br#"{"username":"admin","password":"wrong-password"}"#,
+        )
+        .await;
+        assert_eq!(
+            failed_login.status, 401,
+            "failed login attempt {attempt} should stay unauthorized"
+        );
+        assert!(failed_login.body.contains("invalid username or password"));
+    }
+
     let login = http_request(
         &client,
         &bind_addr,
@@ -144,6 +161,41 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
         .expect("session cookie");
     let csrf = json_field(&login.body, "csrf_token").expect("csrf token");
     let cookie_header = cookie_value(&cookie);
+
+    let post_success_failed_login = http_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/session/login",
+        &[],
+        br#"{"username":"admin","password":"wrong-password"}"#,
+    )
+    .await;
+    assert_eq!(post_success_failed_login.status, 401);
+    assert!(
+        post_success_failed_login
+            .body
+            .contains("invalid username or password")
+    );
+
+    let post_success_failed_login_2 = http_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/session/login",
+        &[],
+        br#"{"username":"admin","password":"wrong-password"}"#,
+    )
+    .await;
+    assert_eq!(
+        post_success_failed_login_2.status, 401,
+        "successful login should reset the limiter window"
+    );
+    assert!(
+        post_success_failed_login_2
+            .body
+            .contains("invalid username or password")
+    );
 
     let overview = http_request(
         &client,

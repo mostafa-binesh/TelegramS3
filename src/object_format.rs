@@ -2288,10 +2288,13 @@ mod tests {
     use crate::config::AppConfig;
     use crate::manifest::CommittedManifestArgs;
     use crate::metadata::TelegramBootstrapSettings;
+    use crate::multipart::{MultipartCompletionPlan, MultipartPartPlan};
     use crate::telegram::{
         TelegramConnectionHealth, TelegramConnectionState, TelegramTransportManager,
     };
+    use bytes::Bytes;
     use std::env;
+    use std::sync::atomic::Ordering;
     use tempfile::TempDir;
     use time::Duration;
 
@@ -2394,6 +2397,113 @@ mod tests {
         let report = service.reconcile().await.expect("reconcile");
         assert_eq!(report.committed_objects, 1);
         assert_eq!(report.staged_objects, 0);
+    }
+
+    #[tokio::test]
+    async fn multipart_completion_is_idempotent_and_abort_closes_upload() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+
+        let upload = service
+            .initiate_multipart_upload("bucket", "multipart.txt", "text/plain", Some("sha256"))
+            .expect("initiate multipart");
+        let part = service
+            .upload_multipart_part(
+                upload.upload_id,
+                1,
+                Some(s3s::dto::StreamingBlob::from_bytes(Bytes::from_static(
+                    b"hello multipart",
+                ))),
+                None,
+            )
+            .await
+            .expect("upload part");
+        let plan = MultipartCompletionPlan {
+            upload_id: upload.upload_id,
+            object_id: upload.upload_id,
+            bucket: upload.bucket.clone(),
+            key: upload.key.clone(),
+            content_type: upload.content_type.clone(),
+            checksum_algorithm: upload.checksum_algorithm.clone(),
+            content_length: part.size,
+            parts: vec![MultipartPartPlan {
+                part_number: 1,
+                offset: 0,
+                size: part.size,
+                checksum: part.e_tag.clone(),
+                e_tag: part.e_tag.clone(),
+            }],
+        };
+
+        let completed = service
+            .complete_multipart_upload(plan.clone())
+            .await
+            .expect("complete multipart");
+        let repeat = service
+            .complete_multipart_upload(plan)
+            .await
+            .expect("repeat complete");
+        assert_eq!(completed.object_id, repeat.object_id);
+        assert_eq!(
+            completed.checksum.whole_object,
+            repeat.checksum.whole_object
+        );
+
+        let aborted = service
+            .initiate_multipart_upload("bucket", "aborted.txt", "text/plain", Some("sha256"))
+            .expect("initiate aborted multipart");
+        let _ = service
+            .upload_multipart_part(
+                aborted.upload_id,
+                1,
+                Some(s3s::dto::StreamingBlob::from_bytes(Bytes::from_static(
+                    b"aborted part",
+                ))),
+                None,
+            )
+            .await
+            .expect("upload aborted part");
+        service
+            .abort_multipart_upload(aborted.upload_id)
+            .await
+            .expect("abort multipart");
+
+        assert!(
+            service
+                .upload_multipart_part(
+                    aborted.upload_id,
+                    2,
+                    Some(s3s::dto::StreamingBlob::from_bytes(Bytes::from_static(
+                        b"late part",
+                    ))),
+                    None,
+                )
+                .await
+                .is_err(),
+            "aborted multipart upload should reject additional parts"
+        );
+        assert!(
+            service
+                .complete_multipart_upload(MultipartCompletionPlan {
+                    upload_id: aborted.upload_id,
+                    object_id: aborted.upload_id,
+                    bucket: aborted.bucket.clone(),
+                    key: aborted.key.clone(),
+                    content_type: aborted.content_type.clone(),
+                    checksum_algorithm: aborted.checksum_algorithm.clone(),
+                    content_length: 0,
+                    parts: vec![MultipartPartPlan {
+                        part_number: 1,
+                        offset: 0,
+                        size: 0,
+                        checksum: "ignored".to_string(),
+                        e_tag: "ignored".to_string(),
+                    }],
+                })
+                .await
+                .is_err(),
+            "aborted multipart upload should not complete"
+        );
     }
 
     #[tokio::test]
@@ -2505,6 +2615,25 @@ mod tests {
                 .any(|issue| issue.kind == "orphaned_staging_dir")
         );
         assert!(snapshot.2.is_none());
+    }
+
+    #[tokio::test]
+    async fn worker_runtime_can_restart_after_shutdown() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+
+        service.ensure_workers();
+        assert!(service.worker_runtime.started.load(Ordering::SeqCst));
+        service.ensure_workers();
+
+        service.shutdown_workers().await;
+        assert!(!service.worker_runtime.started.load(Ordering::SeqCst));
+
+        service.ensure_workers();
+        assert!(service.worker_runtime.started.load(Ordering::SeqCst));
+
+        service.shutdown_workers().await;
+        assert!(!service.worker_runtime.started.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

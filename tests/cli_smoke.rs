@@ -136,9 +136,33 @@ fn config_doctor_db_and_index_smoke_test() {
     let admin_addr = admin_addr.expect("admin addr");
     let healthz = http_get(&admin_addr, "/healthz");
     assert!(healthz.contains("ok"));
+    assert!(
+        !healthz.contains("secret-key"),
+        "health endpoint must not leak the configured S3 secret"
+    );
+    assert!(
+        !healthz.contains("bootstrap-secret"),
+        "health endpoint must not leak the admin bootstrap secret"
+    );
+    assert!(
+        !healthz.contains(tempdir.path().to_string_lossy().as_ref()),
+        "health endpoint must not leak raw filesystem paths"
+    );
     let metrics = http_get(&admin_addr, "/metrics");
     assert!(metrics.contains("telegram_s3_bootstrap_ok 1"));
     assert!(metrics.contains("telegram_s3_metadata_committed_objects"));
+    assert!(
+        !metrics.contains("secret-key"),
+        "metrics endpoint must not leak the configured S3 secret"
+    );
+    assert!(
+        !metrics.contains("bootstrap-secret"),
+        "metrics endpoint must not leak the admin bootstrap secret"
+    );
+    assert!(
+        !metrics.contains(tempdir.path().to_string_lossy().as_ref()),
+        "metrics endpoint must not leak raw filesystem paths"
+    );
 
     let _ = child.kill();
     let _ = child.wait();

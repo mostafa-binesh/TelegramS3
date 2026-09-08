@@ -697,7 +697,9 @@ impl MetadataStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::{CommittedManifestArgs, ObjectManifest, TelegramLocation};
     use crate::metadata::BucketRecord;
+
     fn store() -> MetadataStore {
         let s = MetadataStore::open_in_memory().unwrap();
         s.create_bucket(BucketRecord {
@@ -722,6 +724,128 @@ mod tests {
         assert!(!s.renew_transfer(&id, "stale").unwrap());
         assert!(s.renew_transfer(&id, j.lease.as_deref().unwrap()).unwrap());
     }
+
+    #[test]
+    fn durable_metrics_report_live_backlog() {
+        let s = store();
+        let transfer_id = s
+            .begin_transfer(Uuid::new_v4(), "test", "pending.txt")
+            .unwrap();
+        s.reserve_staging(&transfer_id, 8, 100).unwrap();
+
+        let manifest = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "test".into(),
+            key: "cleanup.txt".into(),
+            content_length: 0,
+            content_type: "text/plain".into(),
+            checksum_algorithm: "sha256".into(),
+            whole_object: "abcd".into(),
+            peer_id: "peer".into(),
+            message_id: 0,
+        });
+        let op = s
+            .stage_manifest(crate::metadata::OperationKind::Put, manifest.clone())
+            .unwrap();
+        s.commit_manifest(op).unwrap();
+        s.tombstone_manifest(manifest.object_id, "metrics test")
+            .unwrap();
+
+        let metrics = s.durable_metrics().unwrap();
+        assert_eq!(metrics.pending_jobs, 1);
+        assert_eq!(metrics.staging_bytes, 8);
+        assert!(metrics.cleanup_backlog > 0);
+        assert_eq!(metrics.cleanup_recovery_required, 0);
+        assert_eq!(metrics.failed_jobs, 0);
+    }
+
+    #[test]
+    fn cleanup_outbox_follows_evidence_and_retry_state_machine() {
+        let s = store();
+        let manifest = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "test".into(),
+            key: "key".into(),
+            content_length: 0,
+            content_type: "text/plain".into(),
+            checksum_algorithm: "sha256".into(),
+            whole_object: "abcd".into(),
+            peer_id: "peer".into(),
+            message_id: 0,
+        });
+        let op = s
+            .stage_manifest(crate::metadata::OperationKind::Put, manifest.clone())
+            .unwrap();
+        s.commit_manifest(op).unwrap();
+        s.tombstone_manifest(manifest.object_id, "cleanup test")
+            .unwrap();
+
+        s.make_cleanup_due(&manifest.object_id.to_string()).unwrap();
+
+        let evidence = s.claim_cleanup().unwrap().expect("evidence target");
+        assert_eq!(evidence.kind, "evidence");
+        s.complete_cleanup(
+            evidence.id,
+            &evidence.lease,
+            Some(&TelegramLocation {
+                peer_id: evidence.peer_id.clone(),
+                message_id: evidence.message_id,
+                document_id: None,
+            }),
+        )
+        .unwrap();
+        assert!(
+            s.cleanup_complete_for_object(&manifest.object_id.to_string())
+                .unwrap()
+        );
+
+        s.with_connection(|c| {
+            c.execute(
+                "INSERT INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,'message',?4)",
+                params![manifest.object_id.to_string(), "peer", 77, now() - 1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let first_message = s.claim_cleanup().unwrap().expect("first message");
+        assert_eq!(first_message.kind, "message");
+        s.fail_cleanup(
+            first_message.id,
+            &first_message.lease,
+            60,
+            "temporary cleanup failure",
+        )
+        .unwrap();
+        assert!(s.claim_cleanup().unwrap().is_none());
+        s.make_cleanup_due(&manifest.object_id.to_string()).unwrap();
+        let retried_message = s.claim_cleanup().unwrap().expect("retried message");
+        assert_eq!(retried_message.id, first_message.id);
+        s.complete_cleanup(retried_message.id, &retried_message.lease, None)
+            .unwrap();
+
+        s.with_connection(|c| {
+            c.execute(
+                "INSERT INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,'message',?4)",
+                params![manifest.object_id.to_string(), "peer", 78, now() - 1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let second_message = s.claim_cleanup().unwrap().expect("second message");
+        assert_eq!(second_message.kind, "message");
+        s.quarantine_cleanup(
+            second_message.id,
+            &second_message.lease,
+            "cleanup needs operator review",
+        )
+        .unwrap();
+
+        assert!(
+            !s.cleanup_complete_for_object(&manifest.object_id.to_string())
+                .unwrap()
+        );
+    }
+
     #[test]
     fn setup_closes_atomically_and_stays_closed() {
         let s = store();
