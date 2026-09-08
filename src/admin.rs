@@ -747,11 +747,15 @@ impl AdminUiState {
     }
 
     fn handle_delete_bucket(&self, id_path: &str) -> Response<Body> {
-        let bucket = id_path.trim_start_matches("buckets/");
+        let encoded_bucket = id_path.trim_start_matches("buckets/");
+        let bucket = match urlencoding::decode(encoded_bucket) {
+            Ok(value) => value.into_owned(),
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid bucket name"),
+        };
         if bucket.is_empty() {
             return json_error(StatusCode::BAD_REQUEST, "bucket name is required");
         }
-        match self.object_format.delete_bucket(bucket) {
+        match self.object_format.delete_bucket(&bucket) {
             Ok(()) => json_response(StatusCode::OK, serde_json::json!({ "ok": true })),
             Err(error) => bucket_error_response(&error),
         }

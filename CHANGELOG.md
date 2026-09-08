@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.7.0-rc.2 - 2026-09-09
+
+- Refined the operator console with icon-based navigation, centered menu items,
+  loading skeletons, Telegram connection-check feedback, and storage analysis
+  cards.
+- Added modal workflows for bucket creation, uploads, operator creation, and
+  Telegram credentials; proxy mode is now an explicit select control.
+- Added bucket item selection, bulk deletion, and move-to-bucket/folder flow.
+- Fixed encoded Unicode bucket names when deleting buckets and hid misleading
+  zero-byte failed transfer rows.
+
 ## 0.7.0-rc.1 - 2026-09-08
 
 - Added acknowledgeable recovery issues: each issue now carries a stable

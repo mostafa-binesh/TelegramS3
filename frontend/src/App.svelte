@@ -21,7 +21,8 @@
     logout,
     removeObject,
     contentUrl,
-    saveTelegramSettings
+    saveTelegramSettings,
+    uploadObject
   } from './lib/api';
   import {formatBytes, formatCount, formatTimestamp, normalizeError} from './lib/format';
   import type {
@@ -63,6 +64,14 @@
   let currentPrefix = '';
   let listing: ObjectsState | null = null;
   let newFolder = '';
+  let showBucketModal = false;
+  let showUploadModal = false;
+  let showOperatorModal = false;
+  let showTelegramCredentials = false;
+  let selectedKeys: string[] = [];
+  let showMoveModal = false;
+  let moveBucket = '';
+  let movePrefix = '';
 
   // Per-area busy flags. Only operator-initiated loads set these; the background
   // poll refreshes silently so the console never flickers on its own.
@@ -415,6 +424,38 @@
       busy = false;
     }
   }
+
+  function toggleKey(key: string) {
+    selectedKeys = selectedKeys.includes(key) ? selectedKeys.filter((item) => item !== key) : [...selectedKeys, key];
+  }
+
+  async function removeSelected() {
+    if (!selectedKeys.length || !confirm(`Delete ${selectedKeys.length} selected item(s)?`)) return;
+    busy = true;
+    try {
+      for (const key of selectedKeys) await removeObject(session?.csrf_token, selectedBucket, key);
+      selectedKeys = [];
+      message = 'Selected items deleted.';
+      await refreshObjects();
+    } catch (cause) { error = normalizeError(cause); }
+    finally { busy = false; }
+  }
+
+  async function moveSelected() {
+    if (!selectedKeys.length || !moveBucket) return;
+    busy = true;
+    try {
+      for (const key of selectedKeys) {
+        const response = await fetch(contentUrl(selectedBucket, key), { credentials: 'include' });
+        if (!response.ok) throw new Error(`Could not read ${key}`);
+        const targetKey = `${movePrefix.replace(/^\/+|\/+$/g, '') ? `${movePrefix.replace(/^\/+|\/+$/g, '')}/` : ''}${key.split('/').pop() ?? key}`;
+        await uploadObject(moveBucket, targetKey, await response.blob(), session?.csrf_token);
+        await removeObject(session?.csrf_token, selectedBucket, key);
+      }
+      selectedKeys = []; showMoveModal = false; message = 'Selected items moved.'; await refreshObjects();
+    } catch (cause) { error = normalizeError(cause); }
+    finally { busy = false; }
+  }
 </script>
 
 <svelte:head>
@@ -426,7 +467,7 @@
 <main class="shell" class:signed-in={session?.authenticated}>
   {#if session?.authenticated}
     <Sidebar {view} username={session.user?.username ?? ''} onNavigate={switchView} onLogout={handleLogout}/>
-    <header class="console-header"><div><p class="card-label">Workspace</p><h1>{view==='users'?'Operators':view==='telegram'?'Telegram settings':view.charAt(0).toUpperCase()+view.slice(1)}</h1></div><HealthBadge state={overview?.telegram?.connection_state ?? 'checking'} detail={overview?.telegram?.detail ?? 'Waiting for a connection check'} checkedAt={overview?.checked_at}/></header>
+    <header class="console-header"><div><p class="card-label">Workspace</p><h1>{view==='users'?'Operators':view==='telegram'?'Telegram settings':view.charAt(0).toUpperCase()+view.slice(1)}</h1></div><HealthBadge state={overviewLoading || !overview ? 'checking' : overview.telegram?.connection_state ?? 'checking'} detail={overviewLoading || !overview ? 'Checking Telegram connection…' : overview.telegram?.detail ?? 'Waiting for a connection check'} checkedAt={overviewLoading ? undefined : overview?.checked_at}/></header>
   {/if}
   {#if loading}
     <section class="card surface"><p>Loading…</p></section>
@@ -497,8 +538,18 @@
             </button>
           </div>
         </div>
-        <form class="telegram-settings" on:submit|preventDefault={saveTelegramSettingsForm}>
-          <div class="settings-grid">
+        <div class="settings-grid settings-summary">
+          <article class="settings-card"><p class="card-label">Credentials</p><p class="fine-print">API credentials and the storage chat are kept out of the main settings form.</p><button class="primary" type="button" on:click={() => showTelegramCredentials = true}>Edit Telegram credentials</button></article>
+          <article class="settings-card"><p class="card-label">Proxy</p><p class="fine-print">Use a SOCKS5/HTTP proxy only when your network requires it.</p><form class="proxy-form" on:submit|preventDefault={saveTelegramSettingsForm}>
+            <label><span>Proxy mode</span><select bind:value={telegramProxyMode}><option value="auto">Auto</option><option value="disabled">Disabled</option><option value="socks5">SOCKS5</option><option value="http">HTTP</option></select></label>
+            <label><span>Proxy URL</span><input bind:value={telegramProxyUrl} type="text" placeholder="socks5://127.0.0.1:12334" /></label>
+            <div class="grid-2"><label><span>Username</span><input bind:value={telegramProxyUsername} /></label><label><span>Password</span><input bind:value={telegramProxyPassword} type="password" /></label></div>
+            <button class="primary" type="submit" disabled={telegramSettingsBusy}>Save proxy settings</button>
+          </form></article>
+        </div>
+        {#if telegramSettingsMessage}<p class="fine-print">{telegramSettingsMessage}</p>{/if}{#if telegramSettingsError}<p class="fine-print error-hint">{telegramSettingsError}</p>{/if}
+        <!-- Credentials are intentionally edited in a modal to keep the sensitive fields out of the primary panel. -->
+        {#if showTelegramCredentials}<div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showTelegramCredentials = false)}><form class="modal-card" on:submit|preventDefault={() => { showTelegramCredentials = false; void saveTelegramSettingsForm(); }}><div class="section-head"><div><p class="card-label">Telegram credentials</p><h2>Storage account</h2></div><button class="icon-button" type="button" on:click={() => showTelegramCredentials = false}>×</button></div><div class="settings-grid">
             <label>
               <span>Telegram API ID</span>
               <input bind:value={telegramApiId} type="text" autocomplete="off" />
@@ -511,33 +562,7 @@
               <span>Storage chat ID</span>
               <input bind:value={telegramStorageChatId} type="text" autocomplete="off" />
             </label>
-            <label>
-              <span>Proxy mode</span>
-              <input bind:value={telegramProxyMode} type="text" autocomplete="off" placeholder="auto" />
-            </label>
-            <label>
-              <span>Proxy URL</span>
-              <input bind:value={telegramProxyUrl} type="text" autocomplete="off" placeholder="socks5://127.0.0.1:12334" />
-            </label>
-            <label>
-              <span>Proxy username</span>
-              <input bind:value={telegramProxyUsername} type="text" autocomplete="off" />
-            </label>
-            <label>
-              <span>Proxy password</span>
-              <input bind:value={telegramProxyPassword} type="password" autocomplete="off" />
-            </label>
-          </div>
-          <div class="settings-actions">
-            <button class="primary" type="submit" disabled={telegramSettingsBusy}>Save Telegram settings</button>
-          </div>
-          {#if telegramSettingsMessage}
-            <p class="fine-print">{telegramSettingsMessage}</p>
-          {/if}
-          {#if telegramSettingsError}
-            <p class="fine-print error-hint">{telegramSettingsError}</p>
-          {/if}
-        </form>
+          </div><div class="settings-actions"><button class="primary" type="submit" disabled={telegramSettingsBusy}>Save credentials</button></div></form></div>{/if}
       </article>
       {#if showWizard}
         <TelegramWizard
@@ -593,36 +618,34 @@
           </article>
         {/if}
       </section>
-      <section class="layout">
-        <article class="card surface">
-          <p class="card-label">Readiness</p>
-          {#if !overview}
-            <div class="skeleton-stack">
-              <div class="skeleton" style="height:56px"></div>
-              <div class="skeleton" style="height:56px"></div>
-              <div class="skeleton" style="height:56px"></div>
+      <section class="layout analysis-grid">
+        <article class="card surface chart-card">
+          <div class="section-head"><div><p class="card-label">Analysis</p><h2>Storage composition</h2></div></div>
+          {#if !overview}<div class="skeleton" style="height:150px"></div>{:else}
+            {@const total = Math.max((overview.storage?.committed_objects ?? 0) + (overview.storage?.active_objects ?? 0) + (overview.storage?.staged_objects ?? 0), 1)}
+            <div class="bar-chart" aria-label="Storage composition chart">
+              <div class="bar-segment committed" style={`width:${((overview.storage?.committed_objects ?? 0) / total) * 100}%`}></div>
+              <div class="bar-segment active" style={`width:${((overview.storage?.active_objects ?? 0) / total) * 100}%`}></div>
+              <div class="bar-segment staged" style={`width:${((overview.storage?.staged_objects ?? 0) / total) * 100}%`}></div>
             </div>
-          {:else}
-            <ul class="checks">
-              {#each overview?.checks ?? [] as check}
-                <li class:check-ok={check.ok} class:check-fail={!check.ok}>
-                  <span>{check.label}</span>
-                  <small>{check.detail}</small>
-                </li>
-              {/each}
-            </ul>
+            <div class="legend"><span><i class="committed"></i>Committed {formatCount(overview.storage?.committed_objects ?? 0)}</span><span><i class="active"></i>Active {formatCount(overview.storage?.active_objects ?? 0)}</span><span><i class="staged"></i>Staged {formatCount(overview.storage?.staged_objects ?? 0)}</span></div>
           {/if}
+        </article>
+        <article class="card surface chart-card">
+          <p class="card-label">Recovery signal</p><h2>{formatCount(corruptedCount)} actionable</h2>
+          {#if !overview}<div class="skeleton" style="height:80px"></div>{:else}<div class="signal-track"><span style={`width:${Math.min(corruptedCount * 10, 100)}%`}></span></div><p class="fine-print">{acknowledgedCount ? `${formatCount(acknowledgedCount)} acknowledged issue(s) remain reviewable.` : 'No acknowledged issues.'}</p>{/if}
         </article>
       </section>
     {:else if view === 'buckets'}
       <section class="card surface">
-        <div class="section-head">
-          <div>
-            <p class="card-label">Buckets and files</p>
-            <h2>{selectedBucket ? selectedBucket : 'Choose or create a bucket'}</h2>
-          </div>
-          <div class="toolbar-actions">
-            <button
+          <div class="section-head">
+            <div>
+              <p class="card-label">Buckets and files</p>
+              <h2>{selectedBucket ? `Bucket / ${selectedBucket}` : 'Your buckets'}</h2>
+            </div>
+            <div class="toolbar-actions">
+              {#if !selectedBucket}<button class="primary" type="button" on:click={() => showBucketModal = true}>＋ Create bucket</button>{/if}
+              <button
               class="ghost"
               type="button"
               on:click={() => (selectedBucket ? refreshObjects() : refreshBuckets())}
@@ -631,23 +654,12 @@
               {#if bucketsLoading || objectsLoading}<span class="spinner" aria-hidden="true"></span>{/if}
               Refresh
             </button>
-            {#if selectedBucket}
-              <button class="ghost" type="button" on:click={() => dropBucket(selectedBucket)} disabled={busy}>
-                Delete empty bucket
-              </button>
-            {/if}
+            {#if selectedBucket}<button class="primary" type="button" on:click={() => showUploadModal = true}>↑ Upload</button>{/if}
           </div>
         </div>
         {#if !selectedBucket}
-          <form class="row-inline" on:submit|preventDefault={makeBucket}>
-            <input bind:value={newBucket} placeholder="new bucket name" />
-            <button class="primary" type="submit" disabled={busy || !newBucket.trim()}>
-              Create bucket
-            </button>
-          </form>
           <p class="fine-print">
-            The browser only shows existing buckets. Create one here or through any S3
-            client, then open it to browse files.
+            Select a bucket to browse its files. Bucket names may contain Unicode characters.
           </p>
           {#if bucketsLoading && buckets.length === 0}
             <div class="skeleton-stack">
@@ -668,9 +680,7 @@
                       {bucket.name}
                       <small>created {formatTimestamp(bucket.created_at)}</small>
                     </button>
-                    <button class="ghost" type="button" on:click={() => dropBucket(bucket.name)} disabled={busy}>
-                      Delete
-                    </button>
+                    <span class="fine-print">{bucket.name.length} chars</span>
                   </div>
                 </li>
               {/each}
@@ -678,22 +688,14 @@
           {/if}
         {:else}
           <div class="crumb-row">
-            <button class="btn-link" on:click={exitBucket}>Bucket: {selectedBucket}</button>
+            <button class="btn-link address-root" on:click={exitBucket}><span aria-hidden="true">▦</span> All buckets</button>
+            <span class="crumb-sep">/</span><strong class="address-current">{selectedBucket}</strong>
             <span class="crumb-sep">/</span>
             {#each crumbs() as crumb, i (crumb + i)}
               <button class="btn-link" on:click={() => gotoCrumb(i)}>{crumb}</button><span class="crumb-sep">/</span>
             {/each}
           </div>
-          <div class="row-inline">
-            <input bind:value={newFolder} placeholder="new folder" />
-            <button class="primary" disabled={busy || !newFolder.trim()} on:click={makeFolder}>New folder</button>
-          </div>
-          <UploadBox
-            bucket={selectedBucket}
-            prefix={currentPrefix}
-            csrf={session?.csrf_token}
-            onUploaded={() => refreshObjects()}
-          />
+          <div class="row-inline folder-actions"><button class="ghost" disabled={busy || !newFolder.trim()} on:click={makeFolder}>＋ New folder</button><input bind:value={newFolder} placeholder="Folder name" /></div>
           {#if objectsLoading && !listing}
             <div class="skeleton-stack">
               <div class="skeleton" style="height:40px"></div>
@@ -708,11 +710,11 @@
           {:else}
             <div class="table-scroll">
               <table class="kv-table">
-                <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+                <thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={selectedKeys.length > 0 && selectedKeys.length === (listing?.objects.length ?? 0)} on:change={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])}/></th><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
                 <tbody>
                   {#each listing?.folders ?? [] as folder (folder)}
                     <tr>
-                      <td><button class="btn-link" on:click={() => enterFolder(folder)}>{folder}/</button></td>
+                      <td></td><td><button class="btn-link" on:click={() => enterFolder(folder)}>{folder}/</button></td>
                       <td class="muted">folder</td>
                       <td class="muted">—</td>
                       <td class="row-actions">
@@ -722,7 +724,7 @@
                   {/each}
                   {#each listing?.objects ?? [] as obj (obj.key)}
                     <tr>
-                      <td>{obj.name}</td>
+                      <td><input class="select-all" type="checkbox" checked={selectedKeys.includes(obj.key)} on:change={() => toggleKey(obj.key)} aria-label={`Select ${obj.name}`}/></td><td>{obj.name}</td>
                       <td>{formatBytes(obj.size)}</td>
                       <td>{formatTimestamp(obj.last_modified)}</td>
                       <td class="row-actions">
@@ -738,10 +740,8 @@
             </div>
           {/if}
           <p class="fine-print">
-            Individual files upload and download in place here. Bulk download of a whole
-            folder or bucket is a future item; for now list, navigate and manage folders
-            and objects via the S3 data plane.
           </p>
+          {#if selectedKeys.length}<div class="selection-bar"><strong>{selectedKeys.length} selected</strong><button class="ghost" on:click={() => message = 'Bulk download is available per object from the list.'}>↓ Download</button><button class="danger-button" on:click={removeSelected}>Delete</button><button class="ghost" on:click={() => { moveBucket = selectedBucket; movePrefix = currentPrefix; showMoveModal = true; }}>→ Move</button></div>{/if}
         {/if}
       </section>
     {:else if view === 'users'}
@@ -792,39 +792,37 @@
           </div>
         {/if}
 
-        <div class="nested-form">
-          <p class="card-label">Add account</p>
-          {#if canManageOperators}
-            <div class="grid-2">
-              <label>
-                <span>Username</span>
-                <input bind:value={newUsername} autocomplete="off" />
-              </label>
-              <label>
-                <span>Display name</span>
-                <input bind:value={newDisplay} autocomplete="off" />
-              </label>
-              <label>
-                <span>Password (12+ chars)</span>
-                <input bind:value={newPassword} type="password" autocomplete="new-password" />
-              </label>
-              <label>
-                <span>Role</span>
-                <select bind:value={newRole}>
-                  <option value="admin">admin</option>
-                  <option value="superadmin">superadmin</option>
-                </select>
-              </label>
-            </div>
-            <button class="primary" on:click={makeUser} disabled={busy || !newUsername || !newPassword}>
-              Add operator
-            </button>
-          {:else}
-            <p class="fine-print">Only superadmins can add or remove operator accounts.</p>
-          {/if}
+        <div class="nested-form operator-actions">
+          {#if canManageOperators}<button class="primary" on:click={() => showOperatorModal = true}>＋ Add operator</button>{:else}<p class="fine-print">Only superadmins can add or remove operator accounts.</p>{/if}
         </div>
       </section>
     {/if}
+  {/if}
+
+  {#if showBucketModal}
+    <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showBucketModal = false)}>
+      <form class="modal-card compact-modal" on:submit|preventDefault={() => { showBucketModal = false; void makeBucket(); }}>
+        <div class="section-head"><div><p class="card-label">Buckets</p><h2>Create bucket</h2></div><button class="icon-button" type="button" on:click={() => showBucketModal = false}>×</button></div>
+        <label><span>Bucket name</span><input bind:value={newBucket} placeholder="e.g. documents or فایل‌ها" /></label>
+        <p class="fine-print">Unicode names are supported and will be preserved exactly.</p>
+        <button class="primary" type="submit" disabled={busy || !newBucket.trim()}>Create bucket</button>
+      </form>
+    </div>
+  {/if}
+  {#if showUploadModal && selectedBucket}
+    <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showUploadModal = false)}>
+      <div class="modal-card"><div class="section-head"><div><p class="card-label">{selectedBucket}</p><h2>Upload files</h2></div><button class="icon-button" type="button" on:click={() => showUploadModal = false}>×</button></div><UploadBox bucket={selectedBucket} prefix={currentPrefix} csrf={session?.csrf_token} onUploaded={() => refreshObjects()}/></div>
+    </div>
+  {/if}
+  {#if showOperatorModal}
+    <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showOperatorModal = false)}>
+      <form class="modal-card" on:submit|preventDefault={() => { showOperatorModal = false; void makeUser(); }}><div class="section-head"><div><p class="card-label">Operators</p><h2>Add operator</h2></div><button class="icon-button" type="button" on:click={() => showOperatorModal = false}>×</button></div><div class="grid-2"><label><span>Username</span><input bind:value={newUsername} autocomplete="off" /></label><label><span>Display name</span><input bind:value={newDisplay} autocomplete="off" /></label><label><span>Password (12+ chars)</span><input bind:value={newPassword} type="password" autocomplete="new-password" /></label><label><span>Role</span><select bind:value={newRole}><option value="admin">admin</option><option value="superadmin">superadmin</option></select></label></div><button class="primary" type="submit" disabled={busy || !newUsername || !newPassword}>Add operator</button></form>
+    </div>
+  {/if}
+  {#if showMoveModal}
+    <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showMoveModal = false)}>
+      <form class="modal-card compact-modal" on:submit|preventDefault={moveSelected}><div class="section-head"><div><p class="card-label">Move selected items</p><h2>Choose destination</h2></div><button class="icon-button" type="button" on:click={() => showMoveModal = false}>×</button></div><label><span>Destination bucket</span><select bind:value={moveBucket}>{#each buckets as bucket (bucket.name)}<option value={bucket.name}>{bucket.name}</option>{/each}</select></label><label><span>Destination folder</span><input bind:value={movePrefix} placeholder="optional/folder/" /></label><p class="fine-print">Files are copied to the destination and removed from the current bucket after upload is accepted.</p><button class="primary" type="submit" disabled={busy || !moveBucket}>Move files</button></form>
+    </div>
   {/if}
 
   {#if message}
@@ -839,7 +837,8 @@
   .shell.signed-in{max-width:none;margin-left:230px;padding:30px 40px;min-height:100vh}
   .console-header{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:30px}
   .console-header h1{font-size:26px;letter-spacing:-.04em;margin:4px 0}
-  @media(max-width:760px){.shell.signed-in{margin-left:0;padding:0 16px 24px}.console-header{margin-top:24px;align-items:flex-start;flex-direction:column}}
+  .analysis-grid{grid-template-columns:1.25fr .75fr}.chart-card h2{margin:.25rem 0 1.2rem}.bar-chart{height:22px;display:flex;overflow:hidden;border-radius:999px;background:#edf1f5}.bar-segment{min-width:0}.bar-segment.committed,.legend .committed{background:#2779bc}.bar-segment.active,.legend .active{background:#58a37c}.bar-segment.staged,.legend .staged{background:#d59a47}.legend{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:14px;color:var(--muted);font-size:12px}.legend span{display:inline-flex;align-items:center;gap:6px}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%}.signal-track{height:10px;border-radius:99px;background:#edf1f5;overflow:hidden}.signal-track span{display:block;height:100%;background:#d59a47;border-radius:inherit}.address-root{display:inline-flex;gap:7px;align-items:center}.address-current{padding:.45rem .75rem;border-radius:8px;background:var(--accent-soft);color:var(--accent)}.folder-actions input{max-width:220px}.select-all{width:16px;height:16px;padding:0;accent-color:var(--accent)}.selection-bar{display:flex;gap:8px;align-items:center;padding:10px 0}.danger-button{background:#b33838}.settings-summary{align-items:start}.settings-card{border:1px solid var(--border);border-radius:var(--radius-md);padding:1rem;background:var(--surface)}.proxy-form{display:grid;gap:12px}.modal-backdrop{position:fixed;inset:0;background:rgba(12,25,42,.58);display:grid;place-items:center;padding:20px;z-index:20}.modal-card{width:min(620px,100%);max-height:calc(100vh - 40px);overflow:auto;display:grid;gap:16px;padding:22px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);box-shadow:0 20px 60px rgba(13,31,52,.25)}.compact-modal{width:min(430px,100%)}.icon-button{width:36px;height:36px;padding:0;border-radius:50%;background:var(--accent-soft);color:var(--text);font-size:1.35rem}.operator-actions{display:flex;justify-content:flex-end}
+  @media(max-width:760px){.shell.signed-in{margin-left:0;padding:0 16px 24px}.console-header{margin-top:24px;align-items:flex-start;flex-direction:column}.analysis-grid{grid-template-columns:1fr}.settings-summary{grid-template-columns:1fr}}
 
   .error-hint {
     color: var(--danger, #b00020);

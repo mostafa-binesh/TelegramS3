@@ -8,13 +8,15 @@
   async function refresh(){try{const res=await listJobs(offset);jobs=res.jobs;hasMore=res.next_offset!==null;error='';}catch(e){error=e instanceof Error?e.message:'Unable to load jobs';}finally{loading=false;}}
   async function action(id:string,action:'retry'|'cancel'){pending=true;try{await jobAction(id,action,csrf);await refresh();}catch(e){error=e instanceof Error?e.message:'Action failed';}finally{pending=false;}}
   onMount(()=>{let disposed=false;let timer:ReturnType<typeof setTimeout>;const poll=async()=>{if(!document.hidden)await refresh();if(!disposed)timer=setTimeout(poll,error?10000:2000);};void poll();return()=>{disposed=true;clearTimeout(timer);};});
-  $: visible=jobs.filter(j=>!recoveryOnly||['recovery_required','cancelled','retry_wait'].includes(j.state));
+  // A rejected/aborted reception is not a user-visible transfer: it never
+  // reached the durable queue and showing a 0/0 "completed" row is misleading.
+  $: visible=jobs.filter(j=>(!['reception_failed'].includes(j.state) && !(j.state==='completed' && j.chunks_total===0 && j.bytes===0)) && (!recoveryOnly||['recovery_required','cancelled','retry_wait'].includes(j.state)));
 </script>
 <section class="card surface">
   <div class="section-head"><div><p class="card-label">{recoveryOnly?'Recovery':'Background transfers'}</p><h2>{recoveryOnly?'Resolve interrupted work':'Transfer activity'}</h2></div><button class="ghost" on:click={refresh}>Refresh</button></div>
   <p class="fine-print">{recoveryOnly?'Staged files are retained. Retry after correcting the connection or storage problem. An incomplete reception requires the original file to be uploaded again.':'Files become visible in Buckets only after Telegram upload and commit finish. You can leave this page while accepted transfers continue.'}</p>
   {#if error}<p role="alert" class="error-hint">{error}</p>{/if}
-  {#if loading}<p>Loading transfers…</p>{:else if !visible.length}<p class="empty">{recoveryOnly?'No transfers need attention on this page.':'No transfers yet. Upload a file from Buckets to get started.'}</p>{:else}
+  {#if loading}<div class="skeleton-stack"><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div></div>{:else if !visible.length}<p class="empty">{recoveryOnly?'No transfers need attention on this page.':'No transfers yet. Upload a file from Buckets to get started.'}</p>{:else}
   <div class="table-scroll"><table><thead><tr><th>Object</th><th>Progress</th><th>Status</th><th>Actions</th></tr></thead><tbody>
     {#each visible as job (job.id)}<tr><td><strong>{job.key}</strong><small>{job.bucket} · {new Date(job.created_at*1000).toLocaleString()}</small><small>{job.id}</small></td>
       <td><progress max={Math.max(job.chunks_total,1)} value={job.chunks_done}></progress><small>{job.chunks_done}/{job.chunks_total} chunks · {(job.bytes/1048576).toFixed(1)} MiB staged</small></td>
