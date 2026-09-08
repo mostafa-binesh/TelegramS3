@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.7.0-rc.1 - 2026-09-08
+
+- Added acknowledgeable recovery issues: each issue now carries a stable
+  content fingerprint, and acknowledgements persist server-side in
+  `app_settings` so they are shared by all operators and survive restarts.
+- Slimmed the admin overview to a single corrupted-files count
+  (`unacknowledged_count`), moving the per-issue details to the Recovery view
+  where they render collapsed by default and can be acknowledged or restored.
+- Added inline, non-blocking loading feedback across the console: a top
+  progress bar, per-panel skeletons, and spinners in the refresh buttons. The
+  background overview poll stays silent.
+- Stopped navigating into a bucket immediately after creating it, so the
+  operator stays on the bucket list.
+- Styled the native `select` control to match the other inputs and finished the
+  palette migration off the legacy teal accent.
+
 ## 0.5.2-rc.8 - 2026-09-06
 
 - Fixed Telegram settings saves so malformed Telegram API IDs are rejected

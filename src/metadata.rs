@@ -124,4 +124,4 @@ pub use self::auth::{DbSession, DbUser};
 pub use self::buckets::BucketRecord;
 pub use self::manifests::{JournalEntry, TombstonedManifestRecord};
 pub use self::recovery::{RebuildReport, VerifyReport};
-pub use self::settings::TelegramBootstrapSettings;
+pub use self::settings::{RecoveryAck, RecoveryAcknowledgements, TelegramBootstrapSettings};

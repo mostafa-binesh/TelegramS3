@@ -19,7 +19,9 @@ use crate::config::{
     AppConfig, normalize_telegram_storage_chat_id, validate_telegram_bootstrap_settings,
 };
 use crate::manifest::ObjectManifest;
-use crate::metadata::{MetadataStore, TelegramBootstrapSettings};
+use crate::metadata::{
+    MetadataStore, RecoveryAck, RecoveryAcknowledgements, TelegramBootstrapSettings,
+};
 use crate::object_format::{ObjectFormatService, RecoveryIssue as RecoveryIssueModel};
 use crate::redact::redact_path;
 use crate::telegram::{
@@ -142,6 +144,13 @@ struct CreateBucketRequest {
 struct DeleteObjectRequest {
     bucket: String,
     key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RecoveryAcknowledgeRequest {
+    /// Recovery issue fingerprints, as served in `recovery.issues[].id`.
+    ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,6 +349,16 @@ impl AdminUiState {
         if method == Method::POST && rest == "recovery/repair" {
             self.object_format.ensure_workers();
             return self.handle_recovery_repair().await;
+        }
+        if method == Method::POST && rest == "recovery/acknowledge" {
+            return self
+                .handle_recovery_acknowledge(request, &principal, true)
+                .await;
+        }
+        if method == Method::POST && rest == "recovery/unacknowledge" {
+            return self
+                .handle_recovery_acknowledge(request, &principal, false)
+                .await;
         }
         match (method, rest) {
             (Method::POST, "session/logout") => self.handle_logout(&principal).await,
@@ -1332,8 +1351,13 @@ impl AdminUiState {
             .status()
             .unwrap_or_else(|_| empty_object());
         let durable = self.object_format.durable_metrics().unwrap_or_default();
+        let acknowledgements = self
+            .object_format
+            .metadata_store()
+            .recovery_acknowledgements()
+            .unwrap_or_default();
         let recovery = match self.object_format.cached_recovery_snapshot() {
-            Ok(snapshot) => RecoveryWire::from_snapshot(snapshot),
+            Ok(snapshot) => RecoveryWire::from_snapshot(snapshot, &acknowledgements),
             Err(error) => RecoveryWire::failed(error),
         };
         let health = self.telegram_health_snapshot().await;
@@ -1399,6 +1423,79 @@ impl AdminUiState {
             ),
             Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         }
+    }
+
+    /// Add or remove operator acknowledgements for recovery issues.
+    ///
+    /// Acknowledgements are stored by fingerprint and pruned on every write to the
+    /// set of issues the latest scan still reports, so resolved issues cannot leave
+    /// entries behind in `app_settings`.
+    async fn handle_recovery_acknowledge(
+        &self,
+        request: Request<Incoming>,
+        principal: &ResolvedPrincipal,
+        acknowledge: bool,
+    ) -> Response<Body> {
+        let RecoveryAcknowledgeRequest { ids } =
+            match read_json::<RecoveryAcknowledgeRequest>(request).await {
+                Ok(body) => body,
+                Err(_) => {
+                    return json_error(StatusCode::BAD_REQUEST, "invalid acknowledgement payload");
+                }
+            };
+        if ids.is_empty() {
+            return json_error(StatusCode::BAD_REQUEST, "at least one issue id is required");
+        }
+
+        let live: std::collections::HashSet<String> =
+            match self.object_format.cached_recovery_snapshot() {
+                Ok((_, issues, _)) => issues.iter().map(|issue| issue.fingerprint()).collect(),
+                Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
+            };
+        if let Some(unknown) = ids.iter().find(|id| !live.contains(*id)) {
+            return json_error(
+                StatusCode::NOT_FOUND,
+                &format!("unknown recovery issue id {unknown}"),
+            );
+        }
+
+        let store = self.object_format.metadata_store();
+        let mut acknowledgements = match store.recovery_acknowledgements() {
+            Ok(existing) => existing,
+            Err(error) => {
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        };
+        // Drop acknowledgements for issues the scan no longer reports.
+        acknowledgements.retain(|id, _| live.contains(id));
+        if acknowledge {
+            let at = rfc3339(OffsetDateTime::now_utc());
+            for id in &ids {
+                acknowledgements.insert(
+                    id.clone(),
+                    RecoveryAck {
+                        at: at.clone(),
+                        by: principal.user.username.clone(),
+                    },
+                );
+            }
+        } else {
+            for id in &ids {
+                acknowledgements.remove(id);
+            }
+        }
+        if let Err(error) = store.set_recovery_acknowledgements(&acknowledgements) {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+
+        json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "ok": true,
+                "acknowledged_count": acknowledgements.len(),
+                "unacknowledged_count": live.len().saturating_sub(acknowledgements.len()),
+            }),
+        )
     }
 
     // ---- static (SPA) serving ------------------------------------------------
@@ -1866,6 +1963,8 @@ struct StorageWire {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 struct RecoveryIssueWire {
+    /// Stable fingerprint, used by the console to acknowledge this issue.
+    id: String,
     object_id: Option<String>,
     bucket: Option<String>,
     key: Option<String>,
@@ -1874,11 +1973,14 @@ struct RecoveryIssueWire {
     kind: String,
     summary: String,
     details: Vec<String>,
+    acknowledged_at: Option<String>,
+    acknowledged_by: Option<String>,
 }
 
 impl From<RecoveryIssueModel> for RecoveryIssueWire {
     fn from(value: RecoveryIssueModel) -> Self {
         Self {
+            id: value.fingerprint(),
             object_id: value.object_id.map(|id| id.to_string()),
             bucket: value.bucket,
             key: value.key,
@@ -1887,6 +1989,8 @@ impl From<RecoveryIssueModel> for RecoveryIssueWire {
             kind: value.kind,
             summary: value.summary,
             details: value.details,
+            acknowledged_at: None,
+            acknowledged_by: None,
         }
     }
 }
@@ -1895,28 +1999,50 @@ impl From<RecoveryIssueModel> for RecoveryIssueWire {
 #[serde(rename_all = "snake_case")]
 struct RecoveryWire {
     checked_at: Option<String>,
+    /// Every issue the scan found, acknowledged or not.
     issue_count: u64,
+    /// The actionable subset the console leads with.
+    unacknowledged_count: u64,
     scan_ok: bool,
     scan_error: Option<String>,
     issues: Vec<RecoveryIssueWire>,
 }
 
 impl RecoveryWire {
-    fn from_snapshot(snapshot: crate::object_format::RecoverySnapshot) -> Self {
+    fn from_snapshot(
+        snapshot: crate::object_format::RecoverySnapshot,
+        acknowledgements: &RecoveryAcknowledgements,
+    ) -> Self {
         let (checked_at, issues, scan_error) = snapshot;
+        let issues: Vec<RecoveryIssueWire> = issues
+            .into_iter()
+            .map(|issue| {
+                let mut wire = RecoveryIssueWire::from(issue);
+                if let Some(ack) = acknowledgements.get(&wire.id) {
+                    wire.acknowledged_at = Some(ack.at.clone());
+                    wire.acknowledged_by = Some(ack.by.clone());
+                }
+                wire
+            })
+            .collect();
         Self {
             issue_count: issues.len() as u64,
+            unacknowledged_count: issues
+                .iter()
+                .filter(|issue| issue.acknowledged_at.is_none())
+                .count() as u64,
             scan_ok: scan_error.is_none(),
             scan_error,
             checked_at: checked_at
                 .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok().map(rfc3339)),
-            issues: issues.into_iter().map(Into::into).collect(),
+            issues,
         }
     }
 
     fn failed(error: String) -> Self {
         Self {
             issue_count: 0,
+            unacknowledged_count: 0,
             scan_ok: false,
             scan_error: Some(error),
             checked_at: None,

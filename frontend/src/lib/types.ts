@@ -54,6 +54,8 @@ export interface StorageCard {
 }
 
 export interface RecoveryIssue {
+  /** Stable fingerprint used to acknowledge this issue. */
+  id: string;
   object_id?: string | null;
   bucket?: string | null;
   key?: string | null;
@@ -62,10 +64,15 @@ export interface RecoveryIssue {
   kind: string;
   summary: string;
   details: string[];
+  acknowledged_at?: string | null;
+  acknowledged_by?: string | null;
 }
 
 export interface RecoveryState {
+  /** Every issue the scan found, acknowledged or not. */
   issue_count: number;
+  /** The actionable subset — what the Overview leads with. */
+  unacknowledged_count: number;
   scan_ok: boolean;
   scan_error?: string | null;
   checked_at?: string | null;

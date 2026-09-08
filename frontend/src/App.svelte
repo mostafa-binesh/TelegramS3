@@ -23,18 +23,20 @@
     contentUrl,
     saveTelegramSettings
   } from './lib/api';
+  import {formatBytes, formatCount, formatTimestamp, normalizeError} from './lib/format';
   import type {
     BucketInfo,
     ObjectEntry,
     ObjectsState,
     OverviewState,
-    RecoveryIssue,
     SessionState,
     TelegramSettings,
     UserInfo
   } from './lib/types';
   import TelegramWizard from './components/TelegramWizard.svelte';
   import UploadBox from './components/UploadBox.svelte';
+  import RecoveryIssues from './components/RecoveryIssues.svelte';
+  import TopProgress from './components/TopProgress.svelte';
 
   let session: SessionState | null = null;
   let overview: OverviewState | null = null;
@@ -61,7 +63,14 @@
   let currentPrefix = '';
   let listing: ObjectsState | null = null;
   let newFolder = '';
-  let recoveryOpen = true;
+
+  // Per-area busy flags. Only operator-initiated loads set these; the background
+  // poll refreshes silently so the console never flickers on its own.
+  let overviewLoading = false;
+  let usersLoading = false;
+  let bucketsLoading = false;
+  let objectsLoading = false;
+  $: anyLoading = overviewLoading || usersLoading || bucketsLoading || objectsLoading;
 
   let showWizard = false;
   let telegramApiId = '';
@@ -75,6 +84,11 @@
   let telegramSettingsError = '';
   let telegramSettingsMessage = '';
   $: canManageOperators = session?.user?.role === 'superadmin';
+  // The Overview leads with the actionable count; acknowledged issues stay
+  // visible on the Recovery page but stop counting here.
+  $: corruptedCount = overview?.recovery?.unacknowledged_count ?? 0;
+  $: acknowledgedCount =
+    (overview?.recovery?.issue_count ?? 0) - (overview?.recovery?.unacknowledged_count ?? 0);
 
   function telegramNeedsSetup(): boolean {
     return (overview?.telegram?.connection_state ?? 'needs_reauth') !== 'connected';
@@ -86,47 +100,13 @@
   onMount(() => {
     void bootstrapApp();
     let disposed=false; let timer:ReturnType<typeof setTimeout>;
-    const poll=async()=>{if(session?.authenticated&&!document.hidden)await refreshOverview();if(!disposed)timer=setTimeout(poll,error?30000:10000);};
+    const poll=async()=>{if(session?.authenticated&&!document.hidden)await refreshOverview({silent:true});if(!disposed)timer=setTimeout(poll,error?30000:10000);};
     timer=setTimeout(poll,10000);
     return ()=>{disposed=true;clearTimeout(timer);};
   });
 
-  function normalizeError(cause: unknown) {
-    return cause instanceof Error ? cause.message : 'Unexpected failure';
-  }
-  function formatCount(value: number) {
-    return new Intl.NumberFormat('en-US').format(value);
-  }
-  function formatBytes(value: number) {
-    if (!value) return '0 B';
-    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-    let size = value;
-    let unit = 0;
-    while (size >= 1024 && unit < units.length - 1) {
-      size /= 1024;
-      unit += 1;
-    }
-    return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
-  }
-  function formatTimestamp(value?: string | null) {
-    if (!value) return 'unknown';
-    const date = new Date(value);
-    return Number.isNaN(date.getTime())
-      ? value
-      : new Intl.DateTimeFormat('en-US', {
-          dateStyle: 'medium',
-          timeStyle: 'short'
-        }).format(date);
-  }
   function crumbs() {
     return currentPrefix.split('/').filter(Boolean);
-  }
-
-  function recoveryLabel(issue: RecoveryIssue) {
-    if (issue.path) return issue.path;
-    if (issue.bucket && issue.key) return `${issue.bucket}/${issue.key}`;
-    if (issue.bucket) return issue.bucket;
-    return issue.kind;
   }
 
   async function bootstrapApp() {
@@ -165,11 +145,15 @@
     }
   }
 
-  async function refreshOverview() {
+  /** `silent` keeps the background poll from lighting up the loading UI. */
+  async function refreshOverview(options: {silent?: boolean} = {}) {
+    if (!options.silent) overviewLoading = true;
     try {
       overview = await getOverview();
     } catch (cause) {
       error = normalizeError(cause);
+    } finally {
+      overviewLoading = false;
     }
   }
 
@@ -264,11 +248,14 @@
 
   async function refreshUsers() {
     const csrf = session?.csrf_token;
+    usersLoading = true;
     try {
       const res = await listUsers(csrf);
       users = res.users ?? [];
     } catch (cause) {
       error = normalizeError(cause);
+    } finally {
+      usersLoading = false;
     }
   }
 
@@ -310,11 +297,14 @@
 
   async function refreshBuckets() {
     const csrf = session?.csrf_token;
+    bucketsLoading = true;
     try {
       const res = await listBuckets(csrf);
       buckets = res.buckets ?? [];
     } catch (cause) {
       error = normalizeError(cause);
+    } finally {
+      bucketsLoading = false;
     }
   }
 
@@ -334,10 +324,13 @@
   async function refreshObjects() {
     if (!selectedBucket) return;
     const csrf = session?.csrf_token;
+    objectsLoading = true;
     try {
       listing = await listObjects(csrf, selectedBucket, currentPrefix);
     } catch (cause) {
       error = normalizeError(cause);
+    } finally {
+      objectsLoading = false;
     }
   }
 
@@ -349,10 +342,11 @@
     try {
       await createBucket(session?.csrf_token, name);
       newBucket = '';
-      message = 'Bucket created.';
+      // Stay on the list: the new bucket appears there, and the operator decides
+      // when to open it.
+      message = `Bucket "${name}" created.`;
       await refreshBuckets();
       await refreshOverview();
-      await openBucket(name);
     } catch (cause) {
       error = normalizeError(cause);
     } finally {
@@ -427,6 +421,8 @@
   <title>Telegram S3 — Management</title>
 </svelte:head>
 
+<TopProgress active={anyLoading}/>
+
 <main class="shell" class:signed-in={session?.authenticated}>
   {#if session?.authenticated}
     <Sidebar {view} username={session.user?.username ?? ''} onNavigate={switchView} onLogout={handleLogout}/>
@@ -464,6 +460,13 @@
     {#if view === 'transfers'}
       <Transfers csrf={session?.csrf_token}/>
     {:else if view === 'recovery'}
+      <RecoveryIssues
+        recovery={overview?.recovery}
+        csrf={session?.csrf_token}
+        loading={overviewLoading}
+        onChanged={() => refreshOverview({silent: true})}
+        onRefresh={() => refreshOverview()}
+      />
       <Transfers csrf={session?.csrf_token} recoveryOnly/>
     {:else if view === 'telegram'}
       <article class="card surface tg-callout">
@@ -544,88 +547,71 @@
         <button class="ghost" type="button" on:click={() => toggleWizard(false)}>Close wizard</button>
       {/if}
     {:else if view === 'overview'}
-      <section class="cards">
-        <article class="card metric">
-          <p class="card-label">Buckets</p>
-          <strong>{formatCount(overview?.storage?.buckets ?? 0)}</strong>
-        </article>
-        <article class="card metric">
-          <p class="card-label">Committed</p>
-          <strong>{formatCount(overview?.storage?.committed_objects ?? 0)}</strong>
-        </article>
-        <article class="card metric">
-          <p class="card-label">Active</p>
-          <strong>{formatCount(overview?.storage?.active_objects ?? 0)}</strong>
-        </article>
-        <article class="card metric">
-          <p class="card-label">Recovery</p>
-          <strong>{formatCount(overview?.storage?.recovery_markers ?? 0)}</strong>
-        </article>
-      </section>
-      <section class="card surface recovery-panel">
-        <div class="section-head">
-          <div>
-            <p class="card-label">Recovery issues</p>
-            <h2>
-              {formatCount(overview?.recovery?.issue_count ?? 0)}
-              {(overview?.recovery?.issue_count ?? 0) === 1 ? ' file needs attention' : ' files need attention'}
-            </h2>
-            <p class="fine-print">
-              Click an issue to see the exact files or Telegram objects that are missing,
-              unreadable, or corrupted.
-            </p>
-            {#if overview?.recovery?.checked_at}
-              <p class="fine-print">Snapshot refreshed {formatTimestamp(overview.recovery.checked_at)}.</p>
-            {/if}
-          </div>
-          {#if (overview?.recovery?.issues ?? []).length > 0 || overview?.recovery?.scan_error}
-            <button class="ghost" type="button" on:click={() => (recoveryOpen = !recoveryOpen)}>
-              {recoveryOpen ? 'Hide details' : 'Show details'}
-            </button>
-          {/if}
+      <section class="section-head overview-head">
+        <div>
+          <p class="card-label">Snapshot</p>
+          <h2>Storage at a glance</h2>
         </div>
-        {#if overview?.recovery?.scan_error}
-          <p class="error-hint">Recovery scan unavailable: {overview.recovery.scan_error}</p>
-        {:else if (overview?.recovery?.issue_count ?? 0) === 0}
-          <p class="fine-print">No missing or corrupted files were detected.</p>
-        {:else if recoveryOpen}
-          <div class="recovery-list">
-            {#each overview?.recovery?.issues ?? [] as issue}
-              <details class="recovery-item" open>
-                <summary>
-                  <span>{recoveryLabel(issue)}</span>
-                  <small>{issue.summary}</small>
-                </summary>
-                <div class="recovery-meta">
-                  <span>{issue.kind}</span>
-                  {#if issue.commit_state}
-                    <span>{issue.commit_state}</span>
-                  {/if}
-                  {#if issue.object_id}
-                    <span>{issue.object_id}</span>
-                  {/if}
-                </div>
-                <ul>
-                  {#each issue.details as detail}
-                    <li>{detail}</li>
-                  {/each}
-                </ul>
-              </details>
-            {/each}
-          </div>
+        <button class="ghost" type="button" on:click={() => refreshOverview()} disabled={overviewLoading}>
+          {#if overviewLoading}<span class="spinner" aria-hidden="true"></span>{/if}
+          Refresh
+        </button>
+      </section>
+      <section class="cards">
+        {#if !overview}
+          {#each [0, 1, 2, 3] as slot (slot)}
+            <article class="card metric"><div class="skeleton" style="height:62px"></div></article>
+          {/each}
+        {:else}
+          <article class="card metric">
+            <p class="card-label">Buckets</p>
+            <strong>{formatCount(overview?.storage?.buckets ?? 0)}</strong>
+          </article>
+          <article class="card metric">
+            <p class="card-label">Committed</p>
+            <strong>{formatCount(overview?.storage?.committed_objects ?? 0)}</strong>
+          </article>
+          <article class="card metric">
+            <p class="card-label">Active</p>
+            <strong>{formatCount(overview?.storage?.active_objects ?? 0)}</strong>
+          </article>
+          <article class="card metric corrupted" class:attention={corruptedCount > 0}>
+            <p class="card-label">Corrupted files</p>
+            <strong>{formatCount(corruptedCount)}</strong>
+            {#if overview?.recovery?.scan_error}
+              <small class="error-hint">Scan unavailable</small>
+            {:else if acknowledgedCount > 0}
+              <small>{formatCount(acknowledgedCount)} acknowledged</small>
+            {:else if corruptedCount === 0}
+              <small>Nothing needs attention</small>
+            {/if}
+            {#if corruptedCount > 0 || acknowledgedCount > 0 || overview?.recovery?.scan_error}
+              <button class="btn-link card-link" type="button" on:click={() => switchView('recovery')}>
+                View details →
+              </button>
+            {/if}
+          </article>
         {/if}
       </section>
       <section class="layout">
         <article class="card surface">
           <p class="card-label">Readiness</p>
-          <ul class="checks">
-            {#each overview?.checks ?? [] as check}
-              <li class:check-ok={check.ok} class:check-fail={!check.ok}>
-                <span>{check.label}</span>
-                <small>{check.detail}</small>
-              </li>
-            {/each}
-          </ul>
+          {#if !overview}
+            <div class="skeleton-stack">
+              <div class="skeleton" style="height:56px"></div>
+              <div class="skeleton" style="height:56px"></div>
+              <div class="skeleton" style="height:56px"></div>
+            </div>
+          {:else}
+            <ul class="checks">
+              {#each overview?.checks ?? [] as check}
+                <li class:check-ok={check.ok} class:check-fail={!check.ok}>
+                  <span>{check.label}</span>
+                  <small>{check.detail}</small>
+                </li>
+              {/each}
+            </ul>
+          {/if}
         </article>
       </section>
     {:else if view === 'buckets'}
@@ -636,7 +622,15 @@
             <h2>{selectedBucket ? selectedBucket : 'Choose or create a bucket'}</h2>
           </div>
           <div class="toolbar-actions">
-            <button class="ghost" type="button" on:click={refreshBuckets} disabled={busy}>Refresh</button>
+            <button
+              class="ghost"
+              type="button"
+              on:click={() => (selectedBucket ? refreshObjects() : refreshBuckets())}
+              disabled={busy || bucketsLoading || objectsLoading}
+            >
+              {#if bucketsLoading || objectsLoading}<span class="spinner" aria-hidden="true"></span>{/if}
+              Refresh
+            </button>
             {#if selectedBucket}
               <button class="ghost" type="button" on:click={() => dropBucket(selectedBucket)} disabled={busy}>
                 Delete empty bucket
@@ -655,24 +649,33 @@
             The browser only shows existing buckets. Create one here or through any S3
             client, then open it to browse files.
           </p>
-          <ul class="checks">
-            {#each buckets as bucket}
-              <li>
-                <div class="bucket-row">
-                  <button type="button" class="btn-link" on:click={() => openBucket(bucket.name)}>
-                    {bucket.name}
-                    <small>- created {bucket.created_at}</small>
-                  </button>
-                  <button class="ghost" type="button" on:click={() => dropBucket(bucket.name)} disabled={busy}>
-                    Delete
-                  </button>
-                </div>
-              </li>
-            {/each}
-            {#if buckets.length === 0}
-              <li class="fine-print">No buckets yet. Create one above to start the file browser.</li>
-            {/if}
-          </ul>
+          {#if bucketsLoading && buckets.length === 0}
+            <div class="skeleton-stack">
+              <div class="skeleton" style="height:52px"></div>
+              <div class="skeleton" style="height:52px"></div>
+            </div>
+          {:else if buckets.length === 0}
+            <p class="empty-state">
+              <span class="empty-mark" aria-hidden="true">+</span>
+              No buckets yet. Create one above to start the file browser.
+            </p>
+          {:else}
+            <ul class="checks">
+              {#each buckets as bucket (bucket.name)}
+                <li>
+                  <div class="bucket-row">
+                    <button type="button" class="btn-link" on:click={() => openBucket(bucket.name)}>
+                      {bucket.name}
+                      <small>created {formatTimestamp(bucket.created_at)}</small>
+                    </button>
+                    <button class="ghost" type="button" on:click={() => dropBucket(bucket.name)} disabled={busy}>
+                      Delete
+                    </button>
+                  </div>
+                </li>
+              {/each}
+            </ul>
+          {/if}
         {:else}
           <div class="crumb-row">
             <button class="btn-link" on:click={exitBucket}>Bucket: {selectedBucket}</button>
@@ -691,37 +694,49 @@
             csrf={session?.csrf_token}
             onUploaded={() => refreshObjects()}
           />
-          <table class="kv-table">
-            <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
-            <tbody>
-              {#each listing?.folders ?? [] as folder}
-                <tr>
-                  <td><button class="btn-link" on:click={() => enterFolder(folder)}>{folder}/</button></td>
-                  <td class="muted">folder</td>
-                  <td class="muted">—</td>
-                  <td class="row-actions">
-                    <button class="ghost" on:click={() => removeKey(folder)}>Delete</button>
-                  </td>
-                </tr>
-              {/each}
-              {#each listing?.objects ?? [] as obj}
-                <tr>
-                  <td>{obj.name}</td>
-                  <td>{formatBytes(obj.size)}</td>
-                  <td>{obj.last_modified}</td>
-                  <td class="row-actions">
-                    <a class="row-download" href={contentUrl(selectedBucket, obj.key)} download>
-                      Download
-                    </a>
-                    <button class="ghost" on:click={() => removeKey(obj)}>Delete</button>
-                  </td>
-                </tr>
-              {/each}
-              {#if listing && listing.folders.length === 0 && listing.objects.length === 0}
-                <tr><td colspan="4" class="muted">Empty folder.</td></tr>
-              {/if}
-            </tbody>
-          </table>
+          {#if objectsLoading && !listing}
+            <div class="skeleton-stack">
+              <div class="skeleton" style="height:40px"></div>
+              <div class="skeleton" style="height:40px"></div>
+              <div class="skeleton" style="height:40px"></div>
+            </div>
+          {:else if listing && listing.folders.length === 0 && listing.objects.length === 0}
+            <p class="empty-state">
+              <span class="empty-mark" aria-hidden="true">↑</span>
+              This folder is empty. Drop files above to upload the first one.
+            </p>
+          {:else}
+            <div class="table-scroll">
+              <table class="kv-table">
+                <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+                <tbody>
+                  {#each listing?.folders ?? [] as folder (folder)}
+                    <tr>
+                      <td><button class="btn-link" on:click={() => enterFolder(folder)}>{folder}/</button></td>
+                      <td class="muted">folder</td>
+                      <td class="muted">—</td>
+                      <td class="row-actions">
+                        <button class="ghost" on:click={() => removeKey(folder)}>Delete</button>
+                      </td>
+                    </tr>
+                  {/each}
+                  {#each listing?.objects ?? [] as obj (obj.key)}
+                    <tr>
+                      <td>{obj.name}</td>
+                      <td>{formatBytes(obj.size)}</td>
+                      <td>{formatTimestamp(obj.last_modified)}</td>
+                      <td class="row-actions">
+                        <a class="row-download" href={contentUrl(selectedBucket, obj.key)} download>
+                          Download
+                        </a>
+                        <button class="ghost" on:click={() => removeKey(obj)}>Delete</button>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
           <p class="fine-print">
             Individual files upload and download in place here. Bulk download of a whole
             folder or bucket is a future item; for now list, navigate and manage folders
@@ -731,32 +746,51 @@
       </section>
     {:else if view === 'users'}
       <section class="card surface">
-        <p class="card-label">Operators</p>
-        <h2>Accounts</h2>
-        <p class="fine-print">
-          These are dashboard operator accounts, not Telegram contacts. The Telegram
-          storage login lives on the Overview page.
-        </p>
-        <table class="kv-table">
-          <thead><tr><th>Username</th><th>Role</th><th>State</th><th></th></tr></thead>
-          <tbody>
-            {#each users as user}
-              <tr>
-                <td>{user.username}{#if user.display_name} <small>({user.display_name})</small>{/if}</td>
-                <td>{user.role}</td>
-                <td>{user.disabled ? 'disabled' : 'enabled'}</td>
-                <td>
-                  {#if canManageOperators}
-                    <button class="ghost" on:click={() => dropUser(user.id)} disabled={busy}>Remove</button>
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-            {#if users.length === 0}
-              <tr><td colspan="4" class="muted">No operator accounts.</td></tr>
-            {/if}
-          </tbody>
-        </table>
+        <div class="section-head">
+          <div>
+            <p class="card-label">Operators</p>
+            <h2>Accounts</h2>
+            <p class="fine-print">
+              These are dashboard operator accounts, not Telegram contacts. The Telegram
+              storage login lives on the Telegram settings page.
+            </p>
+          </div>
+          <button class="ghost" type="button" on:click={refreshUsers} disabled={usersLoading}>
+            {#if usersLoading}<span class="spinner" aria-hidden="true"></span>{/if}
+            Refresh
+          </button>
+        </div>
+        {#if usersLoading && users.length === 0}
+          <div class="skeleton-stack">
+            <div class="skeleton" style="height:44px"></div>
+            <div class="skeleton" style="height:44px"></div>
+          </div>
+        {:else if users.length === 0}
+          <p class="empty-state">
+            <span class="empty-mark" aria-hidden="true">+</span>
+            No operator accounts yet.
+          </p>
+        {:else}
+          <div class="table-scroll">
+            <table class="kv-table">
+              <thead><tr><th>Username</th><th>Role</th><th>State</th><th></th></tr></thead>
+              <tbody>
+                {#each users as user (user.id)}
+                  <tr>
+                    <td>{user.username}{#if user.display_name} <small>({user.display_name})</small>{/if}</td>
+                    <td><span class="role-tag" class:role-super={user.role === 'superadmin'}>{user.role}</span></td>
+                    <td>{user.disabled ? 'disabled' : 'enabled'}</td>
+                    <td class="row-actions">
+                      {#if canManageOperators}
+                        <button class="ghost" on:click={() => dropUser(user.id)} disabled={busy}>Remove</button>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
 
         <div class="nested-form">
           <p class="card-label">Add account</p>
@@ -823,33 +857,101 @@
   .grid-2 {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 10px;
-    margin: 10px 0;
+    gap: 14px;
+    margin: 14px 0;
+  }
+  /* Stack every field the same way, so the role select lines up with the inputs. */
+  .grid-2 label {
+    display: grid;
+    gap: 0.45rem;
+    align-content: start;
+  }
+  .grid-2 label span {
+    font-size: 0.8rem;
+    color: var(--muted);
   }
   .nested-form {
     margin-top: 16px;
     padding-top: 16px;
-    border-top: 1px solid color-mix(in srgb, var(--text, #172033) 10%, transparent);
+    border-top: 1px solid var(--border);
+  }
+  .table-scroll {
+    overflow-x: auto;
   }
   .kv-table {
     width: 100%;
     border-collapse: collapse;
     margin-top: 8px;
   }
+  .kv-table th {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+  }
   .kv-table th,
   .kv-table td {
     text-align: left;
-    padding: 6px 8px;
-    border-bottom: 1px solid color-mix(in srgb, var(--text, #172033) 14%, transparent);
+    padding: 12px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .kv-table tbody tr {
+    transition: background 120ms ease;
+  }
+  .kv-table tbody tr:hover {
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
+  }
+  .role-tag {
+    display: inline-block;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+    color: var(--muted);
+  }
+  .role-super {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
   }
   .btn-link {
     background: none;
     border: none;
-    color: var(--accent, #0d7a6d);
+    color: var(--accent);
     cursor: pointer;
     padding: 0;
     text-align: left;
     font: inherit;
+  }
+  .btn-link:hover {
+    text-decoration: underline;
+  }
+  .overview-head {
+    margin-bottom: 0.25rem;
+  }
+  .overview-head h2 {
+    margin: 0.25rem 0 0;
+  }
+  .corrupted {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .corrupted small {
+    display: block;
+    margin-top: 0.35rem;
+    color: var(--muted);
+  }
+  .corrupted.attention {
+    border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+    background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+  }
+  .corrupted.attention strong {
+    color: var(--danger);
+  }
+  .card-link {
+    margin-top: 0.6rem;
+    font-size: 0.85rem;
   }
   .crumb-row {
     display: flex;
@@ -860,12 +962,11 @@
   }
   .crumb-sep {
     margin: 0 2px;
-    color: var(--text, #172033);
-    opacity: 0.4;
+    color: var(--muted);
+    opacity: 0.6;
   }
   .muted {
-    color: var(--text, #172033);
-    opacity: 0.5;
+    color: var(--muted);
   }
   .row-actions {
     display: flex;
@@ -877,7 +978,7 @@
     padding: 0.3rem 0.7rem;
   }
   .row-download {
-    color: var(--accent, #0d7a6d);
+    color: var(--accent);
     text-decoration: none;
     font-weight: 700;
   }
@@ -920,8 +1021,7 @@
   }
   .tg-copy p {
     margin: 0;
-    color: var(--text, #172033);
-    opacity: 0.72;
+    color: var(--muted);
     max-width: 62ch;
   }
   .tg-actions {
@@ -929,52 +1029,5 @@
     gap: 0.75rem;
     flex-wrap: wrap;
     align-items: center;
-  }
-  .recovery-panel {
-    margin: 1rem 0 1.25rem;
-  }
-  .recovery-list {
-    display: grid;
-    gap: 0.75rem;
-    margin-top: 1rem;
-  }
-  .recovery-item {
-    border: 1px solid color-mix(in srgb, var(--text, #172033) 12%, transparent);
-    border-radius: 16px;
-    padding: 0.85rem 1rem;
-    background: color-mix(in srgb, var(--bg, #ffffff) 92%, transparent);
-  }
-  .recovery-item summary {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem 1rem;
-    align-items: baseline;
-    cursor: pointer;
-    list-style: none;
-  }
-  .recovery-item summary::-webkit-details-marker {
-    display: none;
-  }
-  .recovery-item summary span {
-    font-weight: 700;
-  }
-  .recovery-item summary small {
-    color: var(--text, #172033);
-    opacity: 0.72;
-  }
-  .recovery-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin: 0.55rem 0 0.35rem;
-    color: var(--text, #172033);
-    opacity: 0.6;
-    font-size: 0.9rem;
-  }
-  .recovery-item ul {
-    margin: 0.4rem 0 0;
-    padding-left: 1.2rem;
-    color: var(--text, #172033);
-    opacity: 0.8;
   }
 </style>

@@ -99,6 +99,18 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     let bind_addr = free_bind_addr();
 
     let mut server_command = command_for(&tempdir, &bind_addr);
+
+    // Seeded before boot on purpose: the recovery snapshot is only rescanned at startup
+    // and then once a minute, so an orphan created after boot would not show up in the
+    // cached snapshot the acknowledge endpoint validates against.
+    let ack_staging = tempdir
+        .path()
+        .join("data")
+        .join("staging")
+        .join("orphaned-acknowledge");
+    fs::create_dir_all(&ack_staging).expect("ack staging dir");
+    fs::write(ack_staging.join("note.txt"), "orphaned").expect("ack staging file");
+
     server_command.arg("server");
     server_command.stdout(Stdio::piped());
     let mut child = server_command.spawn().expect("spawn server");
@@ -209,6 +221,108 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     assert_eq!(overview.status, 200);
     assert!(!overview.body.contains("\"endpoint\""));
     assert!(overview.body.contains("\"checks\""));
+
+    // The startup scan runs concurrently with the listener, so give it a moment to land.
+    let mut recovery = Value::Null;
+    for _ in 0..40 {
+        let body = http_request(
+            &client,
+            &bind_addr,
+            "GET",
+            "/_admin/api/overview",
+            &[("Cookie", cookie_header.as_str())],
+            b"",
+        )
+        .await
+        .body;
+        let parsed: Value = serde_json::from_str(&body).expect("overview json");
+        let candidate = parsed["recovery"].clone();
+        if candidate["issues"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty())
+        {
+            recovery = candidate;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let issues = recovery["issues"]
+        .as_array()
+        .expect("recovery issues in overview");
+    let total = recovery["issue_count"].as_u64().expect("issue_count");
+    assert_eq!(
+        recovery["unacknowledged_count"].as_u64(),
+        Some(total),
+        "nothing is acknowledged yet"
+    );
+    let issue_id = issues[0]["id"].as_str().expect("issue id").to_string();
+
+    let unknown = http_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/recovery/acknowledge",
+        &[
+            ("Cookie", cookie_header.as_str()),
+            ("X-CSRF-Token", csrf.as_str()),
+        ],
+        br#"{"ids":["deadbeefdeadbeef"]}"#,
+    )
+    .await;
+    assert_eq!(unknown.status, 404, "unknown fingerprints are rejected");
+
+    let acknowledge = http_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/recovery/acknowledge",
+        &[
+            ("Cookie", cookie_header.as_str()),
+            ("X-CSRF-Token", csrf.as_str()),
+        ],
+        format!(r#"{{"ids":["{issue_id}"]}}"#).as_bytes(),
+    )
+    .await;
+    assert_eq!(acknowledge.status, 200);
+    assert!(acknowledge.body.contains("\"ok\":true"));
+
+    let after_ack = read_recovery(&client, &bind_addr, &cookie_header).await;
+    assert_eq!(
+        after_ack["unacknowledged_count"].as_u64(),
+        Some(total - 1),
+        "acknowledged issues drop out of the overview count"
+    );
+    assert_eq!(
+        after_ack["issue_count"].as_u64(),
+        Some(total),
+        "the issue itself stays visible"
+    );
+    let acked = find_issue(&after_ack, &issue_id).expect("acknowledged issue still listed");
+    assert!(acked["acknowledged_at"].is_string());
+    assert_eq!(acked["acknowledged_by"].as_str(), Some("admin"));
+
+    let unacknowledge = http_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/recovery/unacknowledge",
+        &[
+            ("Cookie", cookie_header.as_str()),
+            ("X-CSRF-Token", csrf.as_str()),
+        ],
+        format!(r#"{{"ids":["{issue_id}"]}}"#).as_bytes(),
+    )
+    .await;
+    assert_eq!(unacknowledge.status, 200);
+
+    let after_restore = read_recovery(&client, &bind_addr, &cookie_header).await;
+    assert_eq!(
+        after_restore["unacknowledged_count"].as_u64(),
+        Some(total),
+        "restoring puts the issue back in the count"
+    );
+    let restored = find_issue(&after_restore, &issue_id).expect("restored issue listed");
+    assert!(restored["acknowledged_at"].is_null());
 
     let orphaned_staging = tempdir
         .path()
@@ -387,6 +501,33 @@ async fn http_request(
         headers,
         body: String::from_utf8(body.to_vec()).expect("utf8"),
     }
+}
+
+/// Re-reads `/overview` and hands back just the `recovery` block.
+async fn read_recovery(
+    client: &Client<HttpConnector, Full<Bytes>>,
+    addr: &str,
+    cookie_header: &str,
+) -> Value {
+    let response = http_request(
+        client,
+        addr,
+        "GET",
+        "/_admin/api/overview",
+        &[("Cookie", cookie_header)],
+        b"",
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    let parsed: Value = serde_json::from_str(&response.body).expect("overview json");
+    parsed["recovery"].clone()
+}
+
+fn find_issue<'a>(recovery: &'a Value, id: &str) -> Option<&'a Value> {
+    recovery["issues"]
+        .as_array()?
+        .iter()
+        .find(|issue| issue["id"].as_str() == Some(id))
 }
 
 fn json_field(body: &str, field: &str) -> Option<String> {

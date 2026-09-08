@@ -90,6 +90,28 @@ export function saveTelegramSettings(
   });
 }
 
+interface RecoveryAckResult {
+  ok: boolean;
+  acknowledged_count: number;
+  unacknowledged_count: number;
+}
+
+/** Stop counting the given recovery issues on the Overview. */
+export function acknowledgeRecovery(csrf: string | null | undefined, ids: string[]) {
+  return requestJson<RecoveryAckResult>('/recovery/acknowledge', csrf, {
+    method: 'POST',
+    body: { ids }
+  });
+}
+
+/** Bring previously acknowledged recovery issues back into the count. */
+export function unacknowledgeRecovery(csrf: string | null | undefined, ids: string[]) {
+  return requestJson<RecoveryAckResult>('/recovery/unacknowledge', csrf, {
+    method: 'POST',
+    body: { ids }
+  });
+}
+
 export function listUsers(csrf?: string | null) {
   return requestJson<UsersState>('/users', csrf);
 }

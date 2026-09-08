@@ -113,6 +113,40 @@ pub struct RecoveryIssue {
     pub details: Vec<String>,
 }
 
+impl RecoveryIssue {
+    /// Stable identity for an issue across repeated scans, used to remember
+    /// operator acknowledgements. Only the fields that identify *what* is broken
+    /// take part; `summary` and `details` are deliberately excluded so that
+    /// rewording a scan message cannot silently drop an acknowledgement.
+    pub fn fingerprint(&self) -> String {
+        let mut hasher = Sha256::new();
+        for part in [
+            Some(self.kind.as_str()),
+            self.object_id.as_ref().map(|_| "object"),
+            self.bucket.as_deref(),
+            self.key.as_deref(),
+            self.path.as_deref(),
+        ] {
+            // Length-prefix each field so ("ab", "c") cannot collide with ("a", "bc").
+            match part {
+                Some(value) => {
+                    hasher.update(value.len().to_le_bytes());
+                    hasher.update(value.as_bytes());
+                }
+                None => hasher.update(usize::MAX.to_le_bytes()),
+            }
+        }
+        if let Some(object_id) = self.object_id {
+            hasher.update(object_id.as_bytes());
+        }
+        let digest = hasher.finalize();
+        digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedObject {
     pub operation_id: Uuid,

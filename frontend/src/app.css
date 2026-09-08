@@ -1,6 +1,10 @@
  :root {
   color-scheme:light;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   --bg:#f5f7fa;--bg-alt:#f5f7fa;--surface:#fff;--surface-strong:#fff;--border:#e1e7ee;--text:#182637;--muted:#596b7e;--accent:#216dba;--accent-2:#417992;--danger:#b33838;--ok:#167858;--shadow:0 2px 8px #172b4d06;
+  /* One radius scale for the whole console. */
+  --radius-sm:8px;--radius-md:12px;--radius-lg:18px;
+  --accent-soft:color-mix(in srgb, var(--accent) 10%, transparent);
+  --accent-ring:color-mix(in srgb, var(--accent) 28%, transparent);
 }
 html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text)}
 :focus-visible{outline:3px solid #4b98dd;outline-offset:3px}
@@ -13,21 +17,28 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
 button {
   border: 0;
-  border-radius: 7px;
-  padding: 0.88rem 1.2rem;
+  border-radius: var(--radius-sm);
+  padding: 0.8rem 1.15rem;
   background: #22324d;
   color: #fff;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
   transition:
     transform 120ms ease,
     opacity 120ms ease,
-    background 120ms ease;
+    background 120ms ease,
+    border-color 120ms ease;
 }
 
 button:hover:not(:disabled) {
@@ -37,10 +48,15 @@ button:hover:not(:disabled) {
 button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+  transform: none;
 }
 
 button.primary {
   background: var(--accent);
+}
+
+button.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, #000);
 }
 
 button.ghost {
@@ -49,18 +65,47 @@ button.ghost {
   border: 1px solid var(--border);
 }
 
-input {
-  width: 100%;
-  padding: 0.9rem 1rem;
-  border-radius: 14px;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.9);
-  color: var(--text);
+button.ghost:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent-ring);
 }
 
-input:focus {
-  outline: 2px solid rgba(13, 122, 109, 0.28);
-  border-color: rgba(13, 122, 109, 0.42);
+input,
+select {
+  width: 100%;
+  padding: 0.72rem 0.9rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent-ring);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* The native control is the only unstyled widget left, so draw our own chevron.
+   background-color is set explicitly or the OS paints its own control surface. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 2.25rem;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23596b7e' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6.5 8 10.5 12 6.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 16px 16px;
+}
+
+select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .shell {
@@ -82,13 +127,12 @@ input:focus {
 .card {
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
-  backdrop-filter: blur(14px);
 }
 
 .hero-copy {
   padding: 2rem;
-  border-radius: 30px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(255, 250, 242, 0.8));
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(250, 251, 253, 0.8));
 }
 
 .hero-copy h1 {
@@ -120,7 +164,7 @@ input:focus {
   gap: 0.8rem;
   align-content: center;
   padding: 1.5rem;
-  border-radius: 24px;
+  border-radius: var(--radius-lg);
   background: linear-gradient(180deg, rgba(17, 31, 54, 0.95), rgba(29, 42, 69, 0.98));
   color: #f5f7fb;
 }
@@ -142,7 +186,7 @@ input:focus {
   align-items: center;
   justify-content: center;
   min-width: 7rem;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   padding: 0.36rem 0.75rem;
   font-size: 0.86rem;
   font-weight: 700;
@@ -163,7 +207,7 @@ input:focus {
 
 .surface {
   background: var(--surface);
-  border-radius: 24px;
+  border-radius: var(--radius-lg);
 }
 
 .card {
@@ -209,9 +253,9 @@ input:focus {
   display: grid;
   gap: 0.25rem;
   padding: 0.85rem 0.95rem;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.6);
-  border: 1px solid rgba(28, 41, 64, 0.08);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--border);
 }
 
 .kv dt {
@@ -228,9 +272,9 @@ input:focus {
 .callout {
   margin-top: 1rem;
   padding: 1rem;
-  border-radius: 18px;
-  background: rgba(13, 122, 109, 0.08);
-  border: 1px solid rgba(13, 122, 109, 0.15);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-ring);
 }
 
 .callout ul,
@@ -253,9 +297,9 @@ input:focus {
 .callout li,
 .checks li {
   padding: 0.8rem 0.9rem;
-  border-radius: 16px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--surface);
 }
 
 .telegram-settings {
@@ -340,13 +384,90 @@ input:focus {
   gap: 0.75rem;
 }
 
+/* Inline busy affordance for refresh buttons. */
+.spinner {
+  width: 0.85em;
+  height: 0.85em;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 700ms linear infinite;
+  flex: 0 0 auto;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* First-load placeholders, so panels do not flash empty before data lands. */
+.skeleton {
+  border-radius: var(--radius-md);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--text) 7%, transparent),
+    color-mix(in srgb, var(--text) 12%, transparent),
+    color-mix(in srgb, var(--text) 7%, transparent)
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.3s ease-in-out infinite;
+}
+
+.skeleton-stack {
+  display: grid;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner,
+  .skeleton {
+    animation: none;
+  }
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 1rem 0 0;
+  padding: 1.5rem 1rem;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  text-align: left;
+}
+
+.empty-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
 .toast {
   position: fixed;
   right: 1rem;
   bottom: 1rem;
   max-width: min(32rem, calc(100vw - 2rem));
   padding: 0.95rem 1.1rem;
-  border-radius: 18px;
+  border-radius: var(--radius-md);
   box-shadow: var(--shadow);
   background: #fff;
   border: 1px solid var(--border);
@@ -363,7 +484,7 @@ input:focus {
 code {
   background: rgba(34, 50, 77, 0.08);
   padding: 0.15rem 0.35rem;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 @media (max-width: 980px) {
@@ -384,12 +505,6 @@ code {
   .shell {
     width: min(100vw - 1rem, 1180px);
     padding-top: 1rem;
-  }
-
-  .hero-copy,
-  .hero-panel,
-  .card {
-    border-radius: 20px;
   }
 
   .hero-copy {

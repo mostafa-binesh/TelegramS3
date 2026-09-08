@@ -2,6 +2,7 @@ use super::rows::timestamp_now;
 use super::{MetadataError, MetadataStore};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelegramBootstrapSettings {
@@ -61,4 +62,59 @@ impl MetadataStore {
             Ok(())
         })
     }
+
+    /// Recovery issues an operator has reviewed and chosen to stop counting,
+    /// keyed by [`crate::object_format::RecoveryIssue::fingerprint`].
+    pub fn recovery_acknowledgements(&self) -> Result<RecoveryAcknowledgements, MetadataError> {
+        self.with_connection(|connection| {
+            let json: Option<String> = connection
+                .query_row(
+                    r#"
+                    SELECT value
+                    FROM app_settings
+                    WHERE key = 'recovery_acknowledged'
+                    "#,
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match json {
+                Some(json) => Ok(serde_json::from_str::<RecoveryAcknowledgements>(&json)?),
+                None => Ok(RecoveryAcknowledgements::default()),
+            }
+        })
+    }
+
+    pub fn set_recovery_acknowledgements(
+        &self,
+        acknowledgements: &RecoveryAcknowledgements,
+    ) -> Result<(), MetadataError> {
+        let json = serde_json::to_string(acknowledgements)?;
+        self.with_connection(|connection| {
+            let tx = connection.transaction()?;
+            tx.execute(
+                r#"
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES ('recovery_acknowledged', ?1, ?2)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                "#,
+                params![json, timestamp_now()?],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+}
+
+/// Fingerprint -> who acknowledged it and when.
+pub type RecoveryAcknowledgements = BTreeMap<String, RecoveryAck>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryAck {
+    /// RFC 3339 timestamp of the acknowledgement.
+    pub at: String,
+    /// Operator username that acknowledged the issue.
+    pub by: String,
 }

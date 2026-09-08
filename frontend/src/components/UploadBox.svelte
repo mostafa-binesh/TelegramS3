@@ -159,20 +159,22 @@
 <style>
   .upload-box {
     border: 1px dashed var(--border);
-    border-radius: 16px;
+    border-radius: var(--radius-lg);
     padding: 12px;
     margin: 8px 0 4px;
     background: rgba(255, 255, 255, 0.5);
-    transition: background 120ms ease;
+    transition:
+      background 120ms ease,
+      border-color 120ms ease;
   }
   .dropzone {
-    background: rgba(13, 122, 109, 0.1);
-    border-color: rgba(13, 122, 109, 0.45);
+    background: var(--accent-soft);
+    border-color: var(--accent-ring);
   }
   .drop-hint {
     margin-top: 10px;
     font-weight: 700;
-    color: var(--accent, #0d7a6d);
+    color: var(--accent);
   }
   .row-inline {
     display: flex;
@@ -202,7 +204,7 @@
     display: grid;
     gap: 4px;
     padding: 8px 10px;
-    border-radius: 12px;
+    border-radius: var(--radius-md);
     background: rgba(255, 255, 255, 0.8);
     border: 1px solid var(--border);
   }
@@ -230,7 +232,7 @@
   .bar-track {
     height: 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--text, #172033) 14%, transparent);
+    background: color-mix(in srgb, var(--text) 14%, transparent);
     overflow: hidden;
   }
   .bar-fill {
