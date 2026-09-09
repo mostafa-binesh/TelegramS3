@@ -68,11 +68,7 @@
         {formatCount(open.length)}
         {open.length === 1 ? 'file needs attention' : 'files need attention'}
       </h2>
-      <p class="fine-print">
-        Expand an issue to see the exact files or Telegram objects that are missing,
-        unreadable, or corrupted. Acknowledging one keeps it here but stops it counting
-        on the Overview.
-      </p>
+      <p class="fine-print">Expand an issue for details. Acknowledging it keeps it here but removes it from the Overview count.</p>
       {#if recovery?.checked_at}
         <p class="fine-print">Snapshot refreshed {formatTimestamp(recovery.checked_at)}.</p>
       {/if}
