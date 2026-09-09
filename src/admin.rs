@@ -414,7 +414,9 @@ impl AdminUiState {
             (Method::POST, "telegram/wizard/submit-password") => {
                 self.wizard_submit_password(request, &principal).await
             }
-            (Method::POST, "telegram/wizard/cancel") => self.wizard_cancel(&principal).await,
+            (Method::POST, "telegram/wizard/cancel") => {
+                self.wizard_cancel(request, &principal).await
+            }
             (Method::GET, "telegram/settings") => self.telegram_settings(&principal).await,
             (Method::POST, "telegram/settings") => {
                 self.telegram_save_settings(request, &principal).await
@@ -1027,6 +1029,17 @@ impl AdminUiState {
         request: Request<Incoming>,
         principal: &ResolvedPrincipal,
     ) -> Response<Body> {
+        let Some(WizardBeginRequest {
+            phone,
+            flow_id,
+            replace,
+        }) = read_wizard_begin_request(request).await
+        else {
+            return json_error(StatusCode::BAD_REQUEST, "a login flow id is required");
+        };
+        let Some(flow_id) = flow_id.filter(|value| !value.trim().is_empty()) else {
+            return json_error(StatusCode::BAD_REQUEST, "a login flow id is required");
+        };
         let mut driver = self.wizard_driver.lock().await;
         if driver.is_authorized() {
             return json_response(
@@ -1039,23 +1052,6 @@ impl AdminUiState {
                 ),
             );
         }
-        if driver.is_busy() {
-            let snapshot = driver.snapshot();
-            let hint = snapshot.owner.unwrap_or_default();
-            let mut response = json_error(
-                StatusCode::CONFLICT,
-                "another Telegram login is already in progress",
-            );
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json; charset=utf-8"),
-            );
-            let _ = hint;
-            return response;
-        }
-        let phone = read_wizard_begin_request(request)
-            .await
-            .and_then(|body| body.phone);
         let transport = match self.transport_manager.current().await {
             Ok(transport) => transport,
             Err(error) => {
@@ -1063,7 +1059,10 @@ impl AdminUiState {
             }
         };
         let owner = &principal.user.username;
-        match driver.begin(&transport, phone, owner).await {
+        match driver
+            .begin(&transport, phone, &flow_id, replace, owner)
+            .await
+        {
             Ok(step) => {
                 if driver.is_authorized() {
                     self.finalize_wizard_success().await;
@@ -1085,9 +1084,15 @@ impl AdminUiState {
     async fn wizard_submit_code(
         &self,
         request: Request<Incoming>,
-        _principal: &ResolvedPrincipal,
+        principal: &ResolvedPrincipal,
     ) -> Response<Body> {
-        let code = read_wizard_code_request(request).await;
+        let Some(WizardCodeRequest { code, flow_id }) = read_wizard_code_request(request).await
+        else {
+            return driver_error_response(&LoginDriverError::MissingCode);
+        };
+        let Some(flow_id) = flow_id.filter(|value| !value.trim().is_empty()) else {
+            return driver_error_response(&LoginDriverError::FlowMismatch);
+        };
         let mut driver = self.wizard_driver.lock().await;
         let transport = match self.transport_manager.current().await {
             Ok(transport) => transport,
@@ -1098,7 +1103,10 @@ impl AdminUiState {
         let Some(code) = code else {
             return driver_error_response(&LoginDriverError::MissingCode);
         };
-        match driver.submit_code(&transport, &code).await {
+        if driver.owner_name() != Some(principal.user.username.as_str()) {
+            return driver_error_response(&LoginDriverError::FlowMismatch);
+        }
+        match driver.submit_code(&transport, &code, &flow_id).await {
             Ok(step) => {
                 if driver.is_authorized() {
                     self.finalize_wizard_success().await;
@@ -1120,9 +1128,16 @@ impl AdminUiState {
     async fn wizard_submit_password(
         &self,
         request: Request<Incoming>,
-        _principal: &ResolvedPrincipal,
+        principal: &ResolvedPrincipal,
     ) -> Response<Body> {
-        let password = read_wizard_password_request(request).await;
+        let Some(WizardPasswordRequest { password, flow_id }) =
+            read_wizard_password_request(request).await
+        else {
+            return driver_error_response(&LoginDriverError::MissingPassword);
+        };
+        let Some(flow_id) = flow_id.filter(|value| !value.trim().is_empty()) else {
+            return driver_error_response(&LoginDriverError::FlowMismatch);
+        };
         let mut driver = self.wizard_driver.lock().await;
         let transport = match self.transport_manager.current().await {
             Ok(transport) => transport,
@@ -1133,7 +1148,13 @@ impl AdminUiState {
         let Some(password) = password else {
             return driver_error_response(&LoginDriverError::MissingPassword);
         };
-        match driver.submit_password(&transport, &password).await {
+        if driver.owner_name() != Some(principal.user.username.as_str()) {
+            return driver_error_response(&LoginDriverError::FlowMismatch);
+        }
+        match driver
+            .submit_password(&transport, &password, &flow_id)
+            .await
+        {
             Ok(step) => {
                 if driver.is_authorized() {
                     self.finalize_wizard_success().await;
@@ -1152,10 +1173,19 @@ impl AdminUiState {
         }
     }
 
-    async fn wizard_cancel(&self, _principal: &ResolvedPrincipal) -> Response<Body> {
+    async fn wizard_cancel(
+        &self,
+        request: Request<Incoming>,
+        principal: &ResolvedPrincipal,
+    ) -> Response<Body> {
+        let flow_id = read_wizard_cancel_request(request)
+            .await
+            .and_then(|body| body.flow_id);
         let mut driver = self.wizard_driver.lock().await;
-        driver.cancel();
-        json_response(StatusCode::OK, serde_json::json!({ "ok": true }))
+        match driver.cancel(flow_id.as_deref(), &principal.user.username) {
+            Ok(()) => json_response(StatusCode::OK, serde_json::json!({ "ok": true })),
+            Err(error) => driver_error_response(&error),
+        }
     }
 
     /// After a successful phone/code/password login, reflect the now-authorised
@@ -1696,6 +1726,10 @@ fn driver_error_response(error: &LoginDriverError) -> Response<Body> {
                 ),
             )
         }
+        LoginDriverError::FlowMismatch => (
+            StatusCode::CONFLICT,
+            "that Telegram login flow is no longer active".to_string(),
+        ),
         LoginDriverError::MissingPhone => (
             StatusCode::BAD_REQUEST,
             "a phone number is required".to_string(),
@@ -1737,18 +1771,29 @@ fn driver_error_response(error: &LoginDriverError) -> Response<Body> {
 struct WizardBeginRequest {
     #[serde(default)]
     phone: Option<String>,
+    flow_id: Option<String>,
+    #[serde(default)]
+    replace: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 struct WizardCodeRequest {
     code: Option<String>,
+    flow_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 struct WizardPasswordRequest {
     password: Option<String>,
+    flow_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+struct WizardCancelRequest {
+    flow_id: Option<String>,
 }
 
 async fn read_json_body_opt<T: serde::de::DeserializeOwned>(
@@ -1765,16 +1810,16 @@ async fn read_wizard_begin_request(request: Request<Incoming>) -> Option<WizardB
     read_json_body_opt(request).await
 }
 
-async fn read_wizard_code_request(request: Request<Incoming>) -> Option<String> {
-    read_json_body_opt::<WizardCodeRequest>(request)
-        .await
-        .and_then(|body| body.code)
+async fn read_wizard_code_request(request: Request<Incoming>) -> Option<WizardCodeRequest> {
+    read_json_body_opt(request).await
 }
 
-async fn read_wizard_password_request(request: Request<Incoming>) -> Option<String> {
-    read_json_body_opt::<WizardPasswordRequest>(request)
-        .await
-        .and_then(|body| body.password)
+async fn read_wizard_password_request(request: Request<Incoming>) -> Option<WizardPasswordRequest> {
+    read_json_body_opt(request).await
+}
+
+async fn read_wizard_cancel_request(request: Request<Incoming>) -> Option<WizardCancelRequest> {
+    read_json_body_opt(request).await
 }
 
 fn object_to_wire(manifest: &ObjectManifest, key: &str) -> ObjectEntryWire {

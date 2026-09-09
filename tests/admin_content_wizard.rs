@@ -339,13 +339,49 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
             ("X-CSRF-Token", &csrf),
             ("Content-Type", "application/json"),
         ],
-        br#"{"phone":"+15551234567"}"#,
+        br#"{"phone":"+15551234567","flow_id":"flow-a","replace":true}"#,
     )
     .await;
     assert_eq!(began.status_code, 200, "wizard begin status");
     let began_json = began.bytes_json;
     assert_eq!(began_json["phase"], Value::String("code".to_string()));
     assert_eq!(began_json["needs_2fa"], Value::Bool(false));
+
+    // Cancelling releases the flow, and the same phone can start a fresh code
+    // attempt with a new flow id.
+    let cancel_first = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/telegram/wizard/cancel",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        br#"{"flow_id":"flow-a"}"#,
+    )
+    .await;
+    assert_eq!(cancel_first.status_code, 200, "first wizard cancel status");
+
+    let restarted = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/telegram/wizard/begin",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        br#"{"phone":"+15551234567","flow_id":"flow-b","replace":true}"#,
+    )
+    .await;
+    assert_eq!(restarted.status_code, 200, "wizard restart status");
+    assert_eq!(
+        restarted.bytes_json["phase"],
+        Value::String("code".to_string())
+    );
 
     // A second begin while a flow is mid-stage is rejected (occupied, 409).
     let rebegin = json_request(
@@ -358,10 +394,46 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
             ("X-CSRF-Token", &csrf),
             ("Content-Type", "application/json"),
         ],
-        br#"{"phone":"+15559998877"}"#,
+        br#"{"phone":"+15559998877","flow_id":"flow-c"}"#,
     )
     .await;
     assert_eq!(rebegin.status_code, 409, "wizard re-begin status");
+
+    let stale_submission = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/telegram/wizard/submit-code",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        br#"{"code":"12345","flow_id":"flow-a"}"#,
+    )
+    .await;
+    assert_eq!(
+        stale_submission.status_code, 409,
+        "stale flow submission status"
+    );
+
+    // An invalid code remains retryable and does not advance the driver into a
+    // wrong-stage state.
+    let invalid_code = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/telegram/wizard/submit-code",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        br#"{"code":"000000","flow_id":"flow-b"}"#,
+    )
+    .await;
+    assert_eq!(invalid_code.status_code, 400, "invalid code status");
+    assert!(invalid_code.bytes_json["error"].is_string());
 
     // submit-code (forced 2FA) -> two_fa, needs_2fa true.
     let two_fa = json_request(
@@ -374,7 +446,7 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
             ("X-CSRF-Token", &csrf),
             ("Content-Type", "application/json"),
         ],
-        br#"{"code":"12345"}"#,
+        br#"{"code":"12345","flow_id":"flow-b"}"#,
     )
     .await;
     assert_eq!(two_fa.status_code, 200, "submit-code status");
@@ -395,7 +467,7 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
             ("X-CSRF-Token", &csrf),
             ("Content-Type", "application/json"),
         ],
-        br#"{"password":"anything"}"#,
+        br#"{"password":"anything","flow_id":"flow-b"}"#,
     )
     .await;
     assert_eq!(authorized.status_code, 200, "submit-password status");
@@ -434,7 +506,7 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
             ("X-CSRF-Token", &csrf),
             ("Content-Type", "application/json"),
         ],
-        b"",
+        br#"{"flow_id":"flow-b"}"#,
     )
     .await;
     assert_eq!(cancel.status_code, 200, "cancel status");

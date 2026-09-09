@@ -22,6 +22,7 @@
   export let onManageOperators: () => void = () => {};
   export let onToggleWizard: (open: boolean) => void = () => {};
   export let onWizardDone: () => void = () => {};
+  export let onWizardClose: () => void = () => {};
 
   $: needsSetup = (overview?.telegram?.connection_state ?? 'needs_reauth') !== 'connected';
   $: statusLabel = overview?.telegram?.connection_state?.replaceAll('_', ' ') ?? 'needs reauth';
@@ -45,7 +46,7 @@
   {#if settingsMessage}<p class="fine-print">{settingsMessage}</p>{/if}{#if settingsError}<p class="fine-print error-hint">{settingsError}</p>{/if}
 </article>
 
-{#if showWizard && wizardComponent}<svelte:component this={wizardComponent} csrf={session?.csrf_token} onDone={onWizardDone}/><button class="ghost" type="button" on:click={() => onToggleWizard(false)}>Close wizard</button>{/if}
+{#if showWizard && wizardComponent}<svelte:component this={wizardComponent} csrf={session?.csrf_token} onDone={onWizardDone} onClose={onWizardClose}/>{/if}
 
 {#if showCredentials}
   <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showCredentials = false)}><form class="modal-card" on:submit|preventDefault={() => { showCredentials = false; onSave(); }}><div class="section-head"><div><p class="card-label">Telegram credentials</p><h2>Storage account</h2></div><button class="icon-button" type="button" on:click={() => showCredentials = false}>×</button></div><div class="settings-grid"><label><span>Telegram API ID</span><input bind:value={telegramApiId} autocomplete="off" /></label><label><span>Telegram API hash</span><input bind:value={telegramApiHash} type="password" autocomplete="off" /></label><label><span>Storage chat ID</span><input bind:value={telegramStorageChatId} autocomplete="off" /></label></div><div class="settings-actions"><button class="primary" type="submit" disabled={settingsBusy}>Save credentials</button></div></form></div>

@@ -54,6 +54,7 @@ pub enum LoginDriverError {
         stage: LoginStage,
         owner: Option<String>,
     },
+    FlowMismatch,
     MissingPhone,
     MissingCode,
     MissingPassword,
@@ -75,6 +76,7 @@ impl Default for TelegramLoginDriver {
 pub struct TelegramLoginDriver {
     stage: LoginStage,
     owner: Option<String>,
+    flow_id: Option<String>,
     phone: Option<String>,
     code_token: Option<LoginToken>,
     password_token: Option<PasswordToken>,
@@ -90,6 +92,7 @@ impl TelegramLoginDriver {
         Self {
             stage: LoginStage::Idle,
             owner: None,
+            flow_id: None,
             phone: None,
             code_token: None,
             password_token: None,
@@ -115,19 +118,29 @@ impl TelegramLoginDriver {
         self.stage == LoginStage::Authorized
     }
 
+    pub fn owner_name(&self) -> Option<&str> {
+        self.owner.as_deref()
+    }
+
     /// Begin: record the phone and request a login code. Returns the stage we
     /// moved to, or an error if the flow is already owned by another operator.
     pub async fn begin(
         &mut self,
         transport: &TelegramTransport,
         phone: Option<String>,
+        flow_id: &str,
+        replace: bool,
         owner: &str,
     ) -> Result<LoginStep, LoginDriverError> {
         if self.is_busy() {
-            return Err(LoginDriverError::Occupied {
-                stage: self.stage.clone(),
-                owner: self.owner.clone(),
-            });
+            if replace && self.owner.as_deref() == Some(owner) {
+                self.cancel_internal();
+            } else {
+                return Err(LoginDriverError::Occupied {
+                    stage: self.stage.clone(),
+                    owner: self.owner.clone(),
+                });
+            }
         }
         let phone = phone
             .map(|value| value.trim().to_string())
@@ -136,7 +149,7 @@ impl TelegramLoginDriver {
             if phone.is_none() {
                 return Err(LoginDriverError::MissingPhone);
             }
-            self.reset_to(LoginStage::Code, phone, owner);
+            self.reset_to(LoginStage::Code, phone, flow_id, owner);
             return Ok(LoginStep {
                 stage: LoginStage::Code,
                 message: "confirmation code required".to_string(),
@@ -162,6 +175,7 @@ impl TelegramLoginDriver {
         self.phone = Some(phone.clone());
         self.code_token = Some(token);
         self.owner = Some(owner.to_string());
+        self.flow_id = Some(flow_id.to_string());
         self.stage = LoginStage::Code;
         Ok(LoginStep {
             stage: LoginStage::Code,
@@ -176,7 +190,9 @@ impl TelegramLoginDriver {
         &mut self,
         transport: &TelegramTransport,
         code: &str,
+        flow_id: &str,
     ) -> Result<LoginStep, LoginDriverError> {
+        self.ensure_flow(flow_id)?;
         let code = code.trim();
         if code.is_empty() {
             return Err(LoginDriverError::MissingCode);
@@ -184,6 +200,9 @@ impl TelegramLoginDriver {
         if transport.is_mock() {
             if self.stage != LoginStage::Code {
                 return Err(self.not_in_stage());
+            }
+            if code == "000000" {
+                return Err(LoginDriverError::InvalidCode);
             }
             if self.mock_force_2fa {
                 // Simulate Telegram demanding the cloud password.
@@ -216,14 +235,24 @@ impl TelegramLoginDriver {
                 })
             }
             Err(SignInError::SignUpRequired) => Err(LoginDriverError::SignUpRequired),
-            Err(SignInError::InvalidCode) => Err(LoginDriverError::InvalidCode),
+            Err(SignInError::InvalidCode) => {
+                self.code_token = Some(token);
+                Err(LoginDriverError::InvalidCode)
+            }
             Err(SignInError::InvalidPassword(password_token)) => {
                 // Fresh token on retry so the operator can try again.
                 self.password_token = Some(password_token);
                 Err(LoginDriverError::WrongPassword)
             }
             Err(SignInError::Other(error)) => {
-                Err(LoginDriverError::Unauthorized(error.to_string()))
+                let detail = error.to_string();
+                if detail.contains("PHONE_CODE_EXPIRED") {
+                    self.cancel_internal();
+                    Err(LoginDriverError::ExpiredCode)
+                } else {
+                    self.code_token = Some(token);
+                    Err(LoginDriverError::Unauthorized(detail))
+                }
             }
         }
     }
@@ -233,7 +262,9 @@ impl TelegramLoginDriver {
         &mut self,
         transport: &TelegramTransport,
         password: &str,
+        flow_id: &str,
     ) -> Result<LoginStep, LoginDriverError> {
+        self.ensure_flow(flow_id)?;
         if password.trim().is_empty() {
             return Err(LoginDriverError::MissingPassword);
         }
@@ -270,9 +301,23 @@ impl TelegramLoginDriver {
     }
 
     /// Drop any in-flight flow and its retained tokens.
-    pub fn cancel(&mut self) {
+    pub fn cancel(&mut self, flow_id: Option<&str>, owner: &str) -> Result<(), LoginDriverError> {
+        if !self.is_busy() {
+            return Ok(());
+        }
+        if self.owner.as_deref() != Some(owner)
+            || flow_id.is_some_and(|value| self.flow_id.as_deref() != Some(value))
+        {
+            return Err(LoginDriverError::FlowMismatch);
+        }
+        self.cancel_internal();
+        Ok(())
+    }
+
+    fn cancel_internal(&mut self) {
         self.stage = LoginStage::Idle;
         self.owner = None;
+        self.flow_id = None;
         self.phone = None;
         self.code_token = None;
         self.password_token = None;
@@ -281,13 +326,15 @@ impl TelegramLoginDriver {
     fn authorize(&mut self) {
         self.stage = LoginStage::Authorized;
         self.owner = None;
+        self.flow_id = None;
         self.code_token = None;
         self.password_token = None;
     }
 
-    fn reset_to(&mut self, stage: LoginStage, phone: Option<String>, owner: &str) {
+    fn reset_to(&mut self, stage: LoginStage, phone: Option<String>, flow_id: &str, owner: &str) {
         self.stage = stage;
         self.phone = phone;
+        self.flow_id = Some(flow_id.to_string());
         self.owner = Some(owner.to_string());
         self.code_token = None;
         self.password_token = None;
@@ -299,6 +346,14 @@ impl TelegramLoginDriver {
 
     fn not_in_stage(&self) -> LoginDriverError {
         LoginDriverError::Unauthorized("flow is in the wrong stage for that action".to_string())
+    }
+
+    fn ensure_flow(&self, flow_id: &str) -> Result<(), LoginDriverError> {
+        if self.is_busy() && self.flow_id.as_deref() == Some(flow_id) {
+            Ok(())
+        } else {
+            Err(LoginDriverError::FlowMismatch)
+        }
     }
 }
 
@@ -327,10 +382,13 @@ mod tests {
             stage: LoginStage::TwoFa,
             phone: Some("+15551234567".to_string()),
             owner: Some("alice".to_string()),
+            flow_id: Some("flow".to_string()),
             ..Default::default()
         };
         assert!(driver.is_busy());
-        driver.cancel();
+        driver
+            .cancel(Some("flow"), "alice")
+            .expect("matching flow cancels");
         assert_eq!(driver.snapshot().stage, LoginStage::Idle);
         assert_eq!(driver.snapshot().owner, None);
         assert!(!driver.is_busy());

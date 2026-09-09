@@ -398,29 +398,32 @@ export function getWizardState(csrf?: string | null) {
   return requestJson<WizardState>('/telegram/wizard/state', csrf);
 }
 
-export function wizardBegin(phone: string | undefined, csrf?: string | null) {
+export function wizardBegin(phone: string | undefined, flowId: string, csrf?: string | null) {
   return requestJson<WizardState>('/telegram/wizard/begin', csrf, {
     method: 'POST',
-    body: phone === undefined ? {} : { phone }
+    body: phone === undefined ? { flow_id: flowId, replace: true } : { phone, flow_id: flowId, replace: true }
   });
 }
 
-export function wizardSubmitCode(code: string, csrf?: string | null) {
+export function wizardSubmitCode(code: string, flowId: string, csrf?: string | null) {
   return requestJson<WizardState>('/telegram/wizard/submit-code', csrf, {
     method: 'POST',
-    body: { code }
+    body: { code, flow_id: flowId }
   });
 }
 
-export function wizardSubmitPassword(password: string, csrf?: string | null) {
+export function wizardSubmitPassword(password: string, flowId: string, csrf?: string | null) {
   return requestJson<WizardState>('/telegram/wizard/submit-password', csrf, {
     method: 'POST',
-    body: { password }
+    body: { password, flow_id: flowId }
   });
 }
 
-export function wizardCancel(csrf?: string | null) {
-  return requestJson<{ ok: boolean }>('/telegram/wizard/cancel', csrf, { method: 'POST' });
+export function wizardCancel(flowId?: string, csrf?: string | null) {
+  return requestJson<{ ok: boolean }>('/telegram/wizard/cancel', csrf, {
+    method: 'POST',
+    body: flowId ? { flow_id: flowId } : {}
+  });
 }
 
 export function getSetup(){return requestJson<{setup_required:boolean}>('/setup');}
