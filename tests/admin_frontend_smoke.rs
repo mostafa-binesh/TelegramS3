@@ -440,6 +440,29 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     assert_eq!(spa.status, 200);
     assert!(spa.body.contains("telegram-s3 admin"));
 
+    let asset = http_request(
+        &client,
+        &bind_addr,
+        "GET",
+        "/_admin/assets/app.css",
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(asset.status, 200);
+    assert_eq!(asset.body, "body{}");
+
+    let missing_asset = http_request(
+        &client,
+        &bind_addr,
+        "GET",
+        "/_admin/assets/missing.js",
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(missing_asset.status, 404);
+
     let _ = child.kill();
     let _ = child.wait();
 }

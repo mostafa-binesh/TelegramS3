@@ -1529,14 +1529,12 @@ impl AdminUiState {
         }
         let path = request.uri().path();
         if let Some(asset_path) = path.strip_prefix(ADMIN_ASSET_PREFIX) {
-            let Some(file_path) = safe_join(self.ui_dist_dir(), asset_path) else {
+            let Some(file_path) = safe_join(&self.ui_dist_dir().join("assets"), asset_path) else {
                 return json_error(StatusCode::NOT_FOUND, "asset not found");
             };
             return match read_static_file(&file_path).await {
                 Ok(Some(response)) => response,
-                Ok(None) => asset_fallback(self.ui_dist_dir(), asset_path)
-                    .await
-                    .unwrap_or_else(|| json_error(StatusCode::NOT_FOUND, "asset not found")),
+                Ok(None) => json_error(StatusCode::NOT_FOUND, "asset not found"),
                 Err(_) => json_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "admin ui assets unavailable",
@@ -1553,29 +1551,6 @@ impl AdminUiState {
             ),
         }
     }
-}
-
-async fn asset_fallback(base: &Path, requested_asset: &str) -> Option<Response<Body>> {
-    let extension = Path::new(requested_asset)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    if extension.is_empty() {
-        return None;
-    }
-    let assets_dir = base.join("assets");
-    let mut directory = fs::read_dir(assets_dir).await.ok()?;
-    while let Some(entry) = directory.next_entry().await.ok()? {
-        let path = entry.path();
-        if path
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|ext| ext == extension)
-        {
-            return read_static_file(&path).await.ok().flatten();
-        }
-    }
-    None
 }
 
 // ---- helpers used by the admin implementation -------------------------------
