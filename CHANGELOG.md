@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.7.1-rc.1 - 2026-09-09
+
+- Added history-routed admin navigation, inline SVG icons, bounded toast
+  notifications, a folder-aware move browser, and separate Telegram connection
+  and proxy tabs.
+- Added reception-only resumable admin uploads with offset recovery,
+  cancellation cleanup, and browser-side resume metadata. Sessions expire after
+  the existing inactivity lease and do not survive a server restart.
+
 ## 0.7.0-rc.4 - 2026-09-09
 
 - Split the admin console into focused panels and modal components while
