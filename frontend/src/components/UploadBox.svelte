@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { abortResumableUpload, getJob, uploadResumable } from '../lib/api';
 
   export let bucket: string;
@@ -36,6 +36,7 @@
   let saved: SavedUpload[] = [];
   let dragging = false;
   let uploadStarted = false;
+  let componentActive = true;
   const controllers = new Map<number, AbortController>();
 
   function buildKey(fileName: string) {
@@ -117,12 +118,14 @@
       });
       setItem(index, { progress: 0.02, busy: false, jobId: accepted.job_id, state: 'queued', receptionId: undefined });
       forget({ ...item, receptionId: item.receptionId });
-      onUploaded();
       for (let poll = 0; poll < 180; poll += 1) {
         const job = await getJob(accepted.job_id);
         const totalChunks = Math.max(job.chunks_total, 1);
         setItem(index, { state: job.state, chunksDone: job.chunks_done, chunksTotal: job.chunks_total, progress: ['completed', 'cleaned'].includes(job.state) ? 1 : Math.min(0.99, job.chunks_done / totalChunks) });
-        if (['completed', 'cleaned'].includes(job.state)) return;
+        if (['completed', 'cleaned'].includes(job.state)) {
+          if (componentActive) onUploaded();
+          return;
+        }
         if (['recovery_required', 'reception_failed', 'cancelled'].includes(job.state)) throw new Error(job.error || `Transfer ${job.state.replaceAll('_', ' ')}`);
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
@@ -156,6 +159,7 @@
   function removeItem(index: number) { if (!items[index]?.busy) items = items.filter((_, i) => i !== index); }
 
   onMount(readSaved);
+  onDestroy(() => { componentActive = false; });
 </script>
 
 <div class:dropzone={dragging} class="upload-box" role="region" aria-label="Drop files to upload, or choose files below" on:dragover={onDragOver} on:dragleave={onDragLeave} on:drop={onDrop}>
