@@ -35,6 +35,16 @@
 3. Resume only if the upload state is safe to continue.
 4. Otherwise roll back and clean up staging or quarantined artifacts.
 
+### Interrupted Admin Browser Reception
+
+The admin resumable upload API only resumes browser-to-server reception. The
+browser keeps the reception ID and re-reads the authoritative offset after a
+failed PATCH, but the server holds the active reception map in memory. Resume
+only while the receiving lease is alive; after a server restart or expired
+lease, re-select the source file and start a new reception. Completed
+receptions are independent durable transfer jobs and continue through the
+normal worker/reconciliation path.
+
 ## Repair and Garbage Collection
 
 1. Run `telegram-s3 repair --dry-run` first to see which staged, recovery-

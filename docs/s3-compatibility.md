@@ -69,6 +69,14 @@ features, so they are documented separately.
 - Telegram bootstrap settings are validated by the admin API before they are
   persisted, so malformed API/storage identifiers remain operator errors and
   do not change the S3 compatibility contract.
+- The admin browser upload surface also exposes reception-only resumability:
+  `POST /_admin/api/uploads/resumable`, `GET` status,
+  `PATCH /_admin/api/uploads/resumable/{id}?offset=N&final=0|1`,
+  `POST .../{id}/complete`, and `DELETE .../{id}`. Chunks are encrypted into
+  the existing staging area before the durable transfer is queued. These are
+  authenticated admin-plane endpoints, not S3 multipart APIs; a server restart
+  drops an in-flight browser reception and the existing inactivity lease still
+  applies.
 - Bulk/folder download or server-side ZIP is **not** available at this level
   (avoiding whole-object RAM buffering) and is an explicit future item.
 - The operator UI is not part of the S3 compatibility contract; the `/_admin`

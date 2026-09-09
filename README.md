@@ -270,20 +270,26 @@ See [SECURITY.md](SECURITY.md), [THREAT_MODEL.md](THREAT_MODEL.md), and
 `/_admin` is an authenticated Svelte single-page app served by the Rust server
 on the public listener. It provides a storage overview, endpoint and capacity
 details, Telegram readiness, operator account management (superadmin-only),
-in-app bucket creation, and a bucket/object browser with per-file upload and
-full/range download -
+in-app bucket creation, a routed bucket/object browser with per-file upload,
+move, and full/range download -
 streamed through the same bounded, checksum-verified chunk paths as the S3 data
 plane. Guests see only the sign-in screen; every management and content API is
 gated behind a user-bound session with CSRF protection.
 
+Browser uploads use reception-only resumable sessions. A dropped connection can
+continue from the server-reported chunk offset while the 120-second reception
+lease remains active; the session is held in memory and is not resumable after a
+server restart. Completed receptions enter the durable Telegram transfer queue.
+
 ## Roadmap
 
-The near-term backlog focuses on two areas:
+The near-term backlog focuses on durable upload/recovery hardening and final
+deployment/browser acceptance:
 
 - object durability hardening, including a durable upload worker / queue and
   stronger reconciliation for missing or orphaned staged chunks
-- a major frontend refresh, including a login-first shell, a first-run
-  superadmin setup wizard, and a clearer Telegram health indicator
+- fault-injection, deployed-browser, and live Telegram verification of the
+  operator workflows and recovery boundaries
 
 The detailed version-by-version plan lives in [ROADMAP.md](ROADMAP.md).
 

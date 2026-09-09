@@ -150,6 +150,14 @@ Multipart sessions use their own local states:
 - `aborted`
 - `recovery_required`
 
+Browser resumable receptions use the same encrypted staging directory and
+`transfer_jobs` receiving state as one-shot admin uploads. The reception ID is
+the transfer/object UUID, and each PATCH must supply the server's current byte
+offset. A final chunk is required before the manifest can be written and the
+job can enter the durable queue. Reception progress is held in process memory;
+staged bytes remain encrypted at rest, but a process restart ends the browser
+session and reconciliation handles the stale receiving job as recovery work.
+
 ## Recovery Rules
 
 - A manifest without a local commit row is not visible until reconciliation.

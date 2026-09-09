@@ -183,23 +183,28 @@ Rejected alternatives this phase (see `docs/adr/0006-...md`): keeping MinIO-time
   - the dashboard shows live Telegram connection health at a glance
   - recovery, repair, and upload-failure states are explainable from the UI and docs
 
-Planned work:
+Completed in this increment:
 
 - the admin console now uses full-width responsive layout, loading skeletons,
   animated dismissible notifications, recovery sub-tabs, and analysis cards
 - browser uploads are serialized, retried after transient request failures, and
   follow the durable transfer job through chunk progress in the upload queue
+- the admin console now has history-routed bucket/folder locations, SVG
+  navigation icons, a folder-aware move browser, and Telegram connection/proxy
+  sub-tabs
+- browser reception now supports bounded resumable chunks, authoritative offset
+  re-sync, pause/resume while the reception lease remains active, and explicit
+  cancellation cleanup; server restart resumption remains intentionally
+  unsupported
 - committed-object deletes now make cleanup due immediately; the existing
   evidence-first cleanup worker removes Telegram messages asynchronously
+
+Planned work:
 
 - introduce a durable upload worker / queue so staging is not tied to a single foreground request path; the worker should own chunk fan-out, retry, and final commit
 - add a durable cleanup worker / outbox for object deletes so Telegram message removal happens asynchronously and survives restart, instead of trying to do all cleanup in the foreground request path
 - add periodic reconciliation for staged uploads so missing chunks, orphaned staging trees, and interrupted commits are repaired or quarantined before they become user-visible corruption
 - make the startup path fail soft for recoverable upload issues: the app should boot, expose health, and let operators inspect or repair state instead of disappearing when staging is damaged
-- replace the current admin shell with a cleaner login-first experience, tighter navigation, and a more modern dashboard layout
-- add a first-run setup wizard that provisions the initial superadmin account when no operator exists yet
-- surface Telegram status with a persistent health dot / badge and a short explanation of the latest connection state
-- break the frontend into smaller, reusable components and align styling, spacing, and interaction patterns across all pages
 
 Notes:
 
