@@ -176,6 +176,35 @@ export function removeObject(csrf?: string | null, bucket = '', key = '') {
   });
 }
 
+/** Write an already-read object body and wait for it to become committed. */
+export async function putObjectContent(
+  bucket: string,
+  key: string,
+  file: Blob,
+  csrf?: string | null
+) {
+  const response = await fetch(contentUrl(bucket, key), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': file.type || 'application/octet-stream',
+      ...csrfHeaders(csrf)
+    },
+    body: file
+  });
+  if (!response.ok) {
+    let message = `request failed with ${response.status}`;
+    try {
+      const payload = (await response.json()) as { error?: string };
+      if (payload?.error) message = payload.error;
+    } catch {
+      // keep HTTP status message
+    }
+    throw new ApiError(message, response.status);
+  }
+  return (await response.json()) as { size: number; etag: string; version_id: string };
+}
+
 /** Absolute path for a content download/upload targeted at the given object key. */
 export function contentUrl(bucket: string, key: string) {
   const qp = new URLSearchParams({ bucket, key });

@@ -7,6 +7,7 @@
   export let bucket = '';
   export let prefix = '';
   export let csrf: string | null | undefined;
+  export let busy = false;
   export let onMoveHere: () => void = () => {};
 
   let buckets: BucketInfo[] = [];
@@ -93,7 +94,7 @@
     </section>
   </div>
   {#if error && (buckets.length > 0 || listing)}<p class="fine-print error-hint" role="alert">{error}</p>{/if}
-  <div class="move-destination"><span>Move here:</span><strong>{bucket ? destination() : 'Choose a bucket'}</strong><button class="primary" type="button" on:click={onMoveHere} disabled={!bucket || loadingObjects}>Move files</button></div>
+  <div class="move-destination"><span>Move here:</span><strong>{bucket ? destination() : 'Choose a bucket'}</strong><button class="primary" type="button" on:click={onMoveHere} disabled={!bucket || loadingObjects || busy}>{#if busy}<span class="spinner" aria-hidden="true"></span>{/if}{busy ? 'Moving…' : 'Move files'}</button></div>
 </div>
 
 <style>

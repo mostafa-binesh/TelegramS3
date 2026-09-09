@@ -22,9 +22,9 @@
     logout,
     removeTelegramConnection,
     removeObject,
+    putObjectContent,
     contentUrl,
     saveTelegramSettings,
-    uploadObject
   } from './lib/api';
   import {normalizeError} from './lib/format';
   import type {
@@ -613,7 +613,10 @@
         const response = await fetch(contentUrl(selectedBucket, key), { credentials: 'include' });
         if (!response.ok) throw new Error(`Could not read ${key}`);
         const targetKey = `${movePrefix.replace(/^\/+|\/+$/g, '') ? `${movePrefix.replace(/^\/+|\/+$/g, '')}/` : ''}${key.split('/').pop() ?? key}`;
-        await uploadObject(moveBucket, targetKey, await response.blob(), session?.csrf_token);
+        if (moveBucket === selectedBucket && targetKey === key) {
+          throw new Error(`Choose a different destination for ${key}`);
+        }
+        await putObjectContent(moveBucket, targetKey, await response.blob(), session?.csrf_token);
         await removeObject(session?.csrf_token, selectedBucket, key);
       }
       selectedKeys = []; showMoveModal = false; notifySuccess('Selected items moved.'); await refreshObjects();
