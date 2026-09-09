@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.7.0-rc.4 - 2026-09-09
+
+- Split the admin console into focused panels and modal components while
+  preserving the existing authenticated workflows.
+- Lazy-loaded secondary views and modal flows to reduce the initial frontend
+  JavaScript payload by about 20% raw and 17% gzip.
+- Consolidated tiny Svelte runtime helper chunks in the Vite production build.
+
 ## 0.7.0-rc.2 - 2026-09-09
 
 - Refined the operator console with icon-based navigation, centered menu items,
