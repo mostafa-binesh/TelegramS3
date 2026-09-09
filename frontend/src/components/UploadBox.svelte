@@ -134,6 +134,7 @@
 
   function pauseItem(index: number) { setItem(index, { paused: true, state: 'paused' }); }
   function resumeItem(index: number) { setItem(index, { paused: false, error: undefined, state: 'receiving' }); if (!uploadStarted) void doUpload(index); }
+  function displayState(state?: string) { return state === 'uploading' ? 'uploading to telegram' : state?.replaceAll('_', ' '); }
 
   async function cancelItem(index: number) {
     const item = items[index];
@@ -162,7 +163,7 @@
   {#if dragging}<div class="drop-hint">Release to add files</div>{/if}
   {#if items.length > 0}<div class="row-inline"><button class="primary" type="button" on:click={startQueued} disabled={uploadStarted || items.every((item) => item.jobId || item.cancelled)}>Upload {items.length}</button></div>{/if}
   {#if items.length > 0}<ul class="upload-queue">{#each items as item, i (item.fullKey + item.file.lastModified)}<li>
-    <div class="queue-meta"><div><span class="queue-name">{item.file.name}</span><span class="queue-sub">{item.error ? item.state ?? 'failed' : item.jobId ? `${item.state?.replaceAll('_', ' ') ?? 'queued'}${item.chunksTotal ? ` · ${item.chunksDone ?? 0}/${item.chunksTotal} chunks` : ''}` : item.busy ? (item.paused ? 'Paused' : 'Receiving') : item.state ?? 'Ready to send'}</span></div><div class="queue-actions">{#if item.busy && !item.paused}<button class="ghost" type="button" on:click={() => pauseItem(i)}>Pause</button>{:else if item.paused || item.error}<button class="ghost" type="button" on:click={() => resumeItem(i)}>Resume</button>{/if}{#if item.receptionId && !item.jobId}<button class="ghost" type="button" on:click={() => void cancelItem(i)}>Cancel</button>{:else}<button class="queue-remove" type="button" on:click={() => removeItem(i)} disabled={item.busy}>×</button>{/if}</div></div>
+    <div class="queue-meta"><div><span class="queue-name">{item.file.name}</span><span class="queue-sub">{item.error ? displayState(item.state) ?? 'failed' : item.jobId ? `${displayState(item.state) ?? 'queued'}${item.chunksTotal ? ` · ${item.chunksDone ?? 0}/${item.chunksTotal} chunks` : ''}` : item.busy ? (item.paused ? 'Paused' : 'Receiving') : displayState(item.state) ?? 'Ready to send'}</span></div><div class="queue-actions">{#if item.busy && !item.paused}<button class="ghost" type="button" on:click={() => pauseItem(i)}>Pause</button>{:else if item.paused || item.error}<button class="ghost" type="button" on:click={() => resumeItem(i)}>Resume</button>{/if}{#if item.receptionId && !item.jobId}<button class="ghost" type="button" on:click={() => void cancelItem(i)}>Cancel</button>{:else}<button class="queue-remove" type="button" on:click={() => removeItem(i)} disabled={item.busy}>×</button>{/if}</div></div>
     <div class="bar-track" aria-hidden="true"><div class="bar-fill" style:width={Math.round(item.progress * 100) + '%'}></div></div>{#if item.error}<p class="fine-print error-hint">{item.error}</p>{/if}
   </li>{/each}</ul>{/if}
 </div>
