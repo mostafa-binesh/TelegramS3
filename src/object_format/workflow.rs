@@ -102,17 +102,19 @@ impl ObjectFormatService {
                     actual: manifest.checksum.whole_object.clone(),
                 });
             }
-            write_json_file(&dir.join(MANIFEST_FILE_NAME), &manifest)?;
-            let operation = self
-                .metadata
-                .stage_manifest(OperationKind::Put, manifest.clone())?;
-            self.metadata
-                .set_transfer_conditionals(&id, conditionals.as_ref())?;
-            self.metadata
-                .queue_transfer(&id, operation, manifest.chunks.len())?;
-            self.metadata
-                .transfer(&id)?
-                .ok_or_else(|| ObjectFormatError::InvalidPlan("queued transfer missing".into()))
+            self.finalize_reception(
+                &id,
+                ManifestBuildArgs {
+                    object_id,
+                    bucket: bucket.into(),
+                    key: key.into(),
+                    content_type: content_type.into(),
+                    commit_state: CommitState::Staging,
+                    chunks: manifest.chunks,
+                    whole_checksum: manifest.checksum.whole_object,
+                },
+                conditionals.as_ref(),
+            )
         }.await;
         let _ = stop_heartbeat.send(true);
         let _ = heartbeat.await;
@@ -136,7 +138,7 @@ impl ObjectFormatService {
         Ok(job)
     }
 
-    async fn stage_transfer_chunk(
+    pub(super) async fn stage_transfer_chunk(
         &self,
         object_id: Uuid,
         bytes: &[u8],
@@ -173,6 +175,26 @@ impl ObjectFormatService {
         });
         *offset += bytes.len() as u64;
         Ok(())
+    }
+
+    pub(super) fn finalize_reception(
+        &self,
+        id: &str,
+        args: ManifestBuildArgs,
+        conditionals: Option<&TransferWriteConditionals>,
+    ) -> Result<TransferJob, ObjectFormatError> {
+        let dir = self.staging_dir(args.object_id);
+        let manifest = self.new_manifest(args);
+        write_json_file(&dir.join(MANIFEST_FILE_NAME), &manifest)?;
+        let operation = self
+            .metadata
+            .stage_manifest(OperationKind::Put, manifest.clone())?;
+        self.metadata.set_transfer_conditionals(id, conditionals)?;
+        self.metadata
+            .queue_transfer(id, operation, manifest.chunks.len())?;
+        self.metadata
+            .transfer(id)?
+            .ok_or_else(|| ObjectFormatError::InvalidPlan("queued transfer missing".into()))
     }
 
     pub fn ensure_workers(&self) {

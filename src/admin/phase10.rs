@@ -1,6 +1,108 @@
 use super::*;
 
 impl AdminUiState {
+    pub(super) async fn begin_resumable_upload(
+        &self,
+        request: Request<Incoming>,
+    ) -> Response<Body> {
+        let body = match read_json::<BeginResumableRequest>(request).await {
+            Ok(body) => body,
+            Err(_) => {
+                return json_error(StatusCode::BAD_REQUEST, "invalid resumable upload payload");
+            }
+        };
+        if body.bucket.is_empty() || !is_safe_object_key(&body.key) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "bucket and valid object key required",
+            );
+        }
+        match self
+            .object_format
+            .begin_reception(&body.bucket, &body.key, &body.content_type)
+            .await
+        {
+            Ok(status) => json_response(StatusCode::CREATED, status),
+            Err(error) => resumable_error_response(&error),
+        }
+    }
+
+    pub(super) async fn resumable_upload_api(
+        &self,
+        request: Request<Incoming>,
+        rest: &str,
+    ) -> Response<Body> {
+        let segments: Vec<_> = rest.split('/').collect();
+        let Some(id) = segments
+            .get(2)
+            .copied()
+            .filter(|value| Uuid::parse_str(value).is_ok())
+        else {
+            return json_error(StatusCode::NOT_FOUND, "resumable upload not found");
+        };
+        match (request.method(), segments.len()) {
+            (&Method::GET, 3) => match self.object_format.reception_status(id).await {
+                Ok(status) => json_response(StatusCode::OK, status),
+                Err(error) => resumable_error_response(&error),
+            },
+            (&Method::DELETE, 3) => match self.object_format.abort_reception(id).await {
+                Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true})),
+                Err(error) => resumable_error_response(&error),
+            },
+            (&Method::PATCH, 3) => {
+                let params = request
+                    .uri()
+                    .query()
+                    .map(parse_list_params)
+                    .unwrap_or_default();
+                let Some(offset) = params
+                    .get("offset")
+                    .and_then(|value| value.parse::<u64>().ok())
+                else {
+                    return json_error(StatusCode::BAD_REQUEST, "offset is required");
+                };
+                let final_chunk = match params.get("final").map(String::as_str) {
+                    Some("0") | None => false,
+                    Some("1") => true,
+                    _ => return json_error(StatusCode::BAD_REQUEST, "final must be 0 or 1"),
+                };
+                let body =
+                    match read_limited_body(request.into_body(), self.object_format.chunk_size())
+                        .await
+                    {
+                        Ok(body) => body,
+                        Err(LimitedBodyError::TooLarge) => {
+                            return json_error(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "chunk exceeds configured chunk size",
+                            );
+                        }
+                        Err(LimitedBodyError::Read) => {
+                            return json_error(StatusCode::BAD_REQUEST, "invalid chunk body");
+                        }
+                    };
+                match self
+                    .object_format
+                    .receive_reception_chunk(id, offset, body, final_chunk)
+                    .await
+                {
+                    Ok(status) => json_response(StatusCode::OK, status),
+                    Err(error) => resumable_error_response(&error),
+                }
+            }
+            (&Method::POST, 4) if segments[3] == "complete" => {
+                match self.object_format.finish_reception(id).await {
+                    Ok(job) => json_response(
+                        StatusCode::ACCEPTED,
+                        serde_json::json!({"job_id": job.id, "job": job}),
+                    ),
+                    Err(error) => resumable_error_response(&error),
+                }
+            }
+            _ => json_error(StatusCode::NOT_FOUND, "resumable upload route not found"),
+        }
+    }
+
     pub(super) async fn setup_account(&self, request: Request<Incoming>) -> Response<Body> {
         // Only the configured same-origin JSON UI can provision the first account.
         if !same_origin(&request) {
@@ -170,6 +272,57 @@ impl AdminUiState {
             };
         }
         json_error(StatusCode::NOT_FOUND, "route not found")
+    }
+}
+
+enum LimitedBodyError {
+    TooLarge,
+    Read,
+}
+
+async fn read_limited_body(body: Incoming, limit: u64) -> Result<Bytes, LimitedBodyError> {
+    let mut stream = body.into_data_stream();
+    let mut collected = Vec::new();
+    while let Some(frame) = stream.next().await {
+        let frame = frame.map_err(|_| LimitedBodyError::Read)?;
+        if collected.len() as u64 + frame.len() as u64 > limit {
+            return Err(LimitedBodyError::TooLarge);
+        }
+        collected.extend_from_slice(&frame);
+    }
+    Ok(Bytes::from(collected))
+}
+
+fn resumable_error_response(error: &crate::object_format::ObjectFormatError) -> Response<Body> {
+    match error {
+        crate::object_format::ObjectFormatError::ReceptionOffsetMismatch { received } => {
+            json_response(
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": error.to_string(), "received": received}),
+            )
+        }
+        crate::object_format::ObjectFormatError::ReceptionChunkTooLarge => {
+            json_error(StatusCode::PAYLOAD_TOO_LARGE, &error.to_string())
+        }
+        crate::object_format::ObjectFormatError::ReceptionChunkSizeMismatch => {
+            json_error(StatusCode::BAD_REQUEST, &error.to_string())
+        }
+        crate::object_format::ObjectFormatError::ReceptionNotComplete => {
+            json_error(StatusCode::CONFLICT, &error.to_string())
+        }
+        crate::object_format::ObjectFormatError::ReceptionNotFound => {
+            json_error(StatusCode::NOT_FOUND, &error.to_string())
+        }
+        crate::object_format::ObjectFormatError::Metadata(
+            crate::metadata::MetadataError::BucketNotFound(_),
+        ) => json_error(StatusCode::NOT_FOUND, "bucket not found"),
+        crate::object_format::ObjectFormatError::Metadata(
+            crate::metadata::MetadataError::InvalidManifest(message),
+        ) if message.contains("capacity") => json_error(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "staging capacity exhausted",
+        ),
+        _ => json_error(StatusCode::BAD_REQUEST, &error.to_string()),
     }
 }
 

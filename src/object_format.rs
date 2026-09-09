@@ -1,3 +1,4 @@
+mod reception;
 mod workflow;
 use crate::config::AppConfig;
 use crate::manifest::{ChunkRef, CommitState, ObjectChecksum, ObjectManifest, TelegramLocation};
@@ -274,6 +275,16 @@ pub enum ObjectFormatError {
     RecoveryRequired(String),
     #[error("invalid checksum: {0}")]
     InvalidChecksum(String),
+    #[error("resumable reception not found")]
+    ReceptionNotFound,
+    #[error("resumable reception offset mismatch; server received {received}")]
+    ReceptionOffsetMismatch { received: u64 },
+    #[error("resumable reception chunk exceeds the configured chunk size")]
+    ReceptionChunkTooLarge,
+    #[error("resumable reception chunks must fill the chunk size unless final")]
+    ReceptionChunkSizeMismatch,
+    #[error("resumable reception is not complete")]
+    ReceptionNotComplete,
 }
 
 #[derive(Clone)]
@@ -285,6 +296,7 @@ pub struct ObjectFormatService {
     storage_chat_id: Arc<RwLock<String>>,
     worker_runtime: Arc<WorkerRuntime>,
     read_pins: Arc<Mutex<HashMap<Uuid, u64>>>,
+    receptions: Arc<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<reception::ReceptionState>>>>>,
     recovery_snapshot: Arc<RwLock<RecoverySnapshot>>,
     staging_budget: u64,
     encryption: ObjectEncryption,
@@ -403,6 +415,7 @@ impl ObjectFormatService {
             storage_chat_id: Arc::new(RwLock::new(storage_chat_id)),
             worker_runtime: Arc::new(WorkerRuntime::default()),
             read_pins: Arc::new(Mutex::new(HashMap::new())),
+            receptions: Arc::new(Mutex::new(HashMap::new())),
             recovery_snapshot: Arc::new(RwLock::new((
                 None,
                 Vec::new(),
@@ -423,6 +436,10 @@ impl ObjectFormatService {
 
     pub fn staging_budget(&self) -> u64 {
         self.staging_budget
+    }
+
+    pub fn chunk_size(&self) -> u64 {
+        self.chunk_size
     }
 
     /// Reach the shared SQLite store (single writer) for operator/auth tables.

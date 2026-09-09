@@ -10,11 +10,11 @@
   onMount(()=>{let disposed=false;let timer:ReturnType<typeof setTimeout>;const poll=async()=>{if(!document.hidden)await refresh();if(!disposed)timer=setTimeout(poll,error?10000:2000);};void poll();return()=>{disposed=true;clearTimeout(timer);};});
   // A rejected/aborted reception is not a user-visible transfer: it never
   // reached the durable queue and showing a 0/0 "completed" row is misleading.
-  $: visible=jobs.filter(j=>(!['reception_failed'].includes(j.state) && !(j.state==='completed' && j.chunks_total===0 && j.bytes===0)) && (!recoveryOnly||['recovery_required','cancelled','retry_wait'].includes(j.state)));
+  $: visible=jobs.filter(j=>(!['receiving','reception_failed'].includes(j.state) && !(j.state==='completed' && j.chunks_total===0 && j.bytes===0)) && (!recoveryOnly||['recovery_required','cancelled','retry_wait'].includes(j.state)));
 </script>
 <section class="card surface">
   <div class="section-head"><div><p class="card-label">{recoveryOnly?'Recovery':'Background transfers'}</p><h2>{recoveryOnly?'Resolve interrupted work':'Transfer activity'}</h2></div><button class="ghost" on:click={refresh} disabled={refreshing}>{#if refreshing}<span class="spinner" aria-hidden="true"></span>{/if}Refresh</button></div>
-  <p class="fine-print">{recoveryOnly?'Staged files are retained. Retry after correcting the connection or storage problem. An incomplete reception requires the original file to be uploaded again.':'Files become visible in Buckets only after Telegram upload and commit finish. You can leave this page while accepted transfers continue.'}</p>
+  <p class="fine-print">{recoveryOnly?'Staged files are retained until recovery or cancellation.':'Files appear in Buckets after Telegram upload and commit finish.'}</p>
   {#if error}<p role="alert" class="error-hint">{error}</p>{/if}
   {#if loading}<div class="skeleton-stack"><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div></div>{:else if !visible.length}<p class="empty">{recoveryOnly?'No transfers need attention on this page.':'No transfers yet. Upload a file from Buckets to get started.'}</p>{:else}
   <div class="table-scroll"><table><thead><tr><th>Object</th><th>Progress</th><th>Status</th><th>Actions</th></tr></thead><tbody>

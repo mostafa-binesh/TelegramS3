@@ -13,6 +13,13 @@ const API_PREFIX = '/_admin/api';
 
 type CsrfHeaders = Record<string, string>;
 
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 function csrfHeaders(token?: string | null): CsrfHeaders {
   return token ? { 'X-CSRF-Token': token } : {};
 }
@@ -44,7 +51,7 @@ async function requestJson<T>(
     } catch {
       // keep HTTP status message
     }
-    throw new Error(message);
+    throw new ApiError(message, response.status);
   }
 
   if (response.status === 204) {
@@ -231,6 +238,160 @@ export async function uploadObject(
     }
   }
   throw lastError instanceof Error ? lastError : new Error('upload request failed');
+}
+
+export interface ResumableUploadSession {
+  id: string;
+  chunk_size: number;
+  received: number;
+}
+
+export interface ResumableUploadOptions {
+  signal?: AbortSignal;
+  receptionId?: string;
+  waitUntilResumed?: () => Promise<void>;
+  onReception?: (id: string) => void;
+}
+
+export function beginResumableUpload(
+  bucket: string,
+  key: string,
+  contentType: string,
+  csrf?: string | null
+) {
+  return requestJson<ResumableUploadSession>('/uploads/resumable', csrf, {
+    method: 'POST',
+    body: { bucket, key, content_type: contentType }
+  });
+}
+
+export function resumableStatus(id: string, csrf?: string | null) {
+  return requestJson<ResumableUploadSession>(`/uploads/resumable/${encodeURIComponent(id)}`, csrf);
+}
+
+export function completeResumableUpload(id: string, csrf?: string | null) {
+  return requestJson<{ job_id: string; job: TransferJob }>(
+    `/uploads/resumable/${encodeURIComponent(id)}/complete`,
+    csrf,
+    { method: 'POST' }
+  );
+}
+
+export function abortResumableUpload(id: string, csrf?: string | null) {
+  return requestJson<{ ok: boolean }>(`/uploads/resumable/${encodeURIComponent(id)}`, csrf, {
+    method: 'DELETE'
+  });
+}
+
+export function sendResumableChunk(
+  id: string,
+  offset: number,
+  bytes: Blob,
+  final: boolean,
+  csrf?: string | null,
+  signal?: AbortSignal,
+  onProgress?: (sent: number, total: number) => void
+) {
+  return new Promise<{ received: number }>((resolve, reject) => {
+    const query = new URLSearchParams({ offset: String(offset), final: final ? '1' : '0' });
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener('abort', abort);
+    const abort = () => xhr.abort();
+    xhr.open('PATCH', `${API_PREFIX}/uploads/resumable/${encodeURIComponent(id)}?${query}`);
+    xhr.responseType = 'json';
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
+    if (signal) {
+      if (signal.aborted) { xhr.abort(); return; }
+      signal.addEventListener('abort', abort, { once: true });
+    }
+    if (onProgress) xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded, bytes.size);
+    };
+    xhr.onload = () => {
+      cleanup();
+      if (xhr.status >= 200 && xhr.status < 300 && xhr.response?.received !== undefined) {
+        settled = true;
+        resolve(xhr.response as { received: number });
+        return;
+      }
+      let message = `upload chunk failed with ${xhr.status}`;
+      if (xhr.response?.error) message = xhr.response.error;
+      settled = true;
+      reject(new Error(message));
+    };
+    xhr.onerror = () => { cleanup(); if (!settled) reject(new Error('upload chunk request failed')); };
+    xhr.onabort = () => { cleanup(); if (!settled) reject(new DOMException('upload aborted', 'AbortError')); };
+    xhr.send(bytes);
+  });
+}
+
+export async function uploadResumable(
+  bucket: string,
+  key: string,
+  file: File,
+  csrf: string | null | undefined,
+  onProgress?: (sent: number, total: number) => void,
+  options: ResumableUploadOptions = {}
+) {
+  let session: ResumableUploadSession;
+  if (options.receptionId) {
+    try {
+      session = await resumableStatus(options.receptionId, csrf);
+    } catch (cause) {
+      // A persisted browser descriptor can outlive the in-memory server
+      // reception. Re-selecting the same file starts a fresh reception rather
+      // than retrying an ID that can never become active again.
+      if (!(cause instanceof ApiError) || cause.status !== 404) throw cause;
+      session = await beginResumableUpload(bucket, key, file.type || 'application/octet-stream', csrf);
+    }
+  } else {
+    session = await beginResumableUpload(bucket, key, file.type || 'application/octet-stream', csrf);
+  }
+  options.onReception?.(session.id);
+  let offset = session.received;
+  const total = file.size;
+  const maxFailures = 8;
+  let emptyChunkSent = false;
+
+  while (offset < total || (total === 0 && !emptyChunkSent)) {
+    await options.waitUntilResumed?.();
+    if (options.signal?.aborted) throw new DOMException('upload aborted', 'AbortError');
+    const end = Math.min(total, offset + session.chunk_size);
+    const chunk = file.slice(offset, end);
+    const final = end >= total;
+    let failureCount = 0;
+    while (true) {
+      try {
+        const result = await sendResumableChunk(
+          session.id,
+          offset,
+          chunk,
+          final,
+          csrf,
+          options.signal,
+          (sent) => onProgress?.(offset + sent, total)
+        );
+        offset = result.received;
+        emptyChunkSent = true;
+        onProgress?.(offset, total);
+        break;
+      } catch (cause) {
+        if (options.signal?.aborted || (cause instanceof DOMException && cause.name === 'AbortError')) throw cause;
+        failureCount += 1;
+        session = await resumableStatus(session.id, csrf);
+        offset = session.received;
+        onProgress?.(offset, total);
+        if (offset >= total) break;
+        if (failureCount >= maxFailures) throw cause;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(8000, 700 * 2 ** (failureCount - 1))));
+        await options.waitUntilResumed?.();
+      }
+    }
+  }
+  return completeResumableUpload(session.id, csrf);
 }
 
 export function getWizardState(csrf?: string | null) {

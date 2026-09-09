@@ -165,6 +165,19 @@ struct TelegramSettingsRequest {
     telegram_proxy_mode: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct BeginResumableRequest {
+    bucket: String,
+    key: String,
+    #[serde(default = "default_content_type")]
+    content_type: String,
+}
+
+fn default_content_type() -> String {
+    "application/octet-stream".to_string()
+}
+
 // Session claims carried in the signed cookie and mirrored into the DB row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionClaims {
@@ -345,6 +358,12 @@ impl AdminUiState {
         }
         if method == Method::POST && rest == "uploads" {
             return self.enqueue_upload(request).await;
+        }
+        if method == Method::POST && rest == "uploads/resumable" {
+            return self.begin_resumable_upload(request).await;
+        }
+        if rest.starts_with("uploads/resumable/") {
+            return self.resumable_upload_api(request, rest).await;
         }
         if method == Method::POST && rest == "recovery/repair" {
             self.object_format.ensure_workers();
