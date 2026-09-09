@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.7.1-rc.5 - 2026-09-09
+
+- Added contextual retry panels for failed overview, recovery, bucket, folder,
+  operator, transfer, and destination-browser loads instead of showing false
+  empty states or indefinite skeletons.
+- Fixed admin file moves so the destination is committed before the source is
+  deleted, with visible move progress and same-path validation.
+
 ## 0.7.1-rc.4 - 2026-09-09
 
 - Reworked the Telegram setup wizard into an accessible modal with fresh,
