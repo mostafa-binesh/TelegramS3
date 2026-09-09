@@ -1,9 +1,11 @@
 <script lang="ts">
   import { formatCount } from '../lib/format';
+  import LoadError from './LoadError.svelte';
   import type { OverviewState } from '../lib/types';
 
   export let overview: OverviewState | null;
   export let loading = false;
+  export let error = '';
   export let corruptedCount = 0;
   export let acknowledgedCount = 0;
   export let onRefresh: () => void = () => {};
@@ -16,6 +18,44 @@
     {#if loading}<span class="spinner" aria-hidden="true"></span>{/if}Refresh
   </button>
 </section>
+
+{#if error && !overview}
+  <LoadError title="Could not load the overview" message={error} onRetry={onRefresh} />
+{:else}
+  {#if error}
+    <LoadError title="Overview refresh failed" message={`${error} Showing the last available snapshot.`} onRetry={onRefresh} />
+  {/if}
+
+  <section class="cards">
+    {#if loading || !overview}
+      {#each [0, 1, 2, 3] as slot (slot)}<article class="card metric"><div class="skeleton" style="height:62px"></div></article>{/each}
+    {:else}
+      <article class="card metric"><p class="card-label">Buckets</p><strong>{formatCount(overview.storage?.buckets ?? 0)}</strong></article>
+      <article class="card metric"><p class="card-label">Committed</p><strong>{formatCount(overview.storage?.committed_objects ?? 0)}</strong></article>
+      <article class="card metric"><p class="card-label">Active</p><strong>{formatCount(overview.storage?.active_objects ?? 0)}</strong></article>
+      <article class="card metric corrupted" class:attention={corruptedCount > 0}>
+        <p class="card-label">Corrupted files</p><strong>{formatCount(corruptedCount)}</strong>
+        {#if overview.recovery?.scan_error}<small class="error-hint">Scan unavailable</small>
+        {:else if acknowledgedCount > 0}<small>{formatCount(acknowledgedCount)} acknowledged</small>
+        {:else if corruptedCount === 0}<small>Nothing needs attention</small>{/if}
+        {#if corruptedCount > 0 || acknowledgedCount > 0 || overview.recovery?.scan_error}<button class="btn-link card-link" type="button" on:click={onRecovery}>View details →</button>{/if}
+      </article>
+    {/if}
+  </section>
+  <section class="layout analysis-grid">
+    <article class="card surface chart-card">
+      <div class="section-head"><div><p class="card-label">Analysis</p><h2>Storage composition</h2></div></div>
+      {#if loading || !overview}<div class="skeleton" style="height:150px"></div>{:else}
+        {@const total = Math.max((overview.storage?.committed_objects ?? 0) + (overview.storage?.active_objects ?? 0) + (overview.storage?.staged_objects ?? 0), 1)}
+        <div class="bar-chart" aria-label="Storage composition chart"><div class="bar-segment committed" style={`width:${((overview.storage?.committed_objects ?? 0) / total) * 100}%`}></div><div class="bar-segment active" style={`width:${((overview.storage?.active_objects ?? 0) / total) * 100}%`}></div><div class="bar-segment staged" style={`width:${((overview.storage?.staged_objects ?? 0) / total) * 100}%`}></div></div>
+        <div class="legend"><span><i class="committed"></i>Committed {formatCount(overview.storage?.committed_objects ?? 0)}</span><span><i class="active"></i>Active {formatCount(overview.storage?.active_objects ?? 0)}</span><span><i class="staged"></i>Staged {formatCount(overview.storage?.staged_objects ?? 0)}</span></div>
+      {/if}
+    </article>
+    <article class="card surface chart-card"><p class="card-label">Recovery signal</p><h2>{formatCount(corruptedCount)} actionable</h2>
+      {#if loading || !overview}<div class="skeleton" style="height:80px"></div>{:else}<div class="signal-track"><span style={`width:${Math.min(corruptedCount * 10, 100)}%`}></span></div><p class="fine-print">{acknowledgedCount ? `${formatCount(acknowledgedCount)} acknowledged issue(s) remain reviewable.` : 'No acknowledged issues.'}</p>{/if}
+    </article>
+  </section>
+{/if}
 
 <style>
   .overview-head { margin-bottom: .25rem; }
@@ -39,32 +79,3 @@
   .card-link { margin-top: .6rem; font-size: .85rem; }
   @media (max-width: 760px) { .analysis-grid { grid-template-columns: 1fr; } }
 </style>
-<section class="cards">
-  {#if loading || !overview}
-    {#each [0, 1, 2, 3] as slot (slot)}<article class="card metric"><div class="skeleton" style="height:62px"></div></article>{/each}
-  {:else}
-    <article class="card metric"><p class="card-label">Buckets</p><strong>{formatCount(overview.storage?.buckets ?? 0)}</strong></article>
-    <article class="card metric"><p class="card-label">Committed</p><strong>{formatCount(overview.storage?.committed_objects ?? 0)}</strong></article>
-    <article class="card metric"><p class="card-label">Active</p><strong>{formatCount(overview.storage?.active_objects ?? 0)}</strong></article>
-    <article class="card metric corrupted" class:attention={corruptedCount > 0}>
-      <p class="card-label">Corrupted files</p><strong>{formatCount(corruptedCount)}</strong>
-      {#if overview.recovery?.scan_error}<small class="error-hint">Scan unavailable</small>
-      {:else if acknowledgedCount > 0}<small>{formatCount(acknowledgedCount)} acknowledged</small>
-      {:else if corruptedCount === 0}<small>Nothing needs attention</small>{/if}
-      {#if corruptedCount > 0 || acknowledgedCount > 0 || overview.recovery?.scan_error}<button class="btn-link card-link" type="button" on:click={onRecovery}>View details →</button>{/if}
-    </article>
-  {/if}
-</section>
-<section class="layout analysis-grid">
-  <article class="card surface chart-card">
-    <div class="section-head"><div><p class="card-label">Analysis</p><h2>Storage composition</h2></div></div>
-    {#if loading || !overview}<div class="skeleton" style="height:150px"></div>{:else}
-      {@const total = Math.max((overview.storage?.committed_objects ?? 0) + (overview.storage?.active_objects ?? 0) + (overview.storage?.staged_objects ?? 0), 1)}
-      <div class="bar-chart" aria-label="Storage composition chart"><div class="bar-segment committed" style={`width:${((overview.storage?.committed_objects ?? 0) / total) * 100}%`}></div><div class="bar-segment active" style={`width:${((overview.storage?.active_objects ?? 0) / total) * 100}%`}></div><div class="bar-segment staged" style={`width:${((overview.storage?.staged_objects ?? 0) / total) * 100}%`}></div></div>
-      <div class="legend"><span><i class="committed"></i>Committed {formatCount(overview.storage?.committed_objects ?? 0)}</span><span><i class="active"></i>Active {formatCount(overview.storage?.active_objects ?? 0)}</span><span><i class="staged"></i>Staged {formatCount(overview.storage?.staged_objects ?? 0)}</span></div>
-    {/if}
-  </article>
-  <article class="card surface chart-card"><p class="card-label">Recovery signal</p><h2>{formatCount(corruptedCount)} actionable</h2>
-    {#if loading || !overview}<div class="skeleton" style="height:80px"></div>{:else}<div class="signal-track"><span style={`width:${Math.min(corruptedCount * 10, 100)}%`}></span></div><p class="fine-print">{acknowledgedCount ? `${formatCount(acknowledgedCount)} acknowledged issue(s) remain reviewable.` : 'No acknowledged issues.'}</p>{/if}
-  </article>
-</section>

@@ -1,11 +1,13 @@
 <script lang="ts">
   import { acknowledgeRecovery, unacknowledgeRecovery } from '../lib/api';
   import { formatCount, formatTimestamp, normalizeError } from '../lib/format';
+  import LoadError from './LoadError.svelte';
   import type { RecoveryIssue, RecoveryState } from '../lib/types';
 
   export let recovery: RecoveryState | null | undefined = null;
   export let csrf: string | null | undefined;
   export let loading = false;
+  export let error = '';
   /** Re-reads the overview so this list and the Overview count cannot disagree. */
   export let onChanged: () => Promise<void> = async () => {};
   export let onRefresh: () => void = () => {};
@@ -83,7 +85,8 @@
     <p role="alert" class="error-hint">{actionError}</p>
   {/if}
 
-  {#if recovery?.scan_error}
+  {#if error}<LoadError title="Could not load recovery data" message={error} onRetry={onRefresh} />
+  {:else if recovery?.scan_error}
     <p role="alert" class="error-hint">Recovery scan unavailable: {recovery.scan_error}</p>
   {:else if loading && !recovery}
     <div class="skeleton-stack">

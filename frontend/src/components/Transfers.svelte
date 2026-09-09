@@ -1,6 +1,7 @@
 <script lang="ts">
   import {onMount} from 'svelte';
   import {listJobs,jobAction} from '../lib/api';
+  import LoadError from './LoadError.svelte';
   import type {TransferJob} from '../lib/types';
   export let csrf:string|null|undefined;
   export let recoveryOnly=false;
@@ -16,8 +17,8 @@
 <section class="card surface">
   <div class="section-head"><div><p class="card-label">{recoveryOnly?'Recovery':'Background transfers'}</p><h2>{recoveryOnly?'Resolve interrupted work':'Transfer activity'}</h2></div><button class="ghost" on:click={refresh} disabled={refreshing}>{#if refreshing}<span class="spinner" aria-hidden="true"></span>{/if}Refresh</button></div>
   <p class="fine-print">{recoveryOnly?'Staged files are retained until recovery or cancellation.':'Files appear in Buckets after Telegram upload and commit finish.'}</p>
-  {#if error}<p role="alert" class="error-hint">{error}</p>{/if}
-  {#if loading}<div class="skeleton-stack"><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div></div>{:else if !visible.length}<p class="empty">{recoveryOnly?'No transfers need attention on this page.':'No transfers yet. Upload a file from Buckets to get started.'}</p>{:else}
+  {#if error}<LoadError title="Could not load transfer activity" message={error} onRetry={refresh} />{/if}
+  {#if loading}<div class="skeleton-stack"><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div></div>{:else if !visible.length && !error}<p class="empty">{recoveryOnly?'No transfers need attention on this page.':'No transfers yet. Upload a file from Buckets to get started.'}</p>{:else if visible.length}
   <div class="table-scroll"><table><thead><tr><th>Object</th><th>Progress</th><th>Status</th><th>Actions</th></tr></thead><tbody>
     {#each visible as job (job.id)}<tr><td><strong>{job.key}</strong><small>{job.bucket} · {new Date(job.created_at*1000).toLocaleString()}</small><small>{job.id}</small></td>
       <td><progress max={Math.max(job.chunks_total,1)} value={job.chunks_done}></progress><small>{job.chunks_done}/{job.chunks_total} chunks · {(job.bytes/1048576).toFixed(1)} MiB staged</small></td>

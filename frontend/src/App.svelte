@@ -4,6 +4,7 @@
   import { notifyError, notifySuccess } from './lib/toasts';
   import Sidebar from './components/Sidebar.svelte';
   import HealthBadge from './components/HealthBadge.svelte';
+  import LoadError from './components/LoadError.svelte';
   import {getSetup} from './lib/api';
   import {
     createBucket,
@@ -108,6 +109,10 @@
   let bucketsLoading = false;
   let objectsLoading = false;
   let recoveryLoading = false;
+  let overviewError = '';
+  let usersError = '';
+  let bucketsError = '';
+  let objectsError = '';
   $: anyLoading = overviewLoading || usersLoading || bucketsLoading || objectsLoading;
   $: if (session?.authenticated && routeLoadKey !== loadedRouteKey) {
     const requestedRouteKey = routeLoadKey;
@@ -163,12 +168,14 @@
       if (session?.authenticated) {
         const [loadedOverview] = await Promise.all([getOverview(), loadOverviewPanel()]);
         overview = loadedOverview;
+        overviewError = '';
         await refreshTelegramSettings();
       } else {
         overview = null;
       }
     } catch (cause) {
-      notifyError(normalizeError(cause));
+      overviewError = normalizeError(cause);
+      notifyError(overviewError);
     } finally {
       loading = false;
     }
@@ -183,6 +190,7 @@
       password = '';
       const [loadedOverview] = await Promise.all([getOverview(), loadOverviewPanel()]);
       overview = loadedOverview;
+      overviewError = '';
       notifySuccess(`Signed in as ${session?.user?.username}.`);
     } catch (cause) {
       loginError = normalizeError(cause);
@@ -196,8 +204,10 @@
     if (!options.silent) overviewLoading = true;
     try {
       overview = await getOverview();
+      overviewError = '';
     } catch (cause) {
-      notifyError(normalizeError(cause));
+      overviewError = normalizeError(cause);
+      notifyError(overviewError);
     } finally {
       overviewLoading = false;
     }
@@ -209,9 +219,13 @@
     try {
       session = await logout(session.csrf_token);
       overview = null;
+      overviewError = '';
       users = [];
+      usersError = '';
       buckets = [];
+      bucketsError = '';
       listing = null;
+      objectsError = '';
       showWizard = false;
       navigate({ view: 'overview' }, { replace: true });
       notifySuccess('Signed out.');
@@ -351,8 +365,10 @@
     try {
       const res = await listUsers(csrf);
       users = res.users ?? [];
+      usersError = '';
     } catch (cause) {
-      notifyError(normalizeError(cause));
+      usersError = normalizeError(cause);
+      notifyError(usersError);
     } finally {
       usersLoading = false;
     }
@@ -398,8 +414,10 @@
     try {
       const res = await listBuckets(csrf);
       buckets = res.buckets ?? [];
+      bucketsError = '';
     } catch (cause) {
-      notifyError(normalizeError(cause));
+      bucketsError = normalizeError(cause);
+      notifyError(bucketsError);
     } finally {
       bucketsLoading = false;
     }
@@ -407,12 +425,14 @@
 
   function openBucket(name: string) {
     listing = null;
+    objectsError = '';
     selectedKeys = [];
     navigate({ view: 'buckets', bucket: name, prefix: '' });
   }
 
   function exitBucket() {
     listing = null;
+    objectsError = '';
     selectedKeys = [];
     navigate({ view: 'buckets', bucket: '', prefix: '' });
   }
@@ -423,15 +443,20 @@
     const requestSerial = ++objectsRequestSerial;
     const routeKey = `${bucket}|${prefix}`;
     listing = null;
+    objectsError = '';
     selectedKeys = [];
     objectsLoading = true;
     try {
       const nextListing = await listObjects(csrf, bucket, prefix);
       if (requestSerial === objectsRequestSerial && routeKey === `${selectedBucket}|${currentPrefix}`) {
         listing = nextListing;
+        objectsError = '';
       }
     } catch (cause) {
-      notifyError(normalizeError(cause));
+      if (requestSerial === objectsRequestSerial && routeKey === `${selectedBucket}|${currentPrefix}`) {
+        objectsError = normalizeError(cause);
+        notifyError(objectsError);
+      }
     } finally {
       if (requestSerial === objectsRequestSerial) objectsLoading = false;
     }
@@ -646,25 +671,25 @@
     </section>
   {:else}
     {#if view === 'transfers'}
-      {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token}/>{:else if routeLoadError}<LoadError title="Could not load transfer activity" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'recovery'}
       <div class="subtabs" role="tablist" aria-label="Recovery views">
         <button class:active={recoveryTab === 'issues'} role="tab" aria-selected={recoveryTab === 'issues'} on:click={() => selectRecoveryTab('issues')}>Issues</button>
         <button class:active={recoveryTab === 'transfers'} role="tab" aria-selected={recoveryTab === 'transfers'} on:click={() => selectRecoveryTab('transfers')}>Interrupted transfers</button>
       </div>
       {#if recoveryTab === 'issues'}
-        {#if RecoveryIssuesComponent}<svelte:component this={RecoveryIssuesComponent} recovery={overview?.recovery} csrf={session?.csrf_token} loading={recoveryLoading} onChanged={() => refreshOverview({silent: true})} onRefresh={refreshRecovery}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
+        {#if RecoveryIssuesComponent}<svelte:component this={RecoveryIssuesComponent} recovery={overview?.recovery} csrf={session?.csrf_token} loading={recoveryLoading} error={overviewError} onChanged={() => refreshOverview({silent: true})} onRefresh={refreshRecovery}/>{:else if routeLoadError}<LoadError title="Could not load recovery issues" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {:else}
-        {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
+        {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else if routeLoadError}<LoadError title="Could not load interrupted transfers" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {/if}
     {:else if view === 'telegram'}
       {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} tab={telegramTab} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode overview={overview} {session} settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} bind:showCredentials={showTelegramCredentials} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose} onRemoveConnection={removeCurrentConnection}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Telegram settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'overview'}
-      {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} {listing} {bucketsLoading} {objectsLoading} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])} onRemoveKey={removeKey} onRemoveSelected={removeSelected} onRemoveBucket={dropBucket} onOpenMove={openMoveModal}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])} onRemoveKey={removeKey} onRemoveSelected={removeSelected} onRemoveBucket={dropBucket} onOpenMove={openMoveModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'users'}
-      {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={dropUser} onAdd={openOperatorModal}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
+      {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} error={usersError} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={dropUser} onAdd={openOperatorModal}/>{:else if routeLoadError}<LoadError title="Could not load operator accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
     {/if}
   {/if}
 

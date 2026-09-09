@@ -2,6 +2,7 @@
   import { listBuckets, listObjects } from '../lib/api';
   import type { BucketInfo, ObjectsState } from '../lib/types';
   import { onMount } from 'svelte';
+  import LoadError from './LoadError.svelte';
 
   export let bucket = '';
   export let prefix = '';
@@ -25,6 +26,7 @@
     loadingBuckets = true;
     try {
       buckets = (await listBuckets(csrf)).buckets ?? [];
+      error = '';
     } catch (cause) {
       error = cause instanceof Error ? cause.message : 'Unable to load buckets';
     } finally {
@@ -77,6 +79,7 @@
     <section class="move-browser-list" aria-label="Destination buckets">
       <p class="card-label">Buckets</p>
       {#if loadingBuckets}<div class="skeleton-stack"><div class="skeleton" style="height:38px"></div><div class="skeleton" style="height:38px"></div></div>
+      {:else if error && !buckets.length}<LoadError title="Could not load destination buckets" message={error} onRetry={loadBuckets} />
       {:else}{#each buckets as item (item.name)}<button class:chosen={bucket === item.name} class="move-option" type="button" on:click={() => chooseBucket(item.name)}>{item.name}</button>{/each}{/if}
     </section>
     <section class="move-browser-list" aria-label="Destination folders">
@@ -84,11 +87,12 @@
       {#if bucket}
         <div class="move-crumbs"><button class="btn-link" type="button" on:click={() => gotoCrumb(0)}>{bucket}</button>{#each prefix.split('/').filter(Boolean) as crumb, i (crumb + i)}<span>/</span><button class="btn-link" type="button" on:click={() => gotoCrumb(i + 1)}>{crumb}</button>{/each}</div>
         {#if loadingObjects}<div class="skeleton-stack"><div class="skeleton" style="height:38px"></div><div class="skeleton" style="height:38px"></div><div class="skeleton" style="height:38px"></div></div>
+        {:else if error && !listing}<LoadError title="Could not load destination folders" message={error} onRetry={() => loadObjects(bucket, prefix)} />
         {:else if listing}{#each listing.folders as folder (folder)}<button class="move-option" type="button" on:click={() => enterFolder(folder)}>📁 {folder}/</button>{/each}{#each listing.objects as object (object.key)}<div class="move-option disabled">{object.name}<small>object</small></div>{/each}{#if !listing.folders.length && !listing.objects.length}<p class="fine-print">This folder is empty.</p>{/if}{/if}
       {:else}<p class="fine-print">Choose a bucket to browse folders.</p>{/if}
     </section>
   </div>
-  {#if error}<p class="fine-print error-hint" role="alert">{error}</p>{/if}
+  {#if error && (buckets.length > 0 || listing)}<p class="fine-print error-hint" role="alert">{error}</p>{/if}
   <div class="move-destination"><span>Move here:</span><strong>{bucket ? destination() : 'Choose a bucket'}</strong><button class="primary" type="button" on:click={onMoveHere} disabled={!bucket || loadingObjects}>Move files</button></div>
 </div>
 

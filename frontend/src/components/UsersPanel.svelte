@@ -1,7 +1,9 @@
 <script lang="ts">
+  import LoadError from './LoadError.svelte';
   import type { UserInfo } from '../lib/types';
   export let users: UserInfo[] = [];
   export let loading = false;
+  export let error = '';
   export let canManage = false;
   export let busy = false;
   export let onRefresh: () => void = () => {};
@@ -13,9 +15,10 @@
   <div class="section-head"><div><p class="card-label">Operators</p><h2>Accounts</h2><p class="fine-print">Dashboard operator accounts. Telegram storage access is managed separately.</p></div>
     <button class="ghost" type="button" on:click={onRefresh} disabled={loading}>{#if loading}<span class="spinner" aria-hidden="true"></span>{/if}Refresh</button>
   </div>
-  {#if loading && users.length === 0}
+  {#if error}<LoadError title="Could not load operator accounts" message={error} onRetry={onRefresh} />{/if}
+  {#if loading && users.length === 0 && !error}
     <div class="skeleton-stack"><div class="skeleton" style="height:44px"></div><div class="skeleton" style="height:44px"></div></div>
-  {:else if users.length === 0}
+  {:else if users.length === 0 && !error}
     <p class="empty-state"><span class="empty-mark" aria-hidden="true">+</span>No operator accounts yet.</p>
   {:else}
     <div class="table-scroll"><table class="kv-table"><thead><tr><th>Username</th><th>Role</th><th>State</th><th></th></tr></thead><tbody>
