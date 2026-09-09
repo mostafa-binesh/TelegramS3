@@ -189,7 +189,9 @@ image must contain the Vite-generated hashed files below
 `TELEGRAM_ADMIN_UI_DIST_DIR/assets/`; a missing lazy-view file is reported with
 a Retry action in the console.
 Then use the in-browser **Telegram onboarding wizard** (phone → code → cloud password when
-required) to authorize the single Telegram session the store runs on. Operator
+required) to authorize the single Telegram session the store runs on. The wizard opens as
+a modal, starts a fresh operator-owned flow each time it opens, and lets invalid codes be
+retried without losing the active Telegram token. Operator
 accounts in the "Operators" tab are separate from that Telegram login. The
 overview now shows the Telegram storage connection state directly and flips to
 connected once the session is authorized and the storage chat is reachable.
@@ -274,8 +276,8 @@ See [SECURITY.md](SECURITY.md), [THREAT_MODEL.md](THREAT_MODEL.md), and
 `/_admin` is an authenticated Svelte single-page app served by the Rust server
 on the public listener. It provides a storage overview, endpoint and capacity
 details, Telegram readiness, operator account management (superadmin-only),
-in-app bucket creation, a routed bucket/object browser with per-file upload,
-move, and full/range download -
+in-app bucket creation and deletion (deletion remains empty-bucket-only), a routed
+bucket/object browser with Unicode-preserving names, per-file upload, move, and full/range download -
 streamed through the same bounded, checksum-verified chunk paths as the S3 data
 plane. Guests see only the sign-in screen; every management and content API is
 gated behind a user-bound session with CSRF protection.

@@ -88,6 +88,11 @@ normal worker/reconciliation path.
    complete UI `assets/` directory, then use the view's Retry action; this is a
    UI-asset issue and does not alter the persisted Telegram settings.
 
+The Telegram setup dialog owns an operator-scoped flow id. Closing the dialog
+cancels that flow, and reopening it requests a fresh code. An invalid code keeps
+the current attempt retryable; an expired code requires starting a new attempt.
+Stale browser requests cannot cancel or advance a replacement flow.
+
 ## Telegram Session Loss
 
 1. Keep the local metadata and data directories intact.

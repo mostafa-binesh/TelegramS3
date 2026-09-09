@@ -201,6 +201,12 @@ Completed in this increment:
   unsupported
 - committed-object deletes now make cleanup due immediately; the existing
   evidence-first cleanup worker removes Telegram messages asynchronously
+- the Telegram setup wizard now uses an accessible modal with an opaque,
+  operator-owned flow id; reopening replaces the operator's unfinished attempt,
+  while other operators remain isolated by the single-flow lock
+- invalid Telegram codes remain retryable, and the bucket browser now provides
+  empty-bucket deletion, parent navigation, and skeleton loading on refresh and
+  folder transitions
 
 Planned work:
 

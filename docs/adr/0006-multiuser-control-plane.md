@@ -103,6 +103,12 @@ Implemented as the documented follow-up increment:
   flow** (a second operator's `begin` → `409`); the retained
   phone/sign-in/2FA token lives in the driver, not on the shared transport, and
   failures reuse the CLI's classification.
+- **Wizard flow ownership and replacement**: each modal instance generates an
+  opaque `flow_id`. Begin, code, password, and cancel requests must carry that
+  id and the authenticated operator owns the active flow. Reopening replaces
+  only that operator's unfinished flow; a different operator still receives a
+  conflict. Invalid confirmation codes preserve the sign-in token for retry,
+  while stale flow requests cannot affect a replacement.
 - **CLI parity**: both the headless `telegram-s3 auth login` and the HTTP wizard
   reuse the same classification and retry primitives on the transport, so
   failures (flood waits, expired/invalid codes, wrong password) surface and

@@ -64,7 +64,9 @@ features, so they are documented separately.
 - The operator UI hosts an in-browser **Telegram onboarding wizard**
   (`/telegram/wizard/{state,begin,submit-code,submit-password,cancel}`) that
   drives the real single-account login (phone → code → cloud password when
-  required) behind the authenticated, CSRF-protected session. This authorizes
+  required) behind the authenticated, CSRF-protected session. The modal sends an
+  opaque `flow_id` on every turn, replaces only the same operator's unfinished
+  flow, and preserves retryable invalid-code state. This authorizes
   the storage account for the server, not an operator record in the dashboard.
 - Telegram bootstrap settings are validated by the admin API before they are
   persisted, so malformed API/storage identifiers remain operator errors and
@@ -79,6 +81,9 @@ features, so they are documented separately.
   applies.
 - Bulk/folder download or server-side ZIP is **not** available at this level
   (avoiding whole-object RAM buffering) and is an explicit future item.
+- The bucket browser preserves bucket names exactly, including Unicode names;
+  its delete action maps to the existing empty-bucket-only API and does not
+  bypass tombstone/recovery rules.
 - The operator UI is not part of the S3 compatibility contract; the `/_admin`
   controller only reflects committed S3 object data through the same store as
   the S3 server. Its Vite-built hashed chunks are served from the UI dist

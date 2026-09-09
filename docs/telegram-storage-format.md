@@ -133,6 +133,10 @@ the metadata store and reconciliation path. Both legacy `ListObjects` and
 `ListObjectsV2` read from that same ordered local index rather than deriving
 separate views of the bucket.
 
+The admin bucket browser preserves bucket names exactly, including Unicode
+characters. Its delete action only requests deletion of an empty bucket; it does
+not alter manifest, tombstone, or recovery semantics.
+
 ## Commit State
 
 Supported states:
