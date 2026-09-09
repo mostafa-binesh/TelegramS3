@@ -81,4 +81,6 @@ features, so they are documented separately.
   (avoiding whole-object RAM buffering) and is an explicit future item.
 - The operator UI is not part of the S3 compatibility contract; the `/_admin`
   controller only reflects committed S3 object data through the same store as
-  the S3 server.
+  the S3 server. Its Vite-built hashed chunks are served from the UI dist
+  directory's `assets/` subdirectory; a failed lazy-view load is surfaced with
+  a retry action rather than an unbounded loading skeleton.

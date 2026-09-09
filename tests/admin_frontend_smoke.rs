@@ -22,6 +22,12 @@ fn prepare_admin_ui(tempdir: &TempDir) -> std::path::PathBuf {
     )
     .expect("ui index");
     fs::write(assets_dir.join("app.css"), "body{}").expect("ui asset");
+    fs::write(assets_dir.join("app.js"), "export const marker = 'app';").expect("ui asset");
+    fs::write(
+        assets_dir.join("TelegramPanel-cafebabe.js"),
+        "export const marker = 'telegram';",
+    )
+    .expect("ui asset");
     ui_dir
 }
 
@@ -451,6 +457,18 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     .await;
     assert_eq!(asset.status, 200);
     assert_eq!(asset.body, "body{}");
+
+    let telegram_chunk = http_request(
+        &client,
+        &bind_addr,
+        "GET",
+        "/_admin/assets/TelegramPanel-cafebabe.js",
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(telegram_chunk.status, 200);
+    assert_eq!(telegram_chunk.body, "export const marker = 'telegram';");
 
     let missing_asset = http_request(
         &client,

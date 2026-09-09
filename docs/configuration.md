@@ -47,7 +47,10 @@ RUSTFS_SECRET_KEY=<generate_secure_random_value>
   `/_admin` session cookies. Operator *identities* come from `metadata.sqlite`
   (`users`), not from the environment; see Operator accounts below.
 - admin UI dist dir: `TELEGRAM_ADMIN_UI_DIST_DIR` points at the built Svelte
-  assets served by the `/_admin` frontend path
+  assets served by the `/_admin` frontend path. Vite's `index.html` and its
+  hashed lazy-view chunks must be present under this directory's `assets/`
+  subdirectory; if a lazy chunk cannot be loaded, the console shows a retry
+  action instead of remaining on an infinite skeleton.
 - Docker deployments should mount `TELEGRAM_METADATA_PATH` and
   `TELEGRAM_DATA_DIR` on persistent volumes and set
   `TELEGRAM_S3_BIND_ADDR=0.0.0.0:9000` while leaving

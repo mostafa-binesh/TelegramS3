@@ -184,7 +184,11 @@ server is down. See [docs/configuration.md](docs/configuration.md).
 ### 3. Log in to the operator UI
 
 Open <http://localhost:9000/_admin>, sign in with the account above, and use the
-in-browser **Telegram onboarding wizard** (phone → code → cloud password when
+Telegram settings view to enter or update the Telegram bootstrap values. The
+image must contain the Vite-generated hashed files below
+`TELEGRAM_ADMIN_UI_DIST_DIR/assets/`; a missing lazy-view file is reported with
+a Retry action in the console.
+Then use the in-browser **Telegram onboarding wizard** (phone → code → cloud password when
 required) to authorize the single Telegram session the store runs on. Operator
 accounts in the "Operators" tab are separate from that Telegram login. The
 overview now shows the Telegram storage connection state directly and flips to

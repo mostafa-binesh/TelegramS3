@@ -83,6 +83,10 @@ normal worker/reconciliation path.
 6. Use the authenticated `/_admin` dashboard to recheck storage overview,
    capacity, Telegram readiness, bucket visibility (including buckets created
    from the UI), and bootstrap status before resuming writes.
+7. If a console view remains on a loading skeleton, inspect the response for
+   its hashed file under `/_admin/assets/`. Rebuild/redeploy the image with the
+   complete UI `assets/` directory, then use the view's Retry action; this is a
+   UI-asset issue and does not alter the persisted Telegram settings.
 
 ## Telegram Session Loss
 

@@ -192,6 +192,9 @@ Completed in this increment:
 - the admin console now has history-routed bucket/folder locations, SVG
   navigation icons, a folder-aware move browser, and Telegram connection/proxy
   sub-tabs
+- lazy-loaded console views now surface a retryable asset-load error instead of
+  remaining on an infinite skeleton; Docker/static serving keeps hashed Vite
+  chunks under `/_admin/assets/`
 - browser reception now supports bounded resumable chunks, authoritative offset
   re-sync, pause/resume while the reception lease remains active, and explicit
   cancellation cleanup; server restart resumption remains intentionally
