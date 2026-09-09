@@ -2,8 +2,6 @@
   import { onMount } from 'svelte';
   import Sidebar from './components/Sidebar.svelte';
   import HealthBadge from './components/HealthBadge.svelte';
-  import SetupWizard from './components/SetupWizard.svelte';
-  import Transfers from './components/Transfers.svelte';
   import {getSetup} from './lib/api';
   import {
     createBucket,
@@ -24,7 +22,7 @@
     saveTelegramSettings,
     uploadObject
   } from './lib/api';
-  import {formatBytes, formatCount, formatTimestamp, normalizeError} from './lib/format';
+  import {normalizeError} from './lib/format';
   import type {
     BucketInfo,
     ObjectEntry,
@@ -34,9 +32,6 @@
     TelegramSettings,
     UserInfo
   } from './lib/types';
-  import TelegramWizard from './components/TelegramWizard.svelte';
-  import UploadBox from './components/UploadBox.svelte';
-  import RecoveryIssues from './components/RecoveryIssues.svelte';
   import TopProgress from './components/TopProgress.svelte';
 
   let session: SessionState | null = null;
@@ -47,11 +42,32 @@
   let busy = false;
   let message = '';
   let error = '';
+  let SetupWizardComponent: any = null;
+  let TransfersComponent: any = null;
+  let RecoveryIssuesComponent: any = null;
+  let TelegramWizardComponent: any = null;
+  let UploadBoxComponent: any = null;
+  let UsersPanelComponent: any = null;
+  let TelegramPanelComponent: any = null;
+  let OverviewPanelComponent: any = null;
+  let BucketsPanelComponent: any = null;
+  let AdminModalsComponent: any = null;
   let messageTimer: ReturnType<typeof setTimeout> | undefined;
   $: if (message) {
     if (messageTimer) clearTimeout(messageTimer);
     messageTimer = setTimeout(() => { message = ''; }, 6000);
   }
+
+  async function loadSetupWizard() { SetupWizardComponent ??= (await import('./components/SetupWizard.svelte')).default; }
+  async function loadTransfers() { TransfersComponent ??= (await import('./components/Transfers.svelte')).default; }
+  async function loadRecoveryIssues() { RecoveryIssuesComponent ??= (await import('./components/RecoveryIssues.svelte')).default; }
+  async function loadTelegramWizard() { TelegramWizardComponent ??= (await import('./components/TelegramWizard.svelte')).default; }
+  async function loadUploadBox() { UploadBoxComponent ??= (await import('./components/UploadBox.svelte')).default; }
+  async function loadUsersPanel() { UsersPanelComponent ??= (await import('./components/UsersPanel.svelte')).default; }
+  async function loadTelegramPanel() { TelegramPanelComponent ??= (await import('./components/TelegramPanel.svelte')).default; }
+  async function loadOverviewPanel() { OverviewPanelComponent ??= (await import('./components/OverviewPanel.svelte')).default; }
+  async function loadBucketsPanel() { BucketsPanelComponent ??= (await import('./components/BucketsPanel.svelte')).default; }
+  async function loadAdminModals() { AdminModalsComponent ??= (await import('./components/AdminModals.svelte')).default; }
 
   let username = '';
   let password = '';
@@ -107,13 +123,6 @@
   $: acknowledgedCount =
     (overview?.recovery?.issue_count ?? 0) - (overview?.recovery?.unacknowledged_count ?? 0);
 
-  function telegramNeedsSetup(): boolean {
-    return (overview?.telegram?.connection_state ?? 'needs_reauth') !== 'connected';
-  }
-  function telegramStatusLabel() {
-    return overview?.telegram?.connection_state?.replaceAll('_', ' ') ?? 'needs reauth';
-  }
-
   onMount(() => {
     void bootstrapApp();
     let disposed=false; let timer:ReturnType<typeof setTimeout>;
@@ -131,9 +140,10 @@
     error = '';
     try {
       session = await getSession();
-      if(!session.authenticated) setupRequired=(await getSetup()).setup_required;
+      if(!session.authenticated) { setupRequired=(await getSetup()).setup_required; if (setupRequired) await loadSetupWizard(); }
       if (session?.authenticated) {
-        overview = await getOverview();
+        const [loadedOverview] = await Promise.all([getOverview(), loadOverviewPanel()]);
+        overview = loadedOverview;
         await refreshTelegramSettings();
       } else {
         overview = null;
@@ -153,7 +163,8 @@
       session = await login(username.trim(), password);
       username = '';
       password = '';
-      overview = await getOverview();
+      const [loadedOverview] = await Promise.all([getOverview(), loadOverviewPanel()]);
+      overview = loadedOverview;
       message = `Signed in as ${session?.user?.username}.`;
     } catch (cause) {
       loginError = normalizeError(cause);
@@ -194,7 +205,8 @@
     }
   }
 
-  function toggleWizard(open: boolean) {
+  async function toggleWizard(open: boolean) {
+    if (open) await loadTelegramWizard();
     showWizard = open;
   }
 
@@ -254,7 +266,13 @@
   async function switchView(next: 'overview' | 'users' | 'buckets' | 'transfers' | 'recovery' | 'telegram') {
     view = next;
     error = '';
+    if (next === 'overview') await loadOverviewPanel();
+    if (next === 'buckets') await loadBucketsPanel();
     if (next === 'overview' || next === 'recovery') await refreshOverview();
+    if (next === 'transfers') await loadTransfers();
+    if (next === 'recovery') await loadRecoveryIssues();
+    if (next === 'users') await loadUsersPanel();
+    if (next === 'telegram') await loadTelegramPanel();
     if (next === 'telegram') await refreshTelegramSettings();
     if (next === 'users') await refreshUsers();
     if (next === 'buckets') {
@@ -433,6 +451,38 @@
     }
   }
 
+  async function selectRecoveryTab(tab: 'issues' | 'transfers') {
+    recoveryTab = tab;
+    if (tab === 'issues') await loadRecoveryIssues(); else await loadTransfers();
+  }
+
+  async function openUploadModal() {
+    await Promise.all([loadAdminModals(), loadUploadBox()]);
+    showUploadModal = true;
+  }
+
+  async function openBucketModal() {
+    await loadAdminModals();
+    showBucketModal = true;
+  }
+
+  async function openFolderModal() {
+    await loadAdminModals();
+    showFolderModal = true;
+  }
+
+  async function openOperatorModal() {
+    await loadAdminModals();
+    showOperatorModal = true;
+  }
+
+  async function openMoveModal() {
+    await loadAdminModals();
+    moveBucket = selectedBucket;
+    movePrefix = currentPrefix;
+    showMoveModal = true;
+  }
+
   async function refreshRecovery() {
     recoveryLoading = true;
     try { await refreshOverview({silent: true}); }
@@ -486,7 +536,7 @@
   {#if loading}
     <section class="card surface"><p>Loading…</p></section>
   {:else if setupRequired && !session?.authenticated}
-    <SetupWizard onCreated={(created)=>{session=created;setupRequired=false;view='telegram';void refreshOverview();void refreshTelegramSettings();}}/>
+    {#if SetupWizardComponent}<svelte:component this={SetupWizardComponent} onCreated={(created: SessionState)=>{session=created;setupRequired=false;view='telegram';void loadTelegramPanel();void refreshOverview();void refreshTelegramSettings();}}/>{:else}<section class="card surface"><div class="skeleton" style="height:240px"></div></section>{/if}
   {:else if !session?.authenticated}
     <section class="login-grid">
       <div class="card surface intro-card">
@@ -513,342 +563,29 @@
     </section>
   {:else}
     {#if view === 'transfers'}
-      <Transfers csrf={session?.csrf_token}/>
+      {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'recovery'}
       <div class="subtabs" role="tablist" aria-label="Recovery views">
-        <button class:active={recoveryTab === 'issues'} role="tab" aria-selected={recoveryTab === 'issues'} on:click={() => recoveryTab = 'issues'}>Issues</button>
-        <button class:active={recoveryTab === 'transfers'} role="tab" aria-selected={recoveryTab === 'transfers'} on:click={() => recoveryTab = 'transfers'}>Interrupted transfers</button>
+        <button class:active={recoveryTab === 'issues'} role="tab" aria-selected={recoveryTab === 'issues'} on:click={() => void selectRecoveryTab('issues')}>Issues</button>
+        <button class:active={recoveryTab === 'transfers'} role="tab" aria-selected={recoveryTab === 'transfers'} on:click={() => void selectRecoveryTab('transfers')}>Interrupted transfers</button>
       </div>
       {#if recoveryTab === 'issues'}
-        <RecoveryIssues recovery={overview?.recovery} csrf={session?.csrf_token} loading={recoveryLoading} onChanged={() => refreshOverview({silent: true})} onRefresh={refreshRecovery}/>
+        {#if RecoveryIssuesComponent}<svelte:component this={RecoveryIssuesComponent} recovery={overview?.recovery} csrf={session?.csrf_token} loading={recoveryLoading} onChanged={() => refreshOverview({silent: true})} onRefresh={refreshRecovery}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {:else}
-        <Transfers csrf={session?.csrf_token} recoveryOnly/>
+        {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {/if}
     {:else if view === 'telegram'}
-      <article class="card surface tg-callout">
-        <div class="tg-banner">
-          <div class="tg-copy">
-            <p class="card-label">Telegram</p>
-            <h2>
-              {telegramNeedsSetup()
-                ? 'Telegram storage is not connected'
-                : 'Telegram storage is connected'}
-            </h2>
-            <p>
-              This wizard signs in the single Telegram account that backs storage for the
-              whole server. Operator accounts are separate and live in the Operators tab.
-            </p>
-            <p class="fine-print">
-              Storage session: {overview?.telegram?.session_state ?? 'Unknown'}
-              {' '}• {telegramStatusLabel()}
-            </p>
-            <p class="fine-print">{overview?.telegram?.detail ?? 'No Telegram status available.'}</p>
-          </div>
-          <div class="tg-actions">
-            <button class="primary" type="button" on:click={() => toggleWizard(true)}>
-              {telegramNeedsSetup() ? 'Set up Telegram login' : 'Refresh Telegram login'}
-            </button>
-            <button class="ghost" type="button" on:click={() => switchView('users')}>
-              Manage operators
-            </button>
-          </div>
-        </div>
-        <div class="settings-grid settings-summary">
-          <article class="settings-card"><p class="card-label">Credentials</p><p class="fine-print">API credentials and the storage chat are kept out of the main settings form.</p><button class="primary" type="button" on:click={() => showTelegramCredentials = true}>Edit Telegram credentials</button></article>
-          <article class="settings-card"><p class="card-label">Proxy</p><p class="fine-print">Use a SOCKS5/HTTP proxy only when your network requires it.</p><form class="proxy-form" on:submit|preventDefault={saveTelegramSettingsForm}>
-            <label><span>Proxy mode</span><select bind:value={telegramProxyMode}><option value="auto">Auto</option><option value="disabled">Disabled</option><option value="socks5">SOCKS5</option><option value="http">HTTP</option></select></label>
-            <label><span>Proxy URL</span><input bind:value={telegramProxyUrl} type="text" placeholder="socks5://127.0.0.1:12334" /></label>
-            <div class="grid-2"><label><span>Username</span><input bind:value={telegramProxyUsername} /></label><label><span>Password</span><input bind:value={telegramProxyPassword} type="password" /></label></div>
-            <button class="primary" type="submit" disabled={telegramSettingsBusy}>Save proxy settings</button>
-          </form></article>
-        </div>
-        {#if telegramSettingsMessage}<p class="fine-print">{telegramSettingsMessage}</p>{/if}{#if telegramSettingsError}<p class="fine-print error-hint">{telegramSettingsError}</p>{/if}
-        <!-- Credentials are intentionally edited in a modal to keep the sensitive fields out of the primary panel. -->
-        {#if showTelegramCredentials}<div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showTelegramCredentials = false)}><form class="modal-card" on:submit|preventDefault={() => { showTelegramCredentials = false; void saveTelegramSettingsForm(); }}><div class="section-head"><div><p class="card-label">Telegram credentials</p><h2>Storage account</h2></div><button class="icon-button" type="button" on:click={() => showTelegramCredentials = false}>×</button></div><div class="settings-grid">
-            <label>
-              <span>Telegram API ID</span>
-              <input bind:value={telegramApiId} type="text" autocomplete="off" />
-            </label>
-            <label>
-              <span>Telegram API hash</span>
-              <input bind:value={telegramApiHash} type="password" autocomplete="off" />
-            </label>
-            <label>
-              <span>Storage chat ID</span>
-              <input bind:value={telegramStorageChatId} type="text" autocomplete="off" />
-            </label>
-          </div><div class="settings-actions"><button class="primary" type="submit" disabled={telegramSettingsBusy}>Save credentials</button></div></form></div>{/if}
-      </article>
-      {#if showWizard}
-        <TelegramWizard
-          csrf={session?.csrf_token}
-          onDone={handleWizardAuthorized}
-        />
-        <button class="ghost" type="button" on:click={() => toggleWizard(false)}>Close wizard</button>
-      {/if}
+      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode overview={overview} {session} settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} bind:showCredentials={showTelegramCredentials} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized}/>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'overview'}
-      <section class="section-head overview-head">
-        <div>
-          <p class="card-label">Snapshot</p>
-          <h2>Storage at a glance</h2>
-        </div>
-        <button class="ghost" type="button" on:click={() => refreshOverview()} disabled={overviewLoading}>
-          {#if overviewLoading}<span class="spinner" aria-hidden="true"></span>{/if}
-          Refresh
-        </button>
-      </section>
-      <section class="cards">
-        {#if overviewLoading || !overview}
-          {#each [0, 1, 2, 3] as slot (slot)}
-            <article class="card metric"><div class="skeleton" style="height:62px"></div></article>
-          {/each}
-        {:else}
-          <article class="card metric">
-            <p class="card-label">Buckets</p>
-            <strong>{formatCount(overview?.storage?.buckets ?? 0)}</strong>
-          </article>
-          <article class="card metric">
-            <p class="card-label">Committed</p>
-            <strong>{formatCount(overview?.storage?.committed_objects ?? 0)}</strong>
-          </article>
-          <article class="card metric">
-            <p class="card-label">Active</p>
-            <strong>{formatCount(overview?.storage?.active_objects ?? 0)}</strong>
-          </article>
-          <article class="card metric corrupted" class:attention={corruptedCount > 0}>
-            <p class="card-label">Corrupted files</p>
-            <strong>{formatCount(corruptedCount)}</strong>
-            {#if overview?.recovery?.scan_error}
-              <small class="error-hint">Scan unavailable</small>
-            {:else if acknowledgedCount > 0}
-              <small>{formatCount(acknowledgedCount)} acknowledged</small>
-            {:else if corruptedCount === 0}
-              <small>Nothing needs attention</small>
-            {/if}
-            {#if corruptedCount > 0 || acknowledgedCount > 0 || overview?.recovery?.scan_error}
-              <button class="btn-link card-link" type="button" on:click={() => switchView('recovery')}>
-                View details →
-              </button>
-            {/if}
-          </article>
-        {/if}
-      </section>
-      <section class="layout analysis-grid">
-        <article class="card surface chart-card">
-          <div class="section-head"><div><p class="card-label">Analysis</p><h2>Storage composition</h2></div></div>
-          {#if overviewLoading || !overview}<div class="skeleton" style="height:150px"></div>{:else}
-            {@const total = Math.max((overview.storage?.committed_objects ?? 0) + (overview.storage?.active_objects ?? 0) + (overview.storage?.staged_objects ?? 0), 1)}
-            <div class="bar-chart" aria-label="Storage composition chart">
-              <div class="bar-segment committed" style={`width:${((overview.storage?.committed_objects ?? 0) / total) * 100}%`}></div>
-              <div class="bar-segment active" style={`width:${((overview.storage?.active_objects ?? 0) / total) * 100}%`}></div>
-              <div class="bar-segment staged" style={`width:${((overview.storage?.staged_objects ?? 0) / total) * 100}%`}></div>
-            </div>
-            <div class="legend"><span><i class="committed"></i>Committed {formatCount(overview.storage?.committed_objects ?? 0)}</span><span><i class="active"></i>Active {formatCount(overview.storage?.active_objects ?? 0)}</span><span><i class="staged"></i>Staged {formatCount(overview.storage?.staged_objects ?? 0)}</span></div>
-          {/if}
-        </article>
-        <article class="card surface chart-card">
-          <p class="card-label">Recovery signal</p><h2>{formatCount(corruptedCount)} actionable</h2>
-          {#if overviewLoading || !overview}<div class="skeleton" style="height:80px"></div>{:else}<div class="signal-track"><span style={`width:${Math.min(corruptedCount * 10, 100)}%`}></span></div><p class="fine-print">{acknowledgedCount ? `${formatCount(acknowledgedCount)} acknowledged issue(s) remain reviewable.` : 'No acknowledged issues.'}</p>{/if}
-        </article>
-      </section>
+      {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      <section class="card surface">
-          <div class="section-head">
-            <div>
-              <p class="card-label">Buckets and files</p>
-              <h2>{selectedBucket ? `Bucket / ${selectedBucket}` : 'Your buckets'}</h2>
-            </div>
-            <div class="toolbar-actions">
-              {#if !selectedBucket}<button class="primary" type="button" on:click={() => showBucketModal = true}>＋ Create bucket</button>{/if}
-              <button
-              class="ghost"
-              type="button"
-              on:click={() => (selectedBucket ? refreshObjects() : refreshBuckets())}
-              disabled={busy || bucketsLoading || objectsLoading}
-            >
-              {#if bucketsLoading || objectsLoading}<span class="spinner" aria-hidden="true"></span>{/if}
-              Refresh
-            </button>
-            {#if selectedBucket}<button class="primary" type="button" on:click={() => showUploadModal = true}>↑ Upload</button>{/if}
-          </div>
-        </div>
-        {#if !selectedBucket}
-          <p class="fine-print">
-            Select a bucket to browse its files. Bucket names may contain Unicode characters.
-          </p>
-          {#if bucketsLoading && buckets.length === 0}
-            <div class="skeleton-stack">
-              <div class="skeleton" style="height:52px"></div>
-              <div class="skeleton" style="height:52px"></div>
-            </div>
-          {:else if buckets.length === 0}
-            <p class="empty-state">
-              <span class="empty-mark" aria-hidden="true">+</span>
-              No buckets yet. Create one above to start the file browser.
-            </p>
-          {:else}
-            <ul class="checks">
-              {#each buckets as bucket (bucket.name)}
-                <li>
-                  <div class="bucket-row">
-                    <button type="button" class="btn-link" on:click={() => openBucket(bucket.name)}>
-                      {bucket.name}
-                      <small>created {formatTimestamp(bucket.created_at)}</small>
-                    </button>
-                    <span class="fine-print">{bucket.name.length} chars</span>
-                  </div>
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        {:else}
-          <div class="crumb-row">
-            <button class="btn-link address-root" on:click={exitBucket}><span aria-hidden="true">▦</span> All buckets</button>
-            <span class="crumb-sep">/</span><strong class="address-current">{selectedBucket}</strong>
-            <span class="crumb-sep">/</span>
-            {#each crumbs() as crumb, i (crumb + i)}
-              <button class="btn-link" on:click={() => gotoCrumb(i)}>{crumb}</button><span class="crumb-sep">/</span>
-            {/each}
-          </div>
-          <div class="row-inline folder-actions"><button class="ghost" on:click={() => showFolderModal = true}>＋ New folder</button></div>
-          {#if objectsLoading && !listing}
-            <div class="skeleton-stack">
-              <div class="skeleton" style="height:40px"></div>
-              <div class="skeleton" style="height:40px"></div>
-              <div class="skeleton" style="height:40px"></div>
-            </div>
-          {:else if listing && listing.folders.length === 0 && listing.objects.length === 0}
-            <p class="empty-state">
-              <span class="empty-mark" aria-hidden="true">↑</span>
-              This folder is empty. Drop files above to upload the first one.
-            </p>
-          {:else}
-            <div class="table-scroll">
-              <table class="kv-table">
-                <thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={selectedKeys.length > 0 && selectedKeys.length === (listing?.objects.length ?? 0)} on:change={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])}/></th><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
-                <tbody>
-                  {#each listing?.folders ?? [] as folder (folder)}
-                    <tr>
-                      <td></td><td><button class="btn-link" on:click={() => enterFolder(folder)}>{folder}/</button></td>
-                      <td class="muted">folder</td>
-                      <td class="muted">—</td>
-                      <td class="row-actions">
-                        <button class="ghost" on:click={() => removeKey(folder)}>Delete</button>
-                      </td>
-                    </tr>
-                  {/each}
-                  {#each listing?.objects ?? [] as obj (obj.key)}
-                    <tr>
-                      <td><input class="select-all" type="checkbox" checked={selectedKeys.includes(obj.key)} on:change={() => toggleKey(obj.key)} aria-label={`Select ${obj.name}`}/></td><td>{obj.name}</td>
-                      <td>{formatBytes(obj.size)}</td>
-                      <td>{formatTimestamp(obj.last_modified)}</td>
-                      <td class="row-actions">
-                        <a class="row-download" href={contentUrl(selectedBucket, obj.key)} download>
-                          Download
-                        </a>
-                        <button class="ghost" on:click={() => removeKey(obj)}>Delete</button>
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
-          <p class="fine-print">
-          </p>
-          {#if selectedKeys.length}<div class="selection-bar"><strong>{selectedKeys.length} selected</strong><button class="ghost" on:click={() => message = 'Bulk download is available per object from the list.'}>↓ Download</button><button class="danger-button" on:click={removeSelected}>Delete</button><button class="ghost" on:click={() => { moveBucket = selectedBucket; movePrefix = currentPrefix; showMoveModal = true; }}>→ Move</button></div>{/if}
-        {/if}
-      </section>
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onExitBucket={exitBucket} onEnterFolder={enterFolder} onGotoCrumb={gotoCrumb} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])} onRemoveKey={removeKey} onRemoveSelected={removeSelected} onOpenMove={openMoveModal}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'users'}
-      <section class="card surface">
-        <div class="section-head">
-          <div>
-            <p class="card-label">Operators</p>
-            <h2>Accounts</h2>
-            <p class="fine-print">
-              These are dashboard operator accounts, not Telegram contacts. The Telegram
-              storage login lives on the Telegram settings page.
-            </p>
-          </div>
-          <button class="ghost" type="button" on:click={refreshUsers} disabled={usersLoading}>
-            {#if usersLoading}<span class="spinner" aria-hidden="true"></span>{/if}
-            Refresh
-          </button>
-        </div>
-        {#if usersLoading && users.length === 0}
-          <div class="skeleton-stack">
-            <div class="skeleton" style="height:44px"></div>
-            <div class="skeleton" style="height:44px"></div>
-          </div>
-        {:else if users.length === 0}
-          <p class="empty-state">
-            <span class="empty-mark" aria-hidden="true">+</span>
-            No operator accounts yet.
-          </p>
-        {:else}
-          <div class="table-scroll">
-            <table class="kv-table">
-              <thead><tr><th>Username</th><th>Role</th><th>State</th><th></th></tr></thead>
-              <tbody>
-                {#each users as user (user.id)}
-                  <tr>
-                    <td>{user.username}{#if user.display_name} <small>({user.display_name})</small>{/if}</td>
-                    <td><span class="role-tag" class:role-super={user.role === 'superadmin'}>{user.role}</span></td>
-                    <td>{user.disabled ? 'disabled' : 'enabled'}</td>
-                    <td class="row-actions">
-                      {#if canManageOperators}
-                        <button class="ghost" on:click={() => dropUser(user.id)} disabled={busy}>Remove</button>
-                      {/if}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-
-        <div class="nested-form operator-actions">
-          {#if canManageOperators}<button class="primary" on:click={() => showOperatorModal = true}>＋ Add operator</button>{:else}<p class="fine-print">Only superadmins can add or remove operator accounts.</p>{/if}
-        </div>
-      </section>
+      {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={dropUser} onAdd={openOperatorModal}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
     {/if}
   {/if}
 
-  {#if showBucketModal}
-    <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showBucketModal = false)}>
-      <form class="modal-card compact-modal" on:submit|preventDefault={() => { showBucketModal = false; void makeBucket(); }}>
-        <div class="section-head"><div><p class="card-label">Buckets</p><h2>Create bucket</h2></div><button class="icon-button" type="button" on:click={() => showBucketModal = false}>×</button></div>
-        <label><span>Bucket name</span><input bind:value={newBucket} placeholder="e.g. documents or فایل‌ها" /></label>
-        <p class="fine-print">Unicode names are supported and will be preserved exactly.</p>
-        <button class="primary" type="submit" disabled={busy || !newBucket.trim()}>Create bucket</button>
-      </form>
-    </div>
-  {/if}
-  {#if showUploadModal && selectedBucket}
-    <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showUploadModal = false)}>
-      <div class="modal-card"><div class="section-head"><div><p class="card-label">{selectedBucket}</p><h2>Upload files</h2></div><button class="icon-button" type="button" on:click={() => showUploadModal = false}>×</button></div><UploadBox bucket={selectedBucket} prefix={currentPrefix} csrf={session?.csrf_token} onUploaded={() => refreshObjects()}/></div>
-    </div>
-  {/if}
-  {#if showFolderModal && selectedBucket}
-    <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showFolderModal = false)}>
-      <form class="modal-card compact-modal" on:submit|preventDefault={() => { showFolderModal = false; void makeFolder(); }}>
-        <div class="section-head"><div><p class="card-label">{selectedBucket}</p><h2>New folder</h2></div><button class="icon-button" type="button" on:click={() => showFolderModal = false}>×</button></div>
-        <label><span>Folder name</span><input bind:value={newFolder} placeholder="e.g. invoices/2026" /></label>
-        <p class="fine-print">Created inside {currentPrefix || 'the bucket root'}.</p>
-        <button class="primary" type="submit" disabled={busy || !newFolder.trim()}>Create folder</button>
-      </form>
-    </div>
-  {/if}
-  {#if showOperatorModal}
-    <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showOperatorModal = false)}>
-      <form class="modal-card" on:submit|preventDefault={() => { showOperatorModal = false; void makeUser(); }}><div class="section-head"><div><p class="card-label">Operators</p><h2>Add operator</h2></div><button class="icon-button" type="button" on:click={() => showOperatorModal = false}>×</button></div><div class="grid-2"><label><span>Username</span><input bind:value={newUsername} autocomplete="off" /></label><label><span>Display name</span><input bind:value={newDisplay} autocomplete="off" /></label><label><span>Password (12+ chars)</span><input bind:value={newPassword} type="password" autocomplete="new-password" /></label><label><span>Role</span><select bind:value={newRole}><option value="admin">admin</option><option value="superadmin">superadmin</option></select></label></div><button class="primary" type="submit" disabled={busy || !newUsername || !newPassword}>Add operator</button></form>
-    </div>
-  {/if}
-  {#if showMoveModal}
-    <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showMoveModal = false)}>
-      <form class="modal-card compact-modal" on:submit|preventDefault={moveSelected}><div class="section-head"><div><p class="card-label">Move selected items</p><h2>Choose destination</h2></div><button class="icon-button" type="button" on:click={() => showMoveModal = false}>×</button></div><label><span>Destination bucket</span><select bind:value={moveBucket}>{#each buckets as bucket (bucket.name)}<option value={bucket.name}>{bucket.name}</option>{/each}</select></label><label><span>Destination folder</span><input bind:value={movePrefix} placeholder="optional/folder/" /></label><p class="fine-print">Files are copied to the destination and removed from the current bucket after upload is accepted.</p><button class="primary" type="submit" disabled={busy || !moveBucket}>Move files</button></form>
-    </div>
-  {/if}
+  {#if AdminModalsComponent}<svelte:component this={AdminModalsComponent} bind:showBucket={showBucketModal} bind:showFolder={showFolderModal} bind:showUpload={showUploadModal} bind:showOperator={showOperatorModal} bind:showMove={showMoveModal} bind:newBucket bind:newFolder bind:newUsername bind:newDisplay bind:newPassword bind:newRole bind:moveBucket bind:movePrefix selectedBucket={selectedBucket} currentPrefix={currentPrefix} {buckets} {busy} uploadComponent={UploadBoxComponent} csrf={session?.csrf_token} onCreateBucket={makeBucket} onCreateFolder={makeFolder} onCreateOperator={makeUser} onMove={moveSelected} onUploaded={refreshObjects}/>{/if}
 
   {#if message}
     <section class="toast success" role="status">{message}<button class="toast-close" type="button" aria-label="Dismiss notification" on:click={() => message = ''}>×</button></section>
@@ -859,13 +596,14 @@
 </main>
 
 <style>
+  :global {
   .shell.signed-in{width:calc(100vw - 230px);max-width:none;margin:0 0 0 230px;padding:30px 40px;min-height:100vh}
   .console-header{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:30px}
   .console-header h1{font-size:26px;letter-spacing:-.04em;margin:4px 0}
-  .analysis-grid{grid-template-columns:1.25fr .75fr}.chart-card h2{margin:.25rem 0 1.2rem}.bar-chart{height:22px;display:flex;overflow:hidden;border-radius:999px;background:#edf1f5}.bar-segment{min-width:0}.bar-segment.committed,.legend .committed{background:#2779bc}.bar-segment.active,.legend .active{background:#58a37c}.bar-segment.staged,.legend .staged{background:#d59a47}.legend{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:14px;color:var(--muted);font-size:12px}.legend span{display:inline-flex;align-items:center;gap:6px}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%}.signal-track{height:10px;border-radius:99px;background:#edf1f5;overflow:hidden}.signal-track span{display:block;height:100%;background:#d59a47;border-radius:inherit}.address-root{display:inline-flex;gap:7px;align-items:center}.address-current{padding:.45rem .75rem;border-radius:8px;background:var(--accent-soft);color:var(--accent)}.select-all{width:16px;height:16px;padding:0;accent-color:var(--accent)}.selection-bar{display:flex;gap:8px;align-items:center;padding:10px 0}.danger-button{background:#b33838}.settings-summary{align-items:start}.settings-card{border:1px solid var(--border);border-radius:var(--radius-md);padding:1rem;background:var(--surface)}.proxy-form{display:grid;gap:12px}.modal-backdrop{position:fixed;inset:0;background:rgba(12,25,42,.58);display:grid;place-items:center;padding:20px;z-index:20}.modal-card{width:min(620px,100%);max-height:calc(100vh - 40px);overflow:auto;display:grid;gap:16px;padding:22px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);box-shadow:0 20px 60px rgba(13,31,52,.25)}.compact-modal{width:min(430px,100%)}.icon-button{width:36px;height:36px;padding:0;border-radius:50%;background:var(--accent-soft);color:var(--text);font-size:1.35rem}.operator-actions{display:flex;justify-content:flex-end}
+  .address-root{display:inline-flex;gap:7px;align-items:center}.address-current{padding:.45rem .75rem;border-radius:8px;background:var(--accent-soft);color:var(--accent)}.select-all{width:16px;height:16px;padding:0;accent-color:var(--accent)}.selection-bar{display:flex;gap:8px;align-items:center;padding:10px 0}.danger-button{background:#b33838}.settings-summary{align-items:start}.settings-card{border:1px solid var(--border);border-radius:var(--radius-md);padding:1rem;background:var(--surface)}.proxy-form{display:grid;gap:12px}.modal-backdrop{position:fixed;inset:0;background:rgba(12,25,42,.58);display:grid;place-items:center;padding:20px;z-index:20}.modal-card{width:min(620px,100%);max-height:calc(100vh - 40px);overflow:auto;display:grid;gap:16px;padding:22px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);box-shadow:0 20px 60px rgba(13,31,52,.25)}.compact-modal{width:min(430px,100%)}.icon-button{width:36px;height:36px;padding:0;border-radius:50%;background:var(--accent-soft);color:var(--text);font-size:1.35rem}
   .subtabs{display:flex;gap:6px;margin-bottom:16px;padding:4px;border-radius:var(--radius-md);background:color-mix(in srgb,var(--text) 5%,transparent);width:max-content;max-width:100%;overflow:auto}.subtabs button{background:transparent;color:var(--muted);padding:.6rem .9rem;white-space:nowrap}.subtabs button.active{background:var(--surface);color:var(--accent);box-shadow:var(--shadow)}
   .toast-close{margin-left:auto;padding:.1rem .35rem;background:transparent;color:var(--muted);font-size:1.1rem}
-  @media(max-width:760px){.shell.signed-in{width:100%;margin-left:0;padding:0 16px 24px}.console-header{margin-top:24px;align-items:flex-start;flex-direction:column}.analysis-grid{grid-template-columns:1fr}.settings-summary{grid-template-columns:1fr}}
+  @media(max-width:760px){.shell.signed-in{width:100%;margin-left:0;padding:0 16px 24px}.console-header{margin-top:24px;align-items:flex-start;flex-direction:column}.settings-summary{grid-template-columns:1fr}}
 
   .error-hint {
     color: var(--danger, #b00020);
@@ -893,11 +631,6 @@
     font-size: 0.8rem;
     color: var(--muted);
   }
-  .nested-form {
-    margin-top: 16px;
-    padding-top: 16px;
-    border-top: 1px solid var(--border);
-  }
   .table-scroll {
     overflow-x: auto;
   }
@@ -924,19 +657,6 @@
   .kv-table tbody tr:hover {
     background: color-mix(in srgb, var(--accent) 5%, transparent);
   }
-  .role-tag {
-    display: inline-block;
-    padding: 0.15rem 0.55rem;
-    border-radius: 999px;
-    font-size: 0.8rem;
-    background: color-mix(in srgb, var(--text) 8%, transparent);
-    color: var(--muted);
-  }
-  .role-super {
-    background: var(--accent-soft);
-    color: var(--accent);
-    font-weight: 600;
-  }
   .btn-link {
     background: none;
     border: none;
@@ -948,33 +668,6 @@
   }
   .btn-link:hover {
     text-decoration: underline;
-  }
-  .overview-head {
-    margin-bottom: 0.25rem;
-  }
-  .overview-head h2 {
-    margin: 0.25rem 0 0;
-  }
-  .corrupted {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .corrupted small {
-    display: block;
-    margin-top: 0.35rem;
-    color: var(--muted);
-  }
-  .corrupted.attention {
-    border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
-    background: color-mix(in srgb, var(--danger) 5%, var(--surface));
-  }
-  .corrupted.attention strong {
-    color: var(--danger);
-  }
-  .card-link {
-    margin-top: 0.6rem;
-    font-size: 0.85rem;
   }
   .crumb-row {
     display: flex;
@@ -1052,5 +745,6 @@
     gap: 0.75rem;
     flex-wrap: wrap;
     align-items: center;
+  }
   }
 </style>

@@ -6,6 +6,13 @@ export default defineConfig({
   base: '/_admin/',
   build: {
     outDir: 'dist',
-    emptyOutDir: true
+    emptyOutDir: true,
+    target: 'esnext',
+    rollupOptions: {
+      output: {
+        // Avoid shipping tiny Svelte runtime helper chunks for lazy views.
+        experimentalMinChunkSize: 2000
+      }
+    }
   }
 });
