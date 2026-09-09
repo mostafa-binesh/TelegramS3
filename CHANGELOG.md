@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.7.1-rc.3 - 2026-09-09
+
+- Added retryable error handling when a lazy-loaded admin view asset is
+  unavailable, preventing Telegram settings from remaining on an infinite
+  skeleton.
+- Added static-asset regression coverage for hashed frontend chunks and
+  missing JavaScript assets.
+
 ## 0.7.1-rc.2 - 2026-09-09
 
 - Fixed production admin-console asset resolution so hashed JavaScript and CSS
