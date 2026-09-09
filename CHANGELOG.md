@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.7.1-rc.4 - 2026-09-09
+
+- Reworked the Telegram setup wizard into an accessible modal with fresh,
+  operator-owned flow IDs, safe cancellation, stale-flow protection, and
+  retryable invalid confirmation codes.
+- Added empty-bucket deletion, parent-folder navigation, refresh/navigation
+  skeletons, improved sign-out feedback, and a quieter Recovery header.
+- Added integration coverage for Telegram flow restart/retry behavior and
+  Unicode bucket deletion.
+
 ## 0.7.1-rc.3 - 2026-09-09
 
 - Added retryable error handling when a lazy-loaded admin view asset is
