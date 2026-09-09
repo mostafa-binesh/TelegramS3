@@ -27,7 +27,8 @@ Use a conservative default chunk size of `1 MiB`.
 - Range reads can be mapped to chunk spans.
 - Large objects stay below Telegram's file limit.
 - The manifest can rebuild the local index.
-- Deletes and overwrites need tombstones and background cleanup.
+- Deletes and overwrites need tombstones and evidence-first background cleanup;
+  cleanup is due immediately and remains retryable through the outbox.
 - Committed payloads no longer grow the local data directory.
 
 ## Rejected Alternatives

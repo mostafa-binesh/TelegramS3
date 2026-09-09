@@ -117,8 +117,9 @@ A full request-lifecycle and consistency walkthrough is in
 - Uploads write to staging, verify every chunk checksum, publish the chunk
   payloads to Telegram, then commit the manifest and local index **atomically**
   — readers never see a partial object.
-- Deletes first record a recoverable tombstone, hide the object, then queue
-  physical cleanup for conservative garbage collection.
+- Deletes first record a recoverable tombstone and hide the object, then queue
+  evidence-first physical cleanup for the durable worker to remove Telegram
+  messages asynchronously with retry support.
 - The manifest plus its Telegram references are the canonical recovery source:
   if local metadata is lost, the index can be rebuilt from manifests; if a
   journal entry points at nothing, reconciliation repairs or rolls it back.
@@ -140,7 +141,7 @@ recovery procedures.
 The published image is `ghcr.io/mostafa-binesh/telegrams3`
 (built on `v*` tags and manual workflow dispatch; see
 [.github/workflows/publish-docker-image.yml](.github/workflows/publish-docker-image.yml)).
-Pinning a version tag such as `v0.7.0-rc.2` is recommended when validating a
+Pinning a version tag such as `v0.7.0-rc.3` is recommended when validating a
 release. Release-candidate tags publish only their explicit RC tags;
 the floating `latest`, major, and major-minor tags are reserved for stable
 version tags without a prerelease suffix.
@@ -160,7 +161,7 @@ docker run -d --name telegram-s3 \
   -e TELEGRAM_DATA_DIR=/var/lib/telegram-s3/data \
   -v telegram-s3-metadata:/var/lib/telegram-s3/metadata \
   -v telegram-s3-data:/var/lib/telegram-s3/data \
-  ghcr.io/mostafa-binesh/telegrams3:v0.7.0-rc.2
+  ghcr.io/mostafa-binesh/telegrams3:v0.7.0-rc.3
 ```
 
 Or with the bundled [docker-compose.yml](docker-compose.yml) (local build):

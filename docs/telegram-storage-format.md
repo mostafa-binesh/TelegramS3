@@ -154,7 +154,9 @@ Multipart sessions use their own local states:
 
 - A manifest without a local commit row is not visible until reconciliation.
 - A staged upload without a manifest is aborted or resumed.
-- A tombstone must survive long enough for background cleanup.
+- A tombstone must survive until the evidence-first background cleanup worker
+  has removed its Telegram messages; cleanup is due immediately and remains
+  retryable if Telegram is unavailable.
 - Missing chunks make the object corrupt until repaired.
 - Multipart parts remain hidden until completion publishes the final manifest.
 - Version IDs are derived from the stored manifest identity, so copy and delete

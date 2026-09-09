@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { uploadObject } from '../lib/api';
+  import { getJob, uploadObject } from '../lib/api';
 
   export let bucket: string;
   export let prefix = '';
@@ -13,6 +13,9 @@
     busy: boolean;
     jobId?: string;
     error?: string;
+    state?: string;
+    chunksDone?: number;
+    chunksTotal?: number;
   }
 
   let items: QueueItem[] = [];
@@ -49,7 +52,7 @@
     if (uploadStarted) return;
     uploadStarted = true;
     try {
-      await Promise.all(items.map((_, index) => doUpload(index)));
+      for (let index = 0; index < items.length; index += 1) await doUpload(index);
     } finally {
       uploadStarted = false;
     }
@@ -70,8 +73,17 @@
           setItem(index, { progress: total > 0 ? sent / total : 1 });
         }
       );
-      setItem(index, { progress: 1, busy: false, jobId: accepted.job_id });
+      setItem(index, { progress: 0.02, busy: false, jobId: accepted.job_id, state: 'queued' });
       onUploaded();
+      for (let poll = 0; poll < 180; poll += 1) {
+        const job = await getJob(accepted.job_id);
+        const totalChunks = Math.max(job.chunks_total, 1);
+        setItem(index, { state: job.state, chunksDone: job.chunks_done, chunksTotal: job.chunks_total, progress: ['completed', 'cleaned'].includes(job.state) ? 1 : Math.min(0.99, job.chunks_done / totalChunks) });
+        if (['completed', 'cleaned'].includes(job.state)) return;
+        if (['recovery_required', 'reception_failed', 'cancelled'].includes(job.state)) throw new Error(job.error || `Transfer ${job.state.replaceAll('_', ' ')}`);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      throw new Error('Transfer is taking longer than expected; follow it in Transfers.');
     } catch (cause) {
       setItem(index, {
         busy: false,
@@ -138,7 +150,7 @@
           <div class="queue-meta">
             <span class="queue-name">{item.file.name}</span>
             <span class="queue-sub">
-              {item.error ? 'failed' : item.jobId ? 'Staged - follow progress in Transfers' : item.busy ? 'Sending to server' : 'Ready to send'}
+              {item.error ? 'failed' : item.jobId ? `${item.state?.replaceAll('_', ' ') ?? 'queued'}${item.chunksTotal ? ` · ${item.chunksDone ?? 0}/${item.chunksTotal} chunks` : ''}` : item.busy ? 'Sending to server' : 'Ready to send'}
             </span>
             <button class="queue-remove" type="button" on:click={() => removeItem(i)} disabled={item.busy}>
               ✕

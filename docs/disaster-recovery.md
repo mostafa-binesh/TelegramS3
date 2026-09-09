@@ -40,8 +40,9 @@
 1. Run `telegram-s3 repair --dry-run` first to see which staged, recovery-
    required, or orphaned rows will be reconciled.
 2. Use `telegram-s3 repair` only after the dry-run shows the expected scope.
-3. Run `telegram-s3 gc --dry-run` before cleanup to confirm only tombstoned
-   objects older than the retention threshold are eligible.
+3. The cleanup worker drains tombstone outbox entries automatically. Run
+   `telegram-s3 gc --dry-run` when reviewing older tombstones or a manual
+   cleanup scope; Telegram message removal remains evidence-first and retryable.
 4. Run `telegram-s3 gc` only when the dry-run output matches the intended
    cleanup scope.
 

@@ -187,7 +187,7 @@ export async function uploadObject(
   onProgress?: (sent: number, total: number) => void
 ): Promise<{job_id:string}> {
   const total = file.size;
-  return new Promise<{job_id:string}>((resolve, reject) => {
+  const send = () => new Promise<{job_id:string}>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_PREFIX}/uploads?${new URLSearchParams({bucket,key})}`);
     xhr.responseType = 'json';
@@ -221,6 +221,16 @@ export async function uploadObject(
     xhr.onabort = () => reject(new Error('upload aborted'));
     xhr.send(file);
   });
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try { return await send(); }
+    catch (cause) {
+      lastError = cause;
+      if (attempt === 3) break;
+      await new Promise((resolve) => setTimeout(resolve, 700 * 2 ** attempt));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('upload request failed');
 }
 
 export function getWizardState(csrf?: string | null) {

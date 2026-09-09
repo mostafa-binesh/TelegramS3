@@ -4,8 +4,8 @@
   import type {TransferJob} from '../lib/types';
   export let csrf:string|null|undefined;
   export let recoveryOnly=false;
-  let jobs:TransferJob[]=[];let error='';let loading=true;let offset=0;let hasMore=false;let pending=false;
-  async function refresh(){try{const res=await listJobs(offset);jobs=res.jobs;hasMore=res.next_offset!==null;error='';}catch(e){error=e instanceof Error?e.message:'Unable to load jobs';}finally{loading=false;}}
+  let jobs:TransferJob[]=[];let error='';let loading=true;let refreshing=false;let offset=0;let hasMore=false;let pending=false;
+  async function refresh(){refreshing=true;try{const res=await listJobs(offset);jobs=res.jobs;hasMore=res.next_offset!==null;error='';}catch(e){error=e instanceof Error?e.message:'Unable to load jobs';}finally{loading=false;refreshing=false;}}
   async function action(id:string,action:'retry'|'cancel'){pending=true;try{await jobAction(id,action,csrf);await refresh();}catch(e){error=e instanceof Error?e.message:'Action failed';}finally{pending=false;}}
   onMount(()=>{let disposed=false;let timer:ReturnType<typeof setTimeout>;const poll=async()=>{if(!document.hidden)await refresh();if(!disposed)timer=setTimeout(poll,error?10000:2000);};void poll();return()=>{disposed=true;clearTimeout(timer);};});
   // A rejected/aborted reception is not a user-visible transfer: it never
@@ -13,7 +13,7 @@
   $: visible=jobs.filter(j=>(!['reception_failed'].includes(j.state) && !(j.state==='completed' && j.chunks_total===0 && j.bytes===0)) && (!recoveryOnly||['recovery_required','cancelled','retry_wait'].includes(j.state)));
 </script>
 <section class="card surface">
-  <div class="section-head"><div><p class="card-label">{recoveryOnly?'Recovery':'Background transfers'}</p><h2>{recoveryOnly?'Resolve interrupted work':'Transfer activity'}</h2></div><button class="ghost" on:click={refresh}>Refresh</button></div>
+  <div class="section-head"><div><p class="card-label">{recoveryOnly?'Recovery':'Background transfers'}</p><h2>{recoveryOnly?'Resolve interrupted work':'Transfer activity'}</h2></div><button class="ghost" on:click={refresh} disabled={refreshing}>{#if refreshing}<span class="spinner" aria-hidden="true"></span>{/if}Refresh</button></div>
   <p class="fine-print">{recoveryOnly?'Staged files are retained. Retry after correcting the connection or storage problem. An incomplete reception requires the original file to be uploaded again.':'Files become visible in Buckets only after Telegram upload and commit finish. You can leave this page while accepted transfers continue.'}</p>
   {#if error}<p role="alert" class="error-hint">{error}</p>{/if}
   {#if loading}<div class="skeleton-stack"><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div></div>{:else if !visible.length}<p class="empty">{recoveryOnly?'No transfers need attention on this page.':'No transfers yet. Upload a file from Buckets to get started.'}</p>{:else}

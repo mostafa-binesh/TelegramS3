@@ -63,7 +63,11 @@ button.ghost {
   background: transparent;
   color: var(--text);
   border: 1px solid var(--border);
+  animation: toast-in 220ms ease-out, toast-out 260ms ease-in 5.7s forwards;
 }
+
+@keyframes toast-in { from { opacity: 0; transform: translateY(12px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes toast-out { to { opacity: 0; transform: translateY(8px); } }
 
 button.ghost:hover:not(:disabled) {
   background: var(--accent-soft);
@@ -518,4 +522,8 @@ code {
   .toolbar-actions button {
     flex: 1 1 100%;
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
 }

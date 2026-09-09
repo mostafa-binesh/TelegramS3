@@ -176,7 +176,7 @@ Rejected alternatives this phase (see `docs/adr/0006-...md`): keeping MinIO-time
 
 ## Phase 10 - Durability and frontend refresh
 
-- Status: planned
+- Status: in progress
 - Exit criteria:
   - object uploads are protected by a durable background workflow and can survive restart, retry, and partial-failure cases without losing staged chunks
   - the operator UI is redesigned around a modern login-first flow with a first-run superadmin wizard
@@ -184,6 +184,13 @@ Rejected alternatives this phase (see `docs/adr/0006-...md`): keeping MinIO-time
   - recovery, repair, and upload-failure states are explainable from the UI and docs
 
 Planned work:
+
+- the admin console now uses full-width responsive layout, loading skeletons,
+  animated dismissible notifications, recovery sub-tabs, and analysis cards
+- browser uploads are serialized, retried after transient request failures, and
+  follow the durable transfer job through chunk progress in the upload queue
+- committed-object deletes now make cleanup due immediately; the existing
+  evidence-first cleanup worker removes Telegram messages asynchronously
 
 - introduce a durable upload worker / queue so staging is not tied to a single foreground request path; the worker should own chunk fan-out, retry, and final commit
 - add a durable cleanup worker / outbox for object deletes so Telegram message removal happens asynchronously and survives restart, instead of trying to do all cleanup in the foreground request path

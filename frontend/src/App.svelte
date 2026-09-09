@@ -47,6 +47,11 @@
   let busy = false;
   let message = '';
   let error = '';
+  let messageTimer: ReturnType<typeof setTimeout> | undefined;
+  $: if (message) {
+    if (messageTimer) clearTimeout(messageTimer);
+    messageTimer = setTimeout(() => { message = ''; }, 6000);
+  }
 
   let username = '';
   let password = '';
@@ -65,6 +70,7 @@
   let listing: ObjectsState | null = null;
   let newFolder = '';
   let showBucketModal = false;
+  let showFolderModal = false;
   let showUploadModal = false;
   let showOperatorModal = false;
   let showTelegramCredentials = false;
@@ -79,6 +85,8 @@
   let usersLoading = false;
   let bucketsLoading = false;
   let objectsLoading = false;
+  let recoveryLoading = false;
+  let recoveryTab: 'issues' | 'transfers' = 'issues';
   $: anyLoading = overviewLoading || usersLoading || bucketsLoading || objectsLoading;
 
   let showWizard = false;
@@ -425,6 +433,12 @@
     }
   }
 
+  async function refreshRecovery() {
+    recoveryLoading = true;
+    try { await refreshOverview({silent: true}); }
+    finally { recoveryLoading = false; }
+  }
+
   function toggleKey(key: string) {
     selectedKeys = selectedKeys.includes(key) ? selectedKeys.filter((item) => item !== key) : [...selectedKeys, key];
   }
@@ -501,14 +515,15 @@
     {#if view === 'transfers'}
       <Transfers csrf={session?.csrf_token}/>
     {:else if view === 'recovery'}
-      <RecoveryIssues
-        recovery={overview?.recovery}
-        csrf={session?.csrf_token}
-        loading={overviewLoading}
-        onChanged={() => refreshOverview({silent: true})}
-        onRefresh={() => refreshOverview()}
-      />
-      <Transfers csrf={session?.csrf_token} recoveryOnly/>
+      <div class="subtabs" role="tablist" aria-label="Recovery views">
+        <button class:active={recoveryTab === 'issues'} role="tab" aria-selected={recoveryTab === 'issues'} on:click={() => recoveryTab = 'issues'}>Issues</button>
+        <button class:active={recoveryTab === 'transfers'} role="tab" aria-selected={recoveryTab === 'transfers'} on:click={() => recoveryTab = 'transfers'}>Interrupted transfers</button>
+      </div>
+      {#if recoveryTab === 'issues'}
+        <RecoveryIssues recovery={overview?.recovery} csrf={session?.csrf_token} loading={recoveryLoading} onChanged={() => refreshOverview({silent: true})} onRefresh={refreshRecovery}/>
+      {:else}
+        <Transfers csrf={session?.csrf_token} recoveryOnly/>
+      {/if}
     {:else if view === 'telegram'}
       <article class="card surface tg-callout">
         <div class="tg-banner">
@@ -583,7 +598,7 @@
         </button>
       </section>
       <section class="cards">
-        {#if !overview}
+        {#if overviewLoading || !overview}
           {#each [0, 1, 2, 3] as slot (slot)}
             <article class="card metric"><div class="skeleton" style="height:62px"></div></article>
           {/each}
@@ -621,7 +636,7 @@
       <section class="layout analysis-grid">
         <article class="card surface chart-card">
           <div class="section-head"><div><p class="card-label">Analysis</p><h2>Storage composition</h2></div></div>
-          {#if !overview}<div class="skeleton" style="height:150px"></div>{:else}
+          {#if overviewLoading || !overview}<div class="skeleton" style="height:150px"></div>{:else}
             {@const total = Math.max((overview.storage?.committed_objects ?? 0) + (overview.storage?.active_objects ?? 0) + (overview.storage?.staged_objects ?? 0), 1)}
             <div class="bar-chart" aria-label="Storage composition chart">
               <div class="bar-segment committed" style={`width:${((overview.storage?.committed_objects ?? 0) / total) * 100}%`}></div>
@@ -633,7 +648,7 @@
         </article>
         <article class="card surface chart-card">
           <p class="card-label">Recovery signal</p><h2>{formatCount(corruptedCount)} actionable</h2>
-          {#if !overview}<div class="skeleton" style="height:80px"></div>{:else}<div class="signal-track"><span style={`width:${Math.min(corruptedCount * 10, 100)}%`}></span></div><p class="fine-print">{acknowledgedCount ? `${formatCount(acknowledgedCount)} acknowledged issue(s) remain reviewable.` : 'No acknowledged issues.'}</p>{/if}
+          {#if overviewLoading || !overview}<div class="skeleton" style="height:80px"></div>{:else}<div class="signal-track"><span style={`width:${Math.min(corruptedCount * 10, 100)}%`}></span></div><p class="fine-print">{acknowledgedCount ? `${formatCount(acknowledgedCount)} acknowledged issue(s) remain reviewable.` : 'No acknowledged issues.'}</p>{/if}
         </article>
       </section>
     {:else if view === 'buckets'}
@@ -695,7 +710,7 @@
               <button class="btn-link" on:click={() => gotoCrumb(i)}>{crumb}</button><span class="crumb-sep">/</span>
             {/each}
           </div>
-          <div class="row-inline folder-actions"><button class="ghost" disabled={busy || !newFolder.trim()} on:click={makeFolder}>＋ New folder</button><input bind:value={newFolder} placeholder="Folder name" /></div>
+          <div class="row-inline folder-actions"><button class="ghost" on:click={() => showFolderModal = true}>＋ New folder</button></div>
           {#if objectsLoading && !listing}
             <div class="skeleton-stack">
               <div class="skeleton" style="height:40px"></div>
@@ -814,6 +829,16 @@
       <div class="modal-card"><div class="section-head"><div><p class="card-label">{selectedBucket}</p><h2>Upload files</h2></div><button class="icon-button" type="button" on:click={() => showUploadModal = false}>×</button></div><UploadBox bucket={selectedBucket} prefix={currentPrefix} csrf={session?.csrf_token} onUploaded={() => refreshObjects()}/></div>
     </div>
   {/if}
+  {#if showFolderModal && selectedBucket}
+    <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showFolderModal = false)}>
+      <form class="modal-card compact-modal" on:submit|preventDefault={() => { showFolderModal = false; void makeFolder(); }}>
+        <div class="section-head"><div><p class="card-label">{selectedBucket}</p><h2>New folder</h2></div><button class="icon-button" type="button" on:click={() => showFolderModal = false}>×</button></div>
+        <label><span>Folder name</span><input bind:value={newFolder} placeholder="e.g. invoices/2026" /></label>
+        <p class="fine-print">Created inside {currentPrefix || 'the bucket root'}.</p>
+        <button class="primary" type="submit" disabled={busy || !newFolder.trim()}>Create folder</button>
+      </form>
+    </div>
+  {/if}
   {#if showOperatorModal}
     <div class="modal-backdrop" role="presentation" on:click={(event) => event.target === event.currentTarget && (showOperatorModal = false)}>
       <form class="modal-card" on:submit|preventDefault={() => { showOperatorModal = false; void makeUser(); }}><div class="section-head"><div><p class="card-label">Operators</p><h2>Add operator</h2></div><button class="icon-button" type="button" on:click={() => showOperatorModal = false}>×</button></div><div class="grid-2"><label><span>Username</span><input bind:value={newUsername} autocomplete="off" /></label><label><span>Display name</span><input bind:value={newDisplay} autocomplete="off" /></label><label><span>Password (12+ chars)</span><input bind:value={newPassword} type="password" autocomplete="new-password" /></label><label><span>Role</span><select bind:value={newRole}><option value="admin">admin</option><option value="superadmin">superadmin</option></select></label></div><button class="primary" type="submit" disabled={busy || !newUsername || !newPassword}>Add operator</button></form>
@@ -826,19 +851,21 @@
   {/if}
 
   {#if message}
-    <section class="toast success">{message}</section>
+    <section class="toast success" role="status">{message}<button class="toast-close" type="button" aria-label="Dismiss notification" on:click={() => message = ''}>×</button></section>
   {/if}
   {#if error}
-    <section class="toast error">{error}</section>
+    <section class="toast error" role="alert">{error}<button class="toast-close" type="button" aria-label="Dismiss notification" on:click={() => error = ''}>×</button></section>
   {/if}
 </main>
 
 <style>
-  .shell.signed-in{max-width:none;margin-left:230px;padding:30px 40px;min-height:100vh}
+  .shell.signed-in{width:calc(100vw - 230px);max-width:none;margin:0 0 0 230px;padding:30px 40px;min-height:100vh}
   .console-header{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:30px}
   .console-header h1{font-size:26px;letter-spacing:-.04em;margin:4px 0}
-  .analysis-grid{grid-template-columns:1.25fr .75fr}.chart-card h2{margin:.25rem 0 1.2rem}.bar-chart{height:22px;display:flex;overflow:hidden;border-radius:999px;background:#edf1f5}.bar-segment{min-width:0}.bar-segment.committed,.legend .committed{background:#2779bc}.bar-segment.active,.legend .active{background:#58a37c}.bar-segment.staged,.legend .staged{background:#d59a47}.legend{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:14px;color:var(--muted);font-size:12px}.legend span{display:inline-flex;align-items:center;gap:6px}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%}.signal-track{height:10px;border-radius:99px;background:#edf1f5;overflow:hidden}.signal-track span{display:block;height:100%;background:#d59a47;border-radius:inherit}.address-root{display:inline-flex;gap:7px;align-items:center}.address-current{padding:.45rem .75rem;border-radius:8px;background:var(--accent-soft);color:var(--accent)}.folder-actions input{max-width:220px}.select-all{width:16px;height:16px;padding:0;accent-color:var(--accent)}.selection-bar{display:flex;gap:8px;align-items:center;padding:10px 0}.danger-button{background:#b33838}.settings-summary{align-items:start}.settings-card{border:1px solid var(--border);border-radius:var(--radius-md);padding:1rem;background:var(--surface)}.proxy-form{display:grid;gap:12px}.modal-backdrop{position:fixed;inset:0;background:rgba(12,25,42,.58);display:grid;place-items:center;padding:20px;z-index:20}.modal-card{width:min(620px,100%);max-height:calc(100vh - 40px);overflow:auto;display:grid;gap:16px;padding:22px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);box-shadow:0 20px 60px rgba(13,31,52,.25)}.compact-modal{width:min(430px,100%)}.icon-button{width:36px;height:36px;padding:0;border-radius:50%;background:var(--accent-soft);color:var(--text);font-size:1.35rem}.operator-actions{display:flex;justify-content:flex-end}
-  @media(max-width:760px){.shell.signed-in{margin-left:0;padding:0 16px 24px}.console-header{margin-top:24px;align-items:flex-start;flex-direction:column}.analysis-grid{grid-template-columns:1fr}.settings-summary{grid-template-columns:1fr}}
+  .analysis-grid{grid-template-columns:1.25fr .75fr}.chart-card h2{margin:.25rem 0 1.2rem}.bar-chart{height:22px;display:flex;overflow:hidden;border-radius:999px;background:#edf1f5}.bar-segment{min-width:0}.bar-segment.committed,.legend .committed{background:#2779bc}.bar-segment.active,.legend .active{background:#58a37c}.bar-segment.staged,.legend .staged{background:#d59a47}.legend{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:14px;color:var(--muted);font-size:12px}.legend span{display:inline-flex;align-items:center;gap:6px}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%}.signal-track{height:10px;border-radius:99px;background:#edf1f5;overflow:hidden}.signal-track span{display:block;height:100%;background:#d59a47;border-radius:inherit}.address-root{display:inline-flex;gap:7px;align-items:center}.address-current{padding:.45rem .75rem;border-radius:8px;background:var(--accent-soft);color:var(--accent)}.select-all{width:16px;height:16px;padding:0;accent-color:var(--accent)}.selection-bar{display:flex;gap:8px;align-items:center;padding:10px 0}.danger-button{background:#b33838}.settings-summary{align-items:start}.settings-card{border:1px solid var(--border);border-radius:var(--radius-md);padding:1rem;background:var(--surface)}.proxy-form{display:grid;gap:12px}.modal-backdrop{position:fixed;inset:0;background:rgba(12,25,42,.58);display:grid;place-items:center;padding:20px;z-index:20}.modal-card{width:min(620px,100%);max-height:calc(100vh - 40px);overflow:auto;display:grid;gap:16px;padding:22px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);box-shadow:0 20px 60px rgba(13,31,52,.25)}.compact-modal{width:min(430px,100%)}.icon-button{width:36px;height:36px;padding:0;border-radius:50%;background:var(--accent-soft);color:var(--text);font-size:1.35rem}.operator-actions{display:flex;justify-content:flex-end}
+  .subtabs{display:flex;gap:6px;margin-bottom:16px;padding:4px;border-radius:var(--radius-md);background:color-mix(in srgb,var(--text) 5%,transparent);width:max-content;max-width:100%;overflow:auto}.subtabs button{background:transparent;color:var(--muted);padding:.6rem .9rem;white-space:nowrap}.subtabs button.active{background:var(--surface);color:var(--accent);box-shadow:var(--shadow)}
+  .toast-close{margin-left:auto;padding:.1rem .35rem;background:transparent;color:var(--muted);font-size:1.1rem}
+  @media(max-width:760px){.shell.signed-in{width:100%;margin-left:0;padding:0 16px 24px}.console-header{margin-top:24px;align-items:flex-start;flex-direction:column}.analysis-grid{grid-template-columns:1fr}.settings-summary{grid-template-columns:1fr}}
 
   .error-hint {
     color: var(--danger, #b00020);
@@ -849,9 +876,6 @@
     align-items: center;
     flex-wrap: wrap;
     margin: 12px 0;
-  }
-  .row-inline input {
-    flex: 1;
   }
   .grid-2 {
     display: grid;

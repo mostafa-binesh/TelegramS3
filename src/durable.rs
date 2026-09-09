@@ -118,7 +118,9 @@ pub(crate) fn enqueue_manifest_cleanup(
     tx: &rusqlite::Transaction<'_>,
     manifest: &crate::manifest::ObjectManifest,
 ) -> Result<(), MetadataError> {
-    enqueue_manifest_cleanup_at(tx, manifest, now() + 7 * 86400)
+    // Deletes are visible immediately; the durable worker writes evidence
+    // first, then removes Telegram messages with retryable outbox semantics.
+    enqueue_manifest_cleanup_at(tx, manifest, now())
 }
 
 pub(crate) fn enqueue_manifest_cleanup_at(

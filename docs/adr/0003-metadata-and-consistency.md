@@ -29,7 +29,7 @@ Write path:
 
 - partial uploads stay invisible
 - overwrites preserve the previous committed object until the new one commits
-- deletes become tombstones before cleanup
+- deletes become tombstones before immediate, durable, evidence-first cleanup
 - startup reconciliation is required
 
 ## Rejected Alternatives
@@ -41,4 +41,3 @@ Rejected because recovery and listing would be too weak.
 ### Best-effort writes without a journal
 
 Rejected because interrupted writes would leak partial state.
-
