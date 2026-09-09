@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.7.1-rc.2 - 2026-09-09
+
+- Fixed production admin-console asset resolution so hashed JavaScript and CSS
+  files load from the bundled assets directory instead of falling back to an
+  unrelated file.
+
 ## 0.7.1-rc.1 - 2026-09-09
 
 - Added history-routed admin navigation, inline SVG icons, bounded toast
