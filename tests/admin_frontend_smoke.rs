@@ -376,11 +376,11 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
             ("Cookie", cookie_header.as_str()),
             ("X-CSRF-Token", csrf.as_str()),
         ],
-        br#"{"name":"ui-created"}"#,
+        br#"{"name":"ui-created-\u0641\u0627\u06cc\u0644"}"#,
     )
     .await;
     assert_eq!(create_bucket.status, 201);
-    assert!(create_bucket.body.contains("\"name\":\"ui-created\""));
+    assert!(create_bucket.body.contains("\"name\":\"ui-created-فایل\""));
 
     let buckets = http_request(
         &client,
@@ -392,13 +392,13 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     )
     .await;
     assert_eq!(buckets.status, 200);
-    assert!(buckets.body.contains("\"ui-created\""));
+    assert!(buckets.body.contains("\"ui-created-فایل\""));
 
     let delete_bucket = http_request(
         &client,
         &bind_addr,
         "DELETE",
-        "/_admin/api/buckets/ui-created",
+        "/_admin/api/buckets/ui-created-%D9%81%D8%A7%DB%8C%D9%84",
         &[
             ("Cookie", cookie_header.as_str()),
             ("X-CSRF-Token", csrf.as_str()),

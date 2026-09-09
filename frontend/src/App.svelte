@@ -88,6 +88,7 @@
   $: telegramTab = $route.telegramTab;
   $: routeLoadKey = `${$route.view}|${$route.bucket}|${$route.prefix}|${$route.recoveryTab}|${$route.telegramTab}`;
   let listing: ObjectsState | null = null;
+  let objectsRequestSerial = 0;
   let newFolder = '';
   let showBucketModal = false;
   let showFolderModal = false;
@@ -230,6 +231,10 @@
     notifySuccess('Telegram account authorized.');
     await refreshOverview();
     await refreshTelegramSettings();
+  }
+
+  function handleWizardClose() {
+    showWizard = false;
   }
 
   async function refreshTelegramSettings() {
@@ -378,24 +383,34 @@
   }
 
   function openBucket(name: string) {
+    listing = null;
+    selectedKeys = [];
     navigate({ view: 'buckets', bucket: name, prefix: '' });
   }
 
   function exitBucket() {
-    navigate({ view: 'buckets', bucket: '', prefix: '' });
     listing = null;
+    selectedKeys = [];
+    navigate({ view: 'buckets', bucket: '', prefix: '' });
   }
 
   async function refreshObjects(bucket = selectedBucket, prefix = currentPrefix) {
     if (!bucket) return;
     const csrf = session?.csrf_token;
+    const requestSerial = ++objectsRequestSerial;
+    const routeKey = `${bucket}|${prefix}`;
+    listing = null;
+    selectedKeys = [];
     objectsLoading = true;
     try {
-      listing = await listObjects(csrf, bucket, prefix);
+      const nextListing = await listObjects(csrf, bucket, prefix);
+      if (requestSerial === objectsRequestSerial && routeKey === `${selectedBucket}|${currentPrefix}`) {
+        listing = nextListing;
+      }
     } catch (cause) {
       notifyError(normalizeError(cause));
     } finally {
-      objectsLoading = false;
+      if (requestSerial === objectsRequestSerial) objectsLoading = false;
     }
   }
 
@@ -437,12 +452,26 @@
   }
 
   function enterFolder(name: string) {
+    listing = null;
+    selectedKeys = [];
     navigate({ view: 'buckets', bucket: selectedBucket, prefix: `${currentPrefix}${name}/` });
   }
 
   function gotoCrumb(i: number) {
+    listing = null;
+    selectedKeys = [];
     const parts = currentPrefix.split('/').filter(Boolean).slice(0, i);
     navigate({ view: 'buckets', bucket: selectedBucket, prefix: parts.map((p) => p + '/').join('') });
+  }
+
+  function goBackFolder() {
+    if (!selectedBucket) return;
+    const parts = currentPrefix.split('/').filter(Boolean);
+    if (!parts.length) {
+      exitBucket();
+      return;
+    }
+    gotoCrumb(Math.max(0, parts.length - 1));
   }
 
   async function makeFolder() {
@@ -553,7 +582,7 @@
 
 <main class="shell" class:signed-in={session?.authenticated}>
   {#if session?.authenticated}
-    <Sidebar {view} username={session.user?.username ?? ''} onNavigate={switchView} onLogout={handleLogout}/>
+    <Sidebar {view} username={session.user?.username ?? ''} {busy} onNavigate={switchView} onLogout={handleLogout}/>
     <header class="console-header"><div><p class="card-label">Workspace</p>
       {#if view === 'buckets' && selectedBucket}
         <div class="header-address" aria-label="Current bucket location">
@@ -562,7 +591,7 @@
           {#each crumbs() as crumb, i (crumb + i)}<span>/</span><button class="btn-link" type="button" on:click={() => gotoCrumb(i + 1)}>{crumb}</button>{/each}
         </div>
       {:else}<h1>{view==='users'?'Operators':view==='telegram'?'Telegram settings':view.charAt(0).toUpperCase()+view.slice(1)}</h1>{/if}
-    </div><HealthBadge state={overviewLoading || !overview ? 'checking' : overview.telegram?.connection_state ?? 'checking'} detail={overviewLoading || !overview ? 'Checking Telegram connection…' : overview.telegram?.detail ?? 'Waiting for a connection check'} checkedAt={overviewLoading ? undefined : overview?.checked_at}/></header>
+    </div>{#if view !== 'recovery'}<HealthBadge state={overviewLoading || !overview ? 'checking' : overview.telegram?.connection_state ?? 'checking'} detail={overviewLoading || !overview ? 'Checking Telegram connection…' : overview.telegram?.detail ?? 'Waiting for a connection check'} checkedAt={overviewLoading ? undefined : overview?.checked_at}/>{/if}</header>
   {/if}
   {#if loading}
     <section class="card surface"><p>Loading…</p></section>
@@ -606,11 +635,11 @@
         {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {/if}
     {:else if view === 'telegram'}
-      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} tab={telegramTab} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode overview={overview} {session} settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} bind:showCredentials={showTelegramCredentials} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Telegram settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
+      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} tab={telegramTab} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode overview={overview} {session} settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} bind:showCredentials={showTelegramCredentials} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Telegram settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} {listing} {bucketsLoading} {objectsLoading} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])} onRemoveKey={removeKey} onRemoveSelected={removeSelected} onOpenMove={openMoveModal}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} {listing} {bucketsLoading} {objectsLoading} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])} onRemoveKey={removeKey} onRemoveSelected={removeSelected} onRemoveBucket={dropBucket} onOpenMove={openMoveModal}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'users'}
       {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={dropUser} onAdd={openOperatorModal}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
     {/if}
