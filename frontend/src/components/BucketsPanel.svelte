@@ -5,7 +5,6 @@
 
   export let buckets: BucketInfo[] = [];
   export let selectedBucket = '';
-  export let currentPrefix = '';
   export let listing: ObjectsState | null = null;
   export let bucketsLoading = false;
   export let objectsLoading = false;
@@ -15,9 +14,7 @@
   export let onRefresh: () => void = () => {};
   export let onUpload: () => void = () => {};
   export let onOpenBucket: (name: string) => void = () => {};
-  export let onExitBucket: () => void = () => {};
   export let onEnterFolder: (name: string) => void = () => {};
-  export let onGotoCrumb: (index: number) => void = () => {};
   export let onOpenFolder: () => void = () => {};
   export let onToggleKey: (key: string) => void = () => {};
   export let onToggleAll: () => void = () => {};
@@ -25,7 +22,6 @@
   export let onRemoveSelected: () => void = () => {};
   export let onOpenMove: () => void = () => {};
 
-  $: crumbs = currentPrefix.split('/').filter(Boolean);
   $: allVisibleSelected = selectedKeys.length > 0 && selectedKeys.length === (listing?.objects.length ?? 0);
 </script>
 
@@ -43,7 +39,6 @@
     {:else if buckets.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">+</span>No buckets yet. Create one above to start the file browser.</p>
     {:else}<ul class="checks">{#each buckets as bucket (bucket.name)}<li><div class="bucket-row"><button type="button" class="btn-link" on:click={() => onOpenBucket(bucket.name)}>{bucket.name}<small>created {formatTimestamp(bucket.created_at)}</small></button><span class="fine-print">{bucket.name.length} chars</span></div></li>{/each}</ul>{/if}
   {:else}
-    <div class="crumb-row"><button class="btn-link address-root" on:click={onExitBucket}><span aria-hidden="true">▦</span> All buckets</button><span class="crumb-sep">/</span><strong class="address-current">{selectedBucket}</strong><span class="crumb-sep">/</span>{#each crumbs as crumb, i (crumb + i)}<button class="btn-link" on:click={() => onGotoCrumb(i)}>{crumb}</button><span class="crumb-sep">/</span>{/each}</div>
     <div class="row-inline folder-actions"><button class="ghost" on:click={onOpenFolder}>＋ New folder</button></div>
     {#if objectsLoading && !listing}<div class="skeleton-stack"><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div></div>
     {:else if listing && listing.folders.length === 0 && listing.objects.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">↑</span>This folder is empty. Drop files above to upload the first one.</p>

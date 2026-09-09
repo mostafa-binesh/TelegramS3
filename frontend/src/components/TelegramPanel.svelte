@@ -1,5 +1,8 @@
 <script lang="ts">
   import type { OverviewState, SessionState, TelegramSettings } from '../lib/types';
+  import { navigate } from '../lib/router';
+  import type { TelegramTab } from '../lib/router';
+  export let tab: TelegramTab = 'connection';
   export let overview: OverviewState | null = null;
   export let session: SessionState | null = null;
   export let telegramApiId = '';
@@ -25,13 +28,20 @@
 </script>
 
 <article class="card surface tg-callout">
-  <div class="tg-banner"><div class="tg-copy"><p class="card-label">Telegram</p><h2>{needsSetup ? 'Telegram storage is not connected' : 'Telegram storage is connected'}</h2><p>One Telegram account backs storage for the whole server. Dashboard operators are managed separately.</p><p class="fine-print">Storage session: {overview?.telegram?.session_state ?? 'Unknown'} • {statusLabel}</p><p class="fine-print">{overview?.telegram?.detail ?? 'No Telegram status available.'}</p></div>
-    <div class="tg-actions"><button class="primary" type="button" on:click={() => onToggleWizard(true)}>{needsSetup ? 'Set up Telegram login' : 'Refresh Telegram login'}</button><button class="ghost" type="button" on:click={onManageOperators}>Manage operators</button></div>
+  <div class="subtabs" role="tablist" aria-label="Telegram settings views">
+    <button class:active={tab === 'connection'} role="tab" aria-selected={tab === 'connection'} on:click={() => navigate({view: 'telegram', telegramTab: 'connection'})}>Connection</button>
+    <button class:active={tab === 'proxy'} role="tab" aria-selected={tab === 'proxy'} on:click={() => navigate({view: 'telegram', telegramTab: 'proxy'})}>Proxy</button>
   </div>
-  <div class="settings-grid settings-summary">
-    <article class="settings-card"><p class="card-label">Credentials</p><p class="fine-print">API credentials and storage chat stay in a protected dialog.</p><button class="primary" type="button" on:click={() => showCredentials = true}>Edit credentials</button></article>
+  {#if tab === 'connection'}
+    <div class="tg-banner"><div class="tg-copy"><p class="card-label">Telegram</p><h2>{needsSetup ? 'Telegram storage is not connected' : 'Telegram storage is connected'}</h2><p class="fine-print">{statusLabel} · {overview?.telegram?.detail ?? 'No Telegram status available.'}</p></div>
+      <div class="tg-actions"><button class="primary" type="button" on:click={() => onToggleWizard(true)}>{needsSetup ? 'Set up Telegram login' : 'Refresh Telegram login'}</button><button class="ghost" type="button" on:click={onManageOperators}>Manage operators</button></div>
+    </div>
+    <div class="settings-grid settings-summary">
+      <article class="settings-card"><p class="card-label">Credentials</p><p class="fine-print">API credentials and storage chat stay in a protected dialog.</p><button class="primary" type="button" on:click={() => showCredentials = true}>Edit credentials</button></article>
+    </div>
+  {:else}
     <article class="settings-card"><p class="card-label">Proxy</p><p class="fine-print">Use a proxy only when your network requires it.</p><form class="proxy-form" on:submit|preventDefault={onSave}><label><span>Proxy mode</span><select bind:value={telegramProxyMode}><option value="auto">Auto</option><option value="disabled">Disabled</option><option value="socks5">SOCKS5</option><option value="http">HTTP</option></select></label><label><span>Proxy URL</span><input bind:value={telegramProxyUrl} placeholder="socks5://127.0.0.1:12334" /></label><div class="grid-2"><label><span>Username</span><input bind:value={telegramProxyUsername} /></label><label><span>Password</span><input bind:value={telegramProxyPassword} type="password" /></label></div><button class="primary" type="submit" disabled={settingsBusy}>Save proxy settings</button></form></article>
-  </div>
+  {/if}
   {#if settingsMessage}<p class="fine-print">{settingsMessage}</p>{/if}{#if settingsError}<p class="fine-print error-hint">{settingsError}</p>{/if}
 </article>
 
