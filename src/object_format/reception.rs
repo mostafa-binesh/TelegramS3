@@ -27,6 +27,7 @@ impl ObjectFormatService {
         key: &str,
         content_type: &str,
     ) -> Result<ReceptionStatus, ObjectFormatError> {
+        self.ensure_connection_not_removing()?;
         let object_id = Uuid::new_v4();
         let id = self.metadata.begin_transfer(object_id, bucket, key)?;
         let dir = self.staging_dir(object_id);

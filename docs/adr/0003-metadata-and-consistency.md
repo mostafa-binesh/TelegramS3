@@ -30,6 +30,9 @@ Write path:
 - partial uploads stay invisible
 - overwrites preserve the previous committed object until the new one commits
 - deletes become tombstones before immediate, durable, evidence-first cleanup
+- connection removal uses the same tombstone/outbox boundary: local visibility
+  is cleared in the request transaction, while optional Telegram deletion is
+  completed by a durable, retryable worker job
 - startup reconciliation is required
 
 ## Rejected Alternatives

@@ -91,6 +91,16 @@ export interface OverviewState {
     storage_chat_id?: string | null;
   };
   checks?: { label: string; ok: boolean; detail: string }[];
+  connection_removal?: {
+    id: string;
+    delete_uploaded_files: boolean;
+    state: string;
+    object_count: number;
+    requested_at: number;
+    updated_at: number;
+    completed_at?: number | null;
+    error?: string | null;
+  } | null;
 }
 
 export interface TelegramSettings {

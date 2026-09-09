@@ -109,6 +109,11 @@ Implemented as the documented follow-up increment:
   only that operator's unfinished flow; a different operator still receives a
   conflict. Invalid confirmation codes preserve the sign-in token for retry,
   while stale flow requests cannot affect a replacement.
+- **Connection removal**: the authenticated Connection tab requires an explicit
+  confirmation and an optional remote-delete checkbox. Removal tombstones the
+  local namespace immediately and records a durable job. The worker may delete
+  Telegram payloads and then clears the bootstrap/session state; if remote
+  deletion is not selected, Telegram files remain intentionally unmanaged.
 - **CLI parity**: both the headless `telegram-s3 auth login` and the HTTP wizard
   reuse the same classification and retry primitives on the transport, so
   failures (flood waits, expired/invalid codes, wrong password) surface and

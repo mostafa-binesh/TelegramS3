@@ -12,6 +12,7 @@ impl ObjectFormatService {
         body: Option<StreamingBlob>,
         conditionals: Option<TransferWriteConditionals>,
     ) -> Result<TransferJob, ObjectFormatError> {
+        self.ensure_connection_not_removing()?;
         self.enqueue_with_part(bucket, key, content_type, body, None, conditionals)
             .await
     }
@@ -25,6 +26,7 @@ impl ObjectFormatService {
         part: Option<(Uuid, u32, Option<String>)>,
         conditionals: Option<TransferWriteConditionals>,
     ) -> Result<TransferJob, ObjectFormatError> {
+        self.ensure_connection_not_removing()?;
         let object_id = Uuid::new_v4();
         let id = self.metadata.begin_transfer(object_id, bucket, key)?;
         let dir = self.staging_dir(object_id);
@@ -183,6 +185,7 @@ impl ObjectFormatService {
         args: ManifestBuildArgs,
         conditionals: Option<&TransferWriteConditionals>,
     ) -> Result<TransferJob, ObjectFormatError> {
+        self.ensure_connection_not_removing()?;
         let dir = self.staging_dir(args.object_id);
         let manifest = self.new_manifest(args);
         write_json_file(&dir.join(MANIFEST_FILE_NAME), &manifest)?;
@@ -291,6 +294,7 @@ impl ObjectFormatService {
                 if *cleanup_shutdown.borrow() {
                     break;
                 }
+                let _ = service.finalize_connection_removal().await;
                 match service.metadata.claim_cleanup() {
                     Ok(Some(target)) => {
                         if let Err(error) = service.process_cleanup_target(&target).await {
@@ -305,6 +309,7 @@ impl ObjectFormatService {
                                 "Cleanup failed; durable retry scheduled",
                             );
                         }
+                        let _ = service.finalize_connection_removal().await;
                     }
                     Ok(None) => tokio::select! {
                         _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
@@ -322,6 +327,41 @@ impl ObjectFormatService {
             handles.push(recovery_handle);
             handles.push(cleanup_handle);
         }
+    }
+
+    async fn finalize_connection_removal(&self) -> Result<(), ObjectFormatError> {
+        let Some(job) = self.metadata.connection_removal_job()? else {
+            return Ok(());
+        };
+        if job.delete_uploaded_files && self.metadata.connection_removal_cleanup_pending(&job.id)? {
+            return Ok(());
+        }
+
+        for object_id in self.metadata.connection_removal_objects(&job.id)? {
+            if let Ok(object_id) = Uuid::parse_str(&object_id) {
+                match fs::remove_file(self.manifest_path(object_id)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+                match fs::remove_dir_all(self.chunk_dir(object_id)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(self.data_dir.join(STAGING_ROOT));
+        let _ = fs::remove_dir_all(self.data_dir.join(MULTIPART_ROOT));
+        fs::create_dir_all(self.data_dir.join(STAGING_ROOT))?;
+        fs::create_dir_all(self.data_dir.join(MULTIPART_ROOT))?;
+
+        self.metadata.clear_telegram_bootstrap_settings()?;
+        self.set_storage_chat_id(String::new());
+        self.transport_manager.disconnect().await;
+        self.metadata
+            .finish_connection_removal(&job.id, "completed", None)?;
+        Ok(())
     }
 
     pub async fn shutdown_workers(&self) {

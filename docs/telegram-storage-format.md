@@ -137,6 +137,15 @@ The admin bucket browser preserves bucket names exactly, including Unicode
 characters. Its delete action only requests deletion of an empty bucket; it does
 not alter manifest, tombstone, or recovery semantics.
 
+Removing a Telegram connection tombstones every visible local object and marks
+all buckets deleted in one metadata transaction, so the active index and its
+statistics disappear immediately. The optional remote-delete choice adds every
+manifest location to the existing evidence-first cleanup outbox. The
+connection-removal job retains object IDs until the worker has removed local
+manifests/chunks and, when selected, the Telegram messages. If remote deletion
+is not selected, Telegram payloads remain by design and cannot be treated as a
+managed backup after the connection is removed.
+
 ## Commit State
 
 Supported states:

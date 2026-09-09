@@ -19,6 +19,7 @@
     listUsers,
     login,
     logout,
+    removeTelegramConnection,
     removeObject,
     contentUrl,
     saveTelegramSettings,
@@ -307,6 +308,28 @@
         lastObjectsRouteKey = objectsKey;
         await refreshObjects(next.bucket, next.prefix);
       }
+    }
+  }
+
+  async function removeCurrentConnection(deleteUploadedFiles: boolean) {
+    if (!session?.csrf_token) throw new Error('Your session has expired. Sign in again.');
+    telegramSettingsBusy = true;
+    try {
+      const result = await removeTelegramConnection(session.csrf_token, deleteUploadedFiles);
+      buckets = [];
+      listing = null;
+      selectedKeys = [];
+      telegramApiId = '';
+      telegramApiHash = '';
+      telegramStorageChatId = '';
+      telegramProxyUrl = '';
+      telegramProxyUsername = '';
+      telegramProxyPassword = '';
+      telegramProxyMode = 'auto';
+      await refreshOverview({ silent: true });
+      notifySuccess(result.message);
+    } finally {
+      telegramSettingsBusy = false;
     }
   }
 
@@ -635,7 +658,7 @@
         {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {/if}
     {:else if view === 'telegram'}
-      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} tab={telegramTab} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode overview={overview} {session} settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} bind:showCredentials={showTelegramCredentials} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Telegram settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
+      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} tab={telegramTab} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode overview={overview} {session} settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} bind:showCredentials={showTelegramCredentials} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose} onRemoveConnection={removeCurrentConnection}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Telegram settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}

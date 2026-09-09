@@ -196,6 +196,14 @@ accounts in the "Operators" tab are separate from that Telegram login. The
 overview now shows the Telegram storage connection state directly and flips to
 connected once the session is authorized and the storage chat is reachable.
 
+The Connection tab also provides **Remove current connection**. Confirmation
+always hides the local buckets, objects, and statistics immediately. An optional
+checkbox queues deletion of the uploaded Telegram documents/messages in the
+durable cleanup worker; leaving it clear disconnects locally while intentionally
+leaving those remote files in Telegram. Bucket names are preserved exactly,
+including Unicode, and ordinary bucket deletion remains empty-only and
+tombstone-safe.
+
 ### 4. Use it as S3
 
 Point any standard S3 client at the S3 listener:

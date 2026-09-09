@@ -90,6 +90,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     }
     if current_version >= SCHEMA_VERSION {
         ensure_phase10_schema(connection)?;
+        ensure_connection_removal_schema(connection)?;
         return Ok(());
     }
 
@@ -314,6 +315,34 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     )?;
     tx.commit()?;
     ensure_phase10_schema(connection)?;
+    ensure_connection_removal_schema(connection)?;
+    Ok(())
+}
+
+fn ensure_connection_removal_schema(connection: &mut Connection) -> Result<(), MetadataError> {
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS connection_removal_jobs (
+            id TEXT PRIMARY KEY,
+            delete_uploaded_files INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            object_count INTEGER NOT NULL DEFAULT 0,
+            requested_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            completed_at INTEGER,
+            error TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_connection_removal_jobs_state
+            ON connection_removal_jobs(state, requested_at);
+        CREATE TABLE IF NOT EXISTS connection_removal_objects (
+            job_id TEXT NOT NULL REFERENCES connection_removal_jobs(id) ON DELETE CASCADE,
+            object_id TEXT NOT NULL,
+            PRIMARY KEY(job_id, object_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_connection_removal_objects_object
+            ON connection_removal_objects(object_id);
+        "#,
+    )?;
     Ok(())
 }
 

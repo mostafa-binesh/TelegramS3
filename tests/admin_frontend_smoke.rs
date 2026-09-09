@@ -408,6 +408,51 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     .await;
     assert_eq!(delete_bucket.status, 200);
 
+    let disconnect = http_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/telegram/disconnect",
+        &[
+            ("Cookie", cookie_header.as_str()),
+            ("X-CSRF-Token", csrf.as_str()),
+        ],
+        br#"{"delete_uploaded_files":false}"#,
+    )
+    .await;
+    assert_eq!(disconnect.status, 202);
+    assert!(
+        disconnect
+            .body
+            .contains("uploaded Telegram files were left")
+    );
+
+    let mut removed_overview = Value::Null;
+    for _ in 0..20 {
+        let response = http_request(
+            &client,
+            &bind_addr,
+            "GET",
+            "/_admin/api/overview",
+            &[("Cookie", cookie_header.as_str())],
+            b"",
+        )
+        .await;
+        assert_eq!(response.status, 200);
+        removed_overview = serde_json::from_str(&response.body).expect("overview json");
+        if removed_overview["storage"]["buckets"] == 0
+            && removed_overview["telegram"]["connection_state"] == "not_configured"
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(removed_overview["storage"]["buckets"], 0);
+    assert_eq!(
+        removed_overview["telegram"]["connection_state"],
+        "not_configured"
+    );
+
     // Unauthenticated access to the management API must be rejected.
     let unauth = http_request(&client, &bind_addr, "GET", "/_admin/api/users", &[], b"").await;
     assert_eq!(unauth.status, 401);

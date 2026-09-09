@@ -240,6 +240,17 @@ export async function uploadObject(
   throw lastError instanceof Error ? lastError : new Error('upload request failed');
 }
 
+export function removeTelegramConnection(
+  csrf: string | null | undefined,
+  deleteUploadedFiles: boolean
+) {
+  return requestJson<{ ok: boolean; job: { id: string; state: string; delete_uploaded_files: boolean }; message: string }>(
+    '/telegram/disconnect',
+    csrf,
+    { method: 'POST', body: { delete_uploaded_files: deleteUploadedFiles } }
+  );
+}
+
 export interface ResumableUploadSession {
   id: string;
   chunk_size: number;

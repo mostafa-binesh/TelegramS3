@@ -698,6 +698,29 @@ impl TelegramTransportManager {
         *self.health.write().await = health.clone();
         Ok(health)
     }
+
+    /// Detach the live Telegram transport and remove its local session after a
+    /// connection-removal job has completed. Logout is best effort: local
+    /// connection removal must still be able to finish when Telegram is down.
+    pub async fn disconnect(&self) {
+        self.shutdown_health_monitor().await;
+        let _refresh = self.refresh_lock.lock().await;
+        let transport = self.transport.write().await.take();
+        let session_path = transport
+            .as_ref()
+            .map(|value| value.session_path().to_path_buf())
+            .unwrap_or_else(|| {
+                self.config
+                    .metadata_path()
+                    .with_file_name("telegram.session")
+            });
+        if let Some(transport) = transport {
+            let _ = transport.logout().await;
+        }
+        let _ = tokio::fs::remove_file(session_path).await;
+        *self.health.write().await =
+            not_configured_health(&self.config, "Telegram connection removed".to_string());
+    }
 }
 
 async fn create_private_mock_session(path: &Path) -> Result<(), io::Error> {

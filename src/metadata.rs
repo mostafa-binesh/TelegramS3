@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Error)]
 pub enum MetadataError {
@@ -35,6 +35,8 @@ pub enum MetadataError {
     BucketAlreadyExists(String),
     #[error("bucket not empty: {0}")]
     BucketNotEmpty(String),
+    #[error("a connection removal is already in progress")]
+    ConnectionRemovalInProgress,
     #[error("metadata state is poisoned")]
     Poisoned,
     #[error("time formatting error: {0}")]
@@ -113,6 +115,7 @@ impl MetadataStore {
 
 mod auth;
 mod buckets;
+mod connection_removal;
 mod manifests;
 mod multipart;
 mod recovery;
@@ -122,6 +125,7 @@ mod settings;
 
 pub use self::auth::{DbSession, DbUser};
 pub use self::buckets::BucketRecord;
+pub use self::connection_removal::ConnectionRemovalJob;
 pub use self::manifests::{JournalEntry, TombstonedManifestRecord};
 pub use self::recovery::{RebuildReport, VerifyReport};
 pub use self::settings::{RecoveryAck, RecoveryAcknowledgements, TelegramBootstrapSettings};

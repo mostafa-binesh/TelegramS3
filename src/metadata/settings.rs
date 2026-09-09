@@ -63,6 +63,16 @@ impl MetadataStore {
         })
     }
 
+    pub fn clear_telegram_bootstrap_settings(&self) -> Result<(), MetadataError> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "DELETE FROM app_settings WHERE key='telegram_bootstrap'",
+                [],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Recovery issues an operator has reviewed and chosen to stop counting,
     /// keyed by [`crate::object_format::RecoveryIssue::fingerprint`].
     pub fn recovery_acknowledgements(&self) -> Result<RecoveryAcknowledgements, MetadataError> {

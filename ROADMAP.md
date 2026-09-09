@@ -207,16 +207,21 @@ Completed in this increment:
 - invalid Telegram codes remain retryable, and the bucket browser now provides
   empty-bucket deletion, parent navigation, and skeleton loading on refresh and
   folder transitions
+- the Connection tab can remove the current Telegram connection behind an
+  explicit confirmation; local buckets, objects, and statistics are hidden
+  immediately, while optional Telegram payload deletion is a durable,
+  restart-safe worker job
 
 Planned work:
 
 - introduce a durable upload worker / queue so staging is not tied to a single foreground request path; the worker should own chunk fan-out, retry, and final commit
-- add a durable cleanup worker / outbox for object deletes so Telegram message removal happens asynchronously and survives restart, instead of trying to do all cleanup in the foreground request path
 - add periodic reconciliation for staged uploads so missing chunks, orphaned staging trees, and interrupted commits are repaired or quarantined before they become user-visible corruption
 - make the startup path fail soft for recoverable upload issues: the app should boot, expose health, and let operators inspect or repair state instead of disappearing when staging is damaged
 
 Notes:
 
 - `100 staged chunk(s) missing` is a durability symptom, not just a UI issue; the long-term fix is a worker-backed upload lifecycle plus reconciliation, not only a prettier error message.
-- object delete cleanup should also be worker-backed: tombstone first, then let a durable cleanup job remove Telegram payloads later, so deletes stay recoverable and retryable.
+- object and connection-removal cleanup is worker-backed: tombstone first, then
+  let durable cleanup jobs remove Telegram payloads later, so deletes stay
+  recoverable and retryable.
 - the redesigned UI should keep health and recovery visible even when Telegram bootstrap is degraded, so operators can fix settings without losing the whole control plane.

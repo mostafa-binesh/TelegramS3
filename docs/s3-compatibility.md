@@ -49,7 +49,7 @@ features, so they are documented separately.
 - `/_admin` and `/_admin/api/*` are implemented as an authenticated operator
   surface served by the same Rust process.
 - Login is credential-based: accounts are argon2id-hashed records in
-  `metadata.sqlite` (schema v5), not the environment. A guest/operator sees only
+  `metadata.sqlite` (schema v7), not the environment. A guest/operator sees only
   the sign-in screen; every management API requires a session bound to a user.
 - Login is rate-limited with per-account lockout; passwords/session state are
   not stored in browser storage.
@@ -84,6 +84,12 @@ features, so they are documented separately.
 - The bucket browser preserves bucket names exactly, including Unicode names;
   its delete action maps to the existing empty-bucket-only API and does not
   bypass tombstone/recovery rules.
+- Removing the current Telegram connection from the admin UI is an explicit,
+  CSRF-protected action. It hides local buckets, objects, and statistics
+  immediately. The optional "delete uploaded files" choice queues Telegram
+  message/document cleanup in the durable worker; without that choice, remote
+  Telegram files are intentionally retained and are no longer managed by this
+  installation.
 - The operator UI is not part of the S3 compatibility contract; the `/_admin`
   controller only reflects committed S3 object data through the same store as
   the S3 server. Its Vite-built hashed chunks are served from the UI dist

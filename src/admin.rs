@@ -167,6 +167,13 @@ struct TelegramSettingsRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
+struct TelegramDisconnectRequest {
+    #[serde(default)]
+    delete_uploaded_files: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
 struct BeginResumableRequest {
     bucket: String,
     key: String,
@@ -421,6 +428,7 @@ impl AdminUiState {
             (Method::POST, "telegram/settings") => {
                 self.telegram_save_settings(request, &principal).await
             }
+            (Method::POST, "telegram/disconnect") => self.telegram_disconnect(request).await,
             _ => json_error(StatusCode::NOT_FOUND, "not found"),
         }
     }
@@ -1285,6 +1293,44 @@ impl AdminUiState {
         )
     }
 
+    async fn telegram_disconnect(&self, request: Request<Incoming>) -> Response<Body> {
+        let TelegramDisconnectRequest {
+            delete_uploaded_files,
+        } = match read_json::<TelegramDisconnectRequest>(request).await {
+            Ok(body) => body,
+            Err(_) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid connection removal payload",
+                );
+            }
+        };
+        let job = match self.store().begin_connection_removal(delete_uploaded_files) {
+            Ok(job) => job,
+            Err(crate::metadata::MetadataError::ConnectionRemovalInProgress) => {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "a connection removal is already in progress",
+                );
+            }
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        };
+        self.object_format.clear_recovery_snapshot();
+        self.object_format.ensure_workers();
+        json_response(
+            StatusCode::ACCEPTED,
+            serde_json::json!({
+                "ok": true,
+                "job": job,
+                "message": if delete_uploaded_files {
+                    "Connection removed; uploaded Telegram files are queued for worker cleanup."
+                } else {
+                    "Connection removed; uploaded Telegram files were left in Telegram."
+                }
+            }),
+        )
+    }
+
     fn telegram_settings_wire(&self) -> TelegramSettingsWire {
         let stored = self
             .store()
@@ -1413,6 +1459,12 @@ impl AdminUiState {
             Ok(snapshot) => RecoveryWire::from_snapshot(snapshot, &acknowledgements),
             Err(error) => RecoveryWire::failed(error),
         };
+        let connection_removal = self
+            .object_format
+            .metadata_store()
+            .connection_removal_job()
+            .ok()
+            .flatten();
         let health = self.telegram_health_snapshot().await;
         let session_state = health.status.session_state.clone();
         let session_state_debug = format!("{session_state:?}");
@@ -1460,6 +1512,7 @@ impl AdminUiState {
                 "transfers": durable,
                 "recovery": recovery,
                 "telegram": telegram,
+                "connection_removal": connection_removal,
                 "checks": checks,
             }),
         )

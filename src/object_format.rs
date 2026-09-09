@@ -470,6 +470,7 @@ impl ObjectFormatService {
     }
 
     pub fn create_bucket(&self, bucket: &str) -> Result<BucketRecord, ObjectFormatError> {
+        self.ensure_connection_not_removing()?;
         Ok(self.metadata.create_bucket(BucketRecord {
             name: bucket.to_string(),
             created_at: OffsetDateTime::now_utc(),
@@ -561,6 +562,7 @@ impl ObjectFormatService {
         content_type: &str,
         checksum_algorithm: Option<&str>,
     ) -> Result<MultipartSession, ObjectFormatError> {
+        self.ensure_connection_not_removing()?;
         if !self.bucket_exists(bucket)? {
             return Err(ObjectFormatError::InvalidPlan(format!(
                 "bucket does not exist: {bucket}"
@@ -590,6 +592,7 @@ impl ObjectFormatService {
         body: Option<StreamingBlob>,
         checksum: Option<&str>,
     ) -> Result<MultipartPart, ObjectFormatError> {
+        self.ensure_connection_not_removing()?;
         if part_number == 0 {
             return Err(ObjectFormatError::InvalidPlan(
                 "part number must be at least 1".to_string(),
@@ -974,6 +977,16 @@ impl ObjectFormatService {
         }
     }
 
+    pub fn clear_recovery_snapshot(&self) {
+        if let Ok(mut snapshot) = self.recovery_snapshot.write() {
+            *snapshot = (
+                Some(OffsetDateTime::now_utc().unix_timestamp()),
+                Vec::new(),
+                None,
+            );
+        }
+    }
+
     pub fn cached_recovery_snapshot(&self) -> Result<RecoverySnapshot, String> {
         let snapshot = self
             .recovery_snapshot
@@ -1004,6 +1017,7 @@ impl ObjectFormatService {
         content_type: &str,
         reader: &mut R,
     ) -> Result<StagedObject, ObjectFormatError> {
+        self.ensure_connection_not_removing()?;
         let object_id = Uuid::new_v4();
         let job_id = self.metadata.begin_transfer(object_id, bucket, key)?;
         let scratch_dir = self
@@ -2062,6 +2076,15 @@ impl ObjectFormatService {
 
     fn chunk_dir(&self, object_id: Uuid) -> PathBuf {
         self.data_dir.join(CHUNK_ROOT).join(object_id.to_string())
+    }
+
+    fn ensure_connection_not_removing(&self) -> Result<(), ObjectFormatError> {
+        if self.metadata.connection_removal_job()?.is_some() {
+            return Err(ObjectFormatError::InvalidPlan(
+                "Telegram connection removal is in progress".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn multipart_dir(&self, upload_id: Uuid) -> PathBuf {

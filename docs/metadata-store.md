@@ -48,7 +48,8 @@ Telegram alone to answer read/write consistency questions.
     password change / user delete invalidates all of that user's cookies
 - `app_settings`
   - admin-managed runtime settings, including Telegram bootstrap credentials,
-    storage chat, and proxy settings; added in schema v5. The Telegram session
+    storage chat, proxy settings, and durable connection-removal jobs; added in
+    schema v7. The Telegram session
     file path is system-derived from the metadata path.
 
 The phase 3 object-format service also persists chunk and manifest documents

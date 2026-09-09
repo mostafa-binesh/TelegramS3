@@ -9,7 +9,7 @@
 5. Verify object counts and checksum samples with `telegram-s3 index verify`.
 
 > The same `metadata.sqlite` now also stores operator accounts, Telegram
-> bootstrap settings, and session tombstones (schema v5). A backup/restore of
+> bootstrap settings, and session tombstones (schema v7). A backup/restore of
 > that file restores both object
 > state and who can sign in. If accounts are lost, re-provision the first
 > operator with `telegram-s3 users create <username> --password <pw>` (the first
@@ -55,6 +55,19 @@ normal worker/reconciliation path.
    cleanup scope; Telegram message removal remains evidence-first and retryable.
 4. Run `telegram-s3 gc` only when the dry-run output matches the intended
    cleanup scope.
+
+## Removing the Current Telegram Connection
+
+The admin Connection tab requires confirmation before removal. The transaction
+immediately hides buckets, active objects, recovery markers, and related
+statistics, while the durable `connection_removal_jobs` record keeps the scope
+restart-safe. Selecting **Also delete all uploaded Telegram files** enqueues
+manifest and chunk messages for the evidence-first cleanup worker; the worker
+retries Telegram failures and only clears the session/settings after the
+outbox scope is complete. If the checkbox is not selected, local data is still
+removed from the active installation but the remote Telegram files are left in
+place intentionally. Do not describe those retained files as deleted or
+recoverable through the removed connection.
 
 ## Interrupted Multipart Upload
 
