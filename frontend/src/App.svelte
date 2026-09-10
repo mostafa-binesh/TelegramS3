@@ -619,7 +619,7 @@
 
   async function createShareFromModal() {
     if (!shareTarget) return;
-    const trimmed = shareExpiry.trim();
+    const trimmed = String(shareExpiry ?? '').trim();
     if (trimmed && (!/^\d+$/.test(trimmed) || Number(trimmed) < 1)) {
       shareError = 'Enter a positive whole number of seconds, or leave it blank.';
       return;

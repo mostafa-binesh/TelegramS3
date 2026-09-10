@@ -210,6 +210,24 @@ test('share modal uses an expiry preset, sends the correct payload, displays, an
   await publicPage.close();
 });
 
+for (const seconds of [10, 30]) {
+  test(`share modal accepts an arbitrary ${seconds}-second lifetime`, async ({ page }) => {
+    await mockAdminApi(page);
+    await signIn(page);
+    await openBucket(page);
+    await page.getByRole('button', { name: 'Share readme.txt' }).click();
+    await expect(page.locator('.duration-unit')).toHaveText('seconds');
+    await page.getByLabel('Link lifetime').fill(String(seconds));
+
+    const [shareRequest] = await Promise.all([
+      page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/share') && candidate.method() === 'POST'),
+      page.getByRole('button', { name: 'Create share link' }).click()
+    ]);
+    expect(shareRequest.postDataJSON()).toMatchObject({ bucket: 'release-test', key: 'readme.txt', expires_in_seconds: seconds });
+    await expect(page.getByText('Link ready')).toBeVisible();
+  });
+}
+
 test('share modal supports a never-expire link and surfaces creation errors', async ({ page }) => {
   await mockAdminApi(page, { shareFailure: true });
   await signIn(page);
