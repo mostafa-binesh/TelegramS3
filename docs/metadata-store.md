@@ -89,7 +89,7 @@ visible until the new manifest commits.
 - `telegram-s3 gc --dry-run` reports which tombstoned objects are eligible for
   cleanup.
 - `telegram-s3 gc` removes only tombstoned data that is safely past the
-  configured retention threshold.
+  configured 24-hour retention threshold.
 
 ## Notes
 

@@ -134,7 +134,7 @@ pub(crate) fn enqueue_part_cleanup(
         .unwrap_or_else(|| part.upload_id.to_string());
     tx.execute(
         "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,0,'evidence',?4)",
-        params![cleanup_object_id, connection_id, format!("evidence:{cleanup_object_id}"), now() + 7 * 86400],
+        params![cleanup_object_id, connection_id, format!("evidence:{cleanup_object_id}"), now() + crate::object_format::GARBAGE_COLLECTION_RETENTION_SECONDS],
     )?;
     let mut locations = vec![part.telegram.clone()];
     if let Some(m) = &part.manifest {
@@ -145,7 +145,7 @@ pub(crate) fn enqueue_part_cleanup(
         }));
     }
     for l in locations {
-        tx.execute("INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,?4,'message',?5)",params![cleanup_object_id,connection_id,l.peer_id,l.message_id,now()+7*86400])?;
+        tx.execute("INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,?4,'message',?5)",params![cleanup_object_id,connection_id,l.peer_id,l.message_id,now()+crate::object_format::GARBAGE_COLLECTION_RETENTION_SECONDS])?;
     }
     Ok(())
 }

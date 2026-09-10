@@ -249,7 +249,7 @@ behavior, bounded memory, or live Telegram behavior.
    and local removal have only compiled and passed the old zero-retention GC
    unit test.
 5. Store original tombstone due times during legacy backfill. Current backfill
-   conservatively starts a fresh seven-day retention window.
+   conservatively starts a fresh 24-hour retention window.
 6. Add durable/read-safe handling beyond in-process pins where appropriate and
    test copy/download versus retention-expiry cleanup races.
 7. Verify receiver accounting on disk-full, rename failure, Windows replacement

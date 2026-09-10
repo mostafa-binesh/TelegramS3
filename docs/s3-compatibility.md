@@ -36,7 +36,7 @@ features, so they are documented separately.
 | Checksums | implemented | cargo test | Chunk and whole-object checksums are enforced during upload, read, and reconciliation | Telegram alone is not enough | 5 |
 | Presigned URLs | compatibility gap | none yet | AWS SigV4 presigning is not implemented; the admin surface provides separate opaque `/_public/<token>` capability links | Share links are local metadata capabilities, not Telegram URLs | 5 |
 | Server-side copy | implemented | cargo check | Copy uses the local object-format backend and manifest reuse | Telegram copy may not preserve metadata exactly | 5 |
-| Lifecycle cleanup | implemented | cargo test | Garbage collection now removes only aged, tombstoned data after dry-run review | Cleanup is conservative and retention-based | 6 |
+| Lifecycle cleanup | implemented | cargo test | Garbage collection now removes only tombstoned data older than the 24-hour retention window after dry-run review | Cleanup is conservative and retention-based | 6 |
 | Batch delete | compatibility gap | none yet | Can be translated to per-object tombstones | Telegram does not batch object deletes | 6 |
 | Bucket policies | compatibility gap | none yet | Policy evaluation belongs above storage | Telegram is out of scope | 6 |
 | Retention/object lock | compatibility gap | none yet | Requires additional metadata and enforcement | Telegram cannot enforce S3 locks | 6 |

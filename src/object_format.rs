@@ -31,7 +31,9 @@ pub(crate) type RecoverySnapshot = (Option<i64>, Vec<RecoveryIssue>, Option<Stri
 
 const CHECKSUM_ALGORITHM: &str = "sha256";
 const ENCRYPTION_FORMAT: &str = "chacha20poly1305-v1";
-pub const GARBAGE_COLLECTION_RETENTION_SECONDS: i64 = 7 * 24 * 60 * 60;
+/// Local tombstones and orphaned cleanup material are retained for one day
+/// before irreversible garbage collection becomes eligible.
+pub const GARBAGE_COLLECTION_RETENTION_SECONDS: i64 = 24 * 60 * 60;
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const STAGING_ROOT: &str = "staging";
 const MANIFEST_ROOT: &str = "manifests";

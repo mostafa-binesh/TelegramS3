@@ -498,7 +498,9 @@ fn backfill_cleanup_outbox(connection: &mut Connection) -> Result<(), MetadataEr
                     ))
                 .unix_timestamp()
             })
-            .unwrap_or_else(|| crate::durable::now() + 7 * 86400);
+            .unwrap_or_else(|| {
+                crate::durable::now() + crate::object_format::GARBAGE_COLLECTION_RETENTION_SECONDS
+            });
         crate::durable::enqueue_manifest_cleanup_at(&tx, &manifest, due_at)?;
     }
     tx.commit()?;

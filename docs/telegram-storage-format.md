@@ -107,7 +107,8 @@ The manifest must not depend on captions alone.
 is an RFC3339 UTC timestamp. The local index and all S3/admin read and list
 paths treat the object as missing at or after that instant, while the manifest
 and Telegram chunks remain recoverable until normal tombstone retention and
-garbage collection complete. Share-link expiry is stored separately in local
+garbage collection complete. The default local tombstone retention is 24 hours.
+Share-link expiry is stored separately in local
 metadata and can never extend beyond this manifest deadline.
 
 ## Encryption Envelope

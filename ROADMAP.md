@@ -272,5 +272,6 @@ Notes:
 - `100 staged chunk(s) missing` is a durability symptom, not just a UI issue; the long-term fix is a worker-backed upload lifecycle plus reconciliation, not only a prettier error message.
 - object and connection-removal cleanup is worker-backed: tombstone first, then
   let durable cleanup jobs remove Telegram payloads later, so deletes stay
-  recoverable and retryable.
+  recoverable and retryable; local tombstones and orphaned cleanup material are
+  retained for 24 hours before irreversible garbage collection.
 - the redesigned UI should keep health and recovery visible even when Telegram bootstrap is degraded, so operators can fix settings without losing the whole control plane.

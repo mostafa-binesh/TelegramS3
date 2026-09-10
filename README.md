@@ -246,7 +246,8 @@ Per-object expiry is available as a Telegram S3 extension. Send either
 multipart initiation). Expired objects disappear from S3/admin listings and
 return as missing on reads; the background cleanup worker sweeps them into the
 evidence-first tombstone path, after which the normal retention-aware GC policy
-removes their Telegram data. The admin browser exposes the same seconds-
+removes their Telegram data. Local tombstones and orphaned cleanup material
+are retained for 24 hours by default before `gc` can remove them. The admin browser exposes the same seconds-
 based expiry control. Operators can create bearer share links from the object
 browser at `/_public/<token>`, with an optional link expiry capped by the object
 expiry.
