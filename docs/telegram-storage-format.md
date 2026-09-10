@@ -21,9 +21,10 @@ completion, and the RustFS-backed S3 surface.
 
 The authenticated operator frontend introduced in phase 8 reads the same
 metadata and status surfaces for visibility, but it does not alter the storage
-layout or relax the recovery rules described here. The frontend's lazy-loaded
-settings view is operational UI only; if its hashed asset is unavailable, the
-console exposes a retry state and does not change Telegram or local metadata.
+layout or relax the recovery rules described here. Its inline Telegram account
+wizard saves bootstrap settings through the existing admin API; this is
+operational UI only. If its hashed asset is unavailable, the console exposes a
+retry state and does not change Telegram or local metadata.
 
 Every send attempt is durable before the remote call. A restart that finds a
 `recovery_required` job with no lease normalizes any stale `sending` attempt to

@@ -193,19 +193,20 @@ server is down. See [docs/configuration.md](docs/configuration.md).
 ### 3. Log in to the operator UI
 
 Open <http://localhost:9000/_admin>, sign in with the account above, and use the
-Telegram settings view to enter or update the Telegram bootstrap values. The
+Telegram account view to enter or update the Telegram bootstrap values. The
 image must contain the Vite-generated hashed files below
 `TELEGRAM_ADMIN_UI_DIST_DIR/assets/`; a missing lazy-view file is reported with
 a Retry action in the console.
-Then use the in-browser **Telegram onboarding wizard** (phone → code → cloud password when
-required) to authorize the single Telegram session the store runs on. The wizard opens as
-a modal, starts a fresh operator-owned flow each time it opens, and lets invalid codes be
-retried without losing the active Telegram token. Operator
+Then use the in-browser **Telegram account wizard** (API credentials → storage chat →
+network → phone/code/cloud password when required) to configure and authorize the single
+Telegram session the store runs on. The inline wizard saves the required settings together
+before sign-in, starts a fresh operator-owned flow each time it opens, and lets invalid codes
+be retried without losing the active Telegram token. Operator
 accounts in the "Operators" tab are separate from that Telegram login. The
 overview now shows the Telegram storage connection state directly and flips to
 connected once the session is authorized and the storage chat is reachable.
 
-The Connection tab also provides **Remove current connection**. Confirmation
+The account view also provides **Remove connection**. Confirmation
 always hides the local buckets, objects, and statistics immediately. An optional
 checkbox queues deletion of the uploaded Telegram documents/messages in the
 durable cleanup worker; while that queue is pending, the owning connection is

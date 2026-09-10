@@ -61,10 +61,11 @@ features, so they are documented separately.
   as the S3 data plane: uploads are
   `POST /_admin/api/objects/content?bucket&key`, downloads are
   `GET`/`HEAD` with an optional `Range` (`206`/`Content-Range`).
-- The operator UI hosts an in-browser **Telegram onboarding wizard**
+- The operator UI hosts an in-browser **Telegram account wizard**
   (`/telegram/wizard/{state,begin,submit-code,submit-password,cancel}`) that
-  drives the real single-account login (phone → code → cloud password when
-  required) behind the authenticated, CSRF-protected session. The modal sends an
+  configures API credentials, storage chat, and network settings before driving
+  the real single-account login (phone → code → cloud password when required)
+  behind the authenticated, CSRF-protected session. The inline wizard sends an
   opaque `flow_id` on every turn, replaces only the same operator's unfinished
   flow, and preserves retryable invalid-code state. This authorizes
   the storage account for the server, not an operator record in the dashboard.

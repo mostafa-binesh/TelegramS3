@@ -125,10 +125,12 @@ request will fix.
    complete UI `assets/` directory, then use the view's Retry action; this is a
    UI-asset issue and does not alter the persisted Telegram settings.
 
-The Telegram setup dialog owns an operator-scoped flow id. Closing the dialog
-cancels that flow, and reopening it requests a fresh code. An invalid code keeps
-the current attempt retryable; an expired code requires starting a new attempt.
-Stale browser requests cannot cancel or advance a replacement flow.
+The Telegram account wizard owns an operator-scoped flow id. Leaving the wizard
+cancels that flow, and reopening it requests a fresh code. Settings are persisted
+together before sign-in begins; an invalid code keeps the current attempt retryable,
+and an expired code requires starting a new attempt. Stale browser requests cannot
+cancel or advance a replacement flow. The wizard changes only bootstrap settings
+and login state; it does not change object manifests, chunks, or recovery markers.
 
 ## Telegram Session Loss
 

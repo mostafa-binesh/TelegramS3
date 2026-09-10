@@ -210,13 +210,14 @@ Completed in this increment:
   contract: `authorized` is not shown as connected when storage-peer lookup
   fails, including `AUTH_KEY_UNREGISTERED`; `TELEGRAM_SESSION_PATH` is honored
   consistently by runtime bootstrap
-- the Telegram setup wizard now uses an accessible modal with an opaque,
+- the Telegram account view now uses an accessible inline four-step wizard
+  (API credentials, storage chat, network, and sign-in) with an opaque,
   operator-owned flow id; reopening replaces the operator's unfinished attempt,
   while other operators remain isolated by the single-flow lock
 - invalid Telegram codes remain retryable, and the bucket browser now provides
   empty-bucket deletion, parent navigation, and skeleton loading on refresh and
   folder transitions
-- the Connection tab can remove the current Telegram connection behind an
+- the account view can remove the current Telegram connection behind an
   explicit confirmation; local buckets, objects, and statistics are hidden
   immediately, while optional Telegram payload deletion is a durable,
   restart-safe worker job
