@@ -1,7 +1,7 @@
 {
   "name": "telegram-s3-admin-ui",
   "private": true,
-  "version": "0.7.1",
+  "version": "0.7.15-rc.1",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.7.15-rc.1 - 2026-09-10
+
+- Added durable per-object expiry for S3, multipart, resumable admin, and
+  browser uploads.
+- Added authenticated admin-created bearer share links with optional expiry
+  and bounded public GET/HEAD downloads.
+- Added metadata schema migration support for hashed share-link records.
+
 ## 0.7.1 - 2026-09-10
 
 - Promoted the Telegram account wizard and responsive admin console from the
