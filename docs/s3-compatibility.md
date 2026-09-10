@@ -34,7 +34,7 @@ features, so they are documented separately.
 | Delete markers | implemented | cargo check | Tombstones are listed as delete markers and remain recoverable until cleanup | Must be modeled locally | 5 |
 | Object tags | compatibility gap | none yet | Must persist in manifest/index | Captions are not enough | 5 |
 | Checksums | implemented | cargo test | Chunk and whole-object checksums are enforced during upload, read, and reconciliation | Telegram alone is not enough | 5 |
-| Presigned URLs | compatibility gap | none yet | AWS SigV4 presigning is not implemented; the admin surface provides separate opaque `/share/<token>` capability links | Share links are local metadata capabilities, not Telegram URLs | 5 |
+| Presigned URLs | compatibility gap | none yet | AWS SigV4 presigning is not implemented; the admin surface provides separate opaque `/_public/<token>` capability links | Share links are local metadata capabilities, not Telegram URLs | 5 |
 | Server-side copy | implemented | cargo check | Copy uses the local object-format backend and manifest reuse | Telegram copy may not preserve metadata exactly | 5 |
 | Lifecycle cleanup | implemented | cargo test | Garbage collection now removes only aged, tombstoned data after dry-run review | Cleanup is conservative and retention-based | 6 |
 | Batch delete | compatibility gap | none yet | Can be translated to per-object tombstones | Telegram does not batch object deletes | 6 |
@@ -87,10 +87,11 @@ features, so they are documented separately.
   its delete action maps to the existing empty-bucket-only API and does not
   bypass tombstone/recovery rules.
 - The object browser shows object expiry, accepts seconds-based expiry for
-  browser uploads, and creates opaque share URLs with an optional expiry.
+  browser uploads, and creates opaque `/_public/` share URLs with an optional expiry.
   Share URLs are public bearer capabilities bounded by object expiry.
 - Removing the current Telegram connection from the admin UI is an explicit,
-  CSRF-protected action. It hides local buckets, objects, and statistics
+  CSRF-protected action that requires the linked Telegram phone number. Only a
+  SHA-256 hash is stored for that confirmation. It hides local buckets, objects, and statistics
   immediately. The optional "delete uploaded files" choice queues Telegram
   message/document cleanup in the durable worker and reserves the owning
   generation/transport until cleanup completes; targets cannot be processed by

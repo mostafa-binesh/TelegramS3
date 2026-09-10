@@ -400,7 +400,7 @@ async fn handle_request(
         *response.status_mut() = StatusCode::NO_CONTENT;
         return Ok(response);
     }
-    if request.uri().path().starts_with("/share/") {
+    if request.uri().path().starts_with("/_public/") {
         return Ok(handle_share_request(request, object_format).await);
     }
     if AdminUiState::is_admin_route(request.uri().path()) {
@@ -454,7 +454,7 @@ async fn handle_share_request(
     let token = request
         .uri()
         .path()
-        .strip_prefix("/share/")
+        .strip_prefix("/_public/")
         .filter(|value| !value.is_empty() && !value.contains('/'));
     let Some(token) = token else {
         return text_response(
@@ -569,13 +569,20 @@ async fn handle_share_request(
         HeaderValue::from_str(&manifest.checksum.whole_object)
             .unwrap_or(HeaderValue::from_static("")),
     );
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_static("attachment"),
-    );
+    if let Ok(value) = HeaderValue::from_str(&crate::admin::content_disposition(
+        &crate::admin::basename_key(&manifest.key),
+    )) {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, value);
+    }
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
     if let Some(content_range) = content_range
         && let Ok(value) = HeaderValue::from_str(&content_range)
     {

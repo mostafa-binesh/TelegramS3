@@ -170,6 +170,12 @@ and login state; it does not change object manifests, chunks, or recovery marker
    (`ListObjects` legacy callers as well as `ListObjectsV2` callers) before
    returning the endpoint to backup tooling.
 
+The admin connection-removal action is intentionally guarded by the linked
+Telegram phone number. If the number is unavailable, do not bypass the check;
+recover the account details or use the normal Telegram reauthorization flow
+first. The stored confirmation value is only a SHA-256 hash, so it cannot be
+displayed back by the admin UI.
+
 ## Orphan Cleanup
 
 - Run garbage collection in dry-run mode first.

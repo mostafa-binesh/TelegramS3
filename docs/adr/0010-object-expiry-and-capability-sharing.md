@@ -14,7 +14,7 @@ existing tombstone, evidence, retention, and garbage-collection workflow.
 
 The authenticated admin panel can create an opaque random bearer token for a
 committed object. Only the token hash is stored; the raw token is returned once
-as `/share/<token>`. A share link can have no independent deadline or an
+as `/_public/<token>`. A share link can have no independent deadline or an
 optional deadline, but it is always capped by the object expiry. Public share
 downloads use the same bounded, checksum-verifying reader as S3 GET and are
 limited to GET/HEAD.

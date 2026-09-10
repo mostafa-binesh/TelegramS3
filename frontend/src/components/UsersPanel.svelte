@@ -1,5 +1,6 @@
 <script lang="ts">
   import LoadError from './LoadError.svelte';
+  import ActionIcon from './ActionIcon.svelte';
   import type { UserInfo } from '../lib/types';
   export let users: UserInfo[] = [];
   export let loading = false;
@@ -22,7 +23,7 @@
     <p class="empty-state"><span class="empty-mark" aria-hidden="true">+</span>No operator accounts yet.</p>
   {:else}
     <div class="table-scroll"><table class="kv-table"><thead><tr><th>Username</th><th>Role</th><th>State</th><th></th></tr></thead><tbody>
-      {#each users as user (user.id)}<tr><td>{user.username}{#if user.display_name} <small>({user.display_name})</small>{/if}</td><td><span class="role-tag" class:role-super={user.role === 'superadmin'}>{user.role}</span></td><td>{user.disabled ? 'disabled' : 'enabled'}</td><td class="row-actions">{#if canManage}<button class="ghost" on:click={() => onRemove(user.id)} disabled={busy}>Remove</button>{/if}</td></tr>{/each}
+    {#each users as user (user.id)}<tr><td>{user.username}{#if user.display_name} <small>({user.display_name})</small>{/if}</td><td><span class="role-tag" class:role-super={user.role === 'superadmin'}>{user.role}</span></td><td>{user.disabled ? 'disabled' : 'enabled'}</td><td class="row-actions">{#if canManage}<ActionIcon name="trash" label={`Remove operator ${user.username}`} tone="danger" on:click={() => onRemove(user.id)} disabled={busy}/>{/if}</td></tr>{/each}
     </tbody></table></div>
   {/if}
   <div class="nested-form operator-actions">{#if canManage}<button class="primary" on:click={onAdd}>＋ Add operator</button>{:else}<p class="fine-print">Only superadmins can add or remove operator accounts.</p>{/if}</div>

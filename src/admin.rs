@@ -988,7 +988,7 @@ impl AdminUiState {
         json_response(
             StatusCode::CREATED,
             serde_json::json!({
-                "url": format!("/share/{token}"),
+                "url": format!("/_public/{token}"),
                 "object": {"bucket": record.bucket, "key": record.key},
                 "expires_at": record.expires_at.and_then(rfc3339_unix_opt),
             }),
@@ -1862,7 +1862,7 @@ fn parse_content_range(
 
 /// `Content-Disposition: attachment; filename="…"` with an ASCII fallback and
 /// RFC 5987 percent-encoding for non-ASCII names.
-fn content_disposition(basename: &str) -> String {
+pub(crate) fn content_disposition(basename: &str) -> String {
     if basename.is_ascii() && !basename.contains(['"', '\\', '\r', '\n']) {
         return format!("attachment; filename=\"{basename}\"");
     }
@@ -2043,7 +2043,7 @@ fn object_to_wire(manifest: &ObjectManifest, key: &str) -> ObjectEntryWire {
     }
 }
 
-fn basename_key(key: &str) -> String {
+pub(crate) fn basename_key(key: &str) -> String {
     key.rsplit('/')
         .next()
         .filter(|part| !part.is_empty())

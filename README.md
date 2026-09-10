@@ -206,8 +206,10 @@ accounts in the "Operators" tab are separate from that Telegram login. The
 overview now shows the Telegram storage connection state directly and flips to
 connected once the session is authorized and the storage chat is reachable.
 
-The account view also provides **Remove connection**. Confirmation
-always hides the local buckets, objects, and statistics immediately. An optional
+The account view also provides **Remove connection**. It requires re-entering
+the linked Telegram phone number; only a SHA-256 hash of that number is stored
+in local metadata for this safety check. Confirmation then hides the local
+buckets, objects, and statistics immediately. An optional
 checkbox queues deletion of the uploaded Telegram documents/messages in the
 durable cleanup worker; while that queue is pending, the owning connection is
 reserved so its cleanup cannot be sent through another account. Leaving it
@@ -246,7 +248,7 @@ return as missing on reads; the background cleanup worker sweeps them into the
 evidence-first tombstone path, after which the normal retention-aware GC policy
 removes their Telegram data. The admin browser exposes the same seconds-
 based expiry control. Operators can create bearer share links from the object
-browser at `/share/<token>`, with an optional link expiry capped by the object
+browser at `/_public/<token>`, with an optional link expiry capped by the object
 expiry.
 
 ### 5. Build from source
@@ -259,8 +261,11 @@ cargo build --release
 ## Configuration
 
 Runtime configuration is mostly environment-driven, but Telegram bootstrap
-settings are now managed from the authenticated admin panel and persisted in
-`metadata.sqlite`. Telegram API IDs and storage chat IDs are validated as numeric values
+settings and the upload chunk policy are managed from the authenticated admin
+panel and persisted in `metadata.sqlite`. `TELEGRAM_CHUNK_SIZE` is imported
+when no database policy exists; after that, the database value is authoritative
+and can be changed live from **Telegram settings → Storage policy**. Telegram
+API IDs and storage chat IDs are validated as numeric values
 before persistence; connection refresh failures are returned as JSON warnings
 from the admin API rather than as proxy-level failures.
 The complete reference lives in [docs/configuration.md](docs/configuration.md);

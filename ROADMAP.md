@@ -172,9 +172,12 @@ Completed work (content streaming + wizard increment):
 - object expiry is persisted in rebuildable manifests, configurable from the
   admin upload UI or S3 extension headers, and enforced on S3/admin reads and
   listings
-- the admin object browser can issue opaque `/share/<token>` download links
+- the admin object browser can issue opaque `/_public/<token>` download links
   with optional expiry capped by the object's expiry; public links use the
   bounded shared reader
+- bucket and operator lists use icon actions with hover labels, destructive
+  actions use in-app confirmation modals, share expiry is collected in-app,
+  and Telegram connection removal requires linked-phone confirmation
 
 Remaining Phase-9 follow-ups (explicitly out of this increment, see ADR-0006 / ROADMAP): bulk/folder download or server-side ZIP (no whole-RAM buffering), drag-in of nested directory trees, and browser resumable-multipart upload negotiation.
 
