@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.7.15-rc.2 - 2026-09-10
+
+- Added background expiry sweeping so expired active objects are tombstoned
+  and handed to the existing evidence-first cleanup worker.
+
 ## 0.7.15-rc.1 - 2026-09-10
 
 - Added durable per-object expiry for S3, multipart, resumable admin, and
