@@ -14,6 +14,8 @@
   let code = '';
   let password = '';
   let phoneInput: HTMLInputElement;
+  let codeInput: HTMLInputElement;
+  let passwordInput: HTMLInputElement;
   let dialog: HTMLDivElement;
   let previouslyFocused: HTMLElement | null = null;
   let flowId = newFlowId();
@@ -48,6 +50,10 @@
       ? (state.health_detail || state.message || 'Telegram account authorized, but storage is not ready.')
       : '';
     if (state.phase === 'two_fa') code = '';
+    void tick().then(() => {
+      if (phase === 'code') codeInput?.focus();
+      if (phase === 'two_fa') passwordInput?.focus();
+    });
     if (state.phase === 'authorized' && state.connection_ready !== false) { code = ''; password = ''; restoreFocus(); onDone(); }
   }
 
@@ -107,23 +113,23 @@
     <p class="wizard-desc">Each time this dialog opens, Telegram receives a fresh login attempt. Closing it cancels the attempt.</p>
 
     {#if phase === 'idle'}
-      <div class="wizard-step">
+      <form class="wizard-step" on:submit|preventDefault={() => void sendCode()}>
         <label><span>Phone (international format)</span><input bind:this={phoneInput} bind:value={phone} type="tel" placeholder="+1 555 000 0000" autocomplete="tel" /></label>
-        <button class="primary" type="button" on:click={sendCode} disabled={pending || !phone.trim()}>{pending ? 'Sending…' : 'Send code'}</button>
-      </div>
+        <button class="primary" type="submit" disabled={pending || !phone.trim()}>{pending ? 'Sending…' : 'Send code'}</button>
+      </form>
     {:else if phase === 'code'}
-      <div class="wizard-step">
+      <form class="wizard-step" on:submit|preventDefault={() => void submitCode()}>
         <p class="wizard-desc">Telegram sent a confirmation code to the account above.</p>
-        <label><span>Confirmation code</span><input bind:value={code} type="password" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" maxlength="6" /></label>
-        <button class="primary" type="button" on:click={submitCode} disabled={pending || !code.trim()}>{pending ? 'Checking…' : 'Confirm'}</button>
+        <label><span>Confirmation code</span><input bind:this={codeInput} bind:value={code} type="password" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" maxlength="6" /></label>
+        <button class="primary" type="submit" disabled={pending || !code.trim()}>{pending ? 'Checking…' : 'Confirm'}</button>
         <button class="ghost" type="button" on:click={restart} disabled={pending}>Send a new code</button>
-      </div>
+      </form>
     {:else if phase === 'two_fa'}
-      <div class="wizard-step">
+      <form class="wizard-step" on:submit|preventDefault={() => void submitPassword()}>
         <p class="wizard-desc">This account has two-step verification enabled. Enter its cloud password.</p>
-        <label><span>Cloud password</span><input bind:value={password} type="password" autocomplete="current-password" /></label>
-        <button class="primary" type="button" on:click={submitPassword} disabled={pending || !password.trim()}>{pending ? 'Authorizing…' : 'Authorize'}</button>
-      </div>
+        <label><span>Cloud password</span><input bind:this={passwordInput} bind:value={password} type="password" autocomplete="current-password" /></label>
+        <button class="primary" type="submit" disabled={pending || !password.trim()}>{pending ? 'Authorizing…' : 'Authorize'}</button>
+      </form>
     {:else if phase === 'authorized'}
       <div class="wizard-step">
         <p class="wizard-desc">Telegram accepted the login, but the storage chat is not reachable yet. Fix the connection and retry the health check before using storage.</p>

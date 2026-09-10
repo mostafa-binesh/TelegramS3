@@ -6,6 +6,7 @@
   export let prefix = '';
   export let csrf: string | null | undefined;
   export let onUploaded: () => void = () => {};
+  export let onUploadActivity: (active: boolean) => void = () => {};
 
   interface SavedUpload {
     id: string;
@@ -37,7 +38,13 @@
   let dragging = false;
   let uploadStarted = false;
   let componentActive = true;
+  let serverUploadCount = 0;
   const controllers = new Map<number, AbortController>();
+
+  function setServerUploadActivity(active: boolean) {
+    serverUploadCount = Math.max(0, serverUploadCount + (active ? 1 : -1));
+    onUploadActivity(serverUploadCount > 0);
+  }
 
   function buildKey(fileName: string) {
     const name = fileName.replace(/^\/+/, '');
@@ -108,14 +115,20 @@
     controllers.set(index, controller);
     setItem(index, { busy: true, error: undefined, paused: false });
     try {
-      const accepted = await uploadResumable(bucket, item.fullKey, item.file, csrf, (sent, total) => {
-        setItem(index, { progress: total ? sent / total : 1 });
-      }, {
-        signal: controller.signal,
-        receptionId: item.receptionId,
-        onReception: (id) => { setItem(index, { receptionId: id, state: 'receiving' }); remember({ ...items[index], receptionId: id }); },
-        waitUntilResumed: () => waitUntilResumed(index)
-      });
+      let accepted;
+      setServerUploadActivity(true);
+      try {
+        accepted = await uploadResumable(bucket, item.fullKey, item.file, csrf, (sent, total) => {
+          setItem(index, { progress: total ? sent / total : 1 });
+        }, {
+          signal: controller.signal,
+          receptionId: item.receptionId,
+          onReception: (id) => { setItem(index, { receptionId: id, state: 'receiving' }); remember({ ...items[index], receptionId: id }); },
+          waitUntilResumed: () => waitUntilResumed(index)
+        });
+      } finally {
+        setServerUploadActivity(false);
+      }
       setItem(index, { progress: 0.02, busy: false, jobId: accepted.job_id, state: 'queued', receptionId: undefined });
       forget({ ...item, receptionId: item.receptionId });
       for (let poll = 0; poll < 180; poll += 1) {
@@ -150,6 +163,10 @@
     }
   }
 
+  export async function cancelActiveUploads() {
+    await Promise.all(items.map((item, index) => item.busy ? cancelItem(index) : Promise.resolve()));
+  }
+
   function onDrop(event: DragEvent) {
     event.preventDefault(); dragging = false;
     if (event.dataTransfer?.files && event.dataTransfer.files.length > 0) enqueue(event.dataTransfer.files);
@@ -159,7 +176,10 @@
   function removeItem(index: number) { if (!items[index]?.busy) items = items.filter((_, i) => i !== index); }
 
   onMount(readSaved);
-  onDestroy(() => { componentActive = false; });
+  onDestroy(() => {
+    componentActive = false;
+    controllers.forEach((controller) => controller.abort());
+  });
 </script>
 
 <div class:dropzone={dragging} class="upload-box" role="region" aria-label="Drop files to upload, or choose files below" on:dragover={onDragOver} on:dragleave={onDragLeave} on:drop={onDrop}>
