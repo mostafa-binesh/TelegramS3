@@ -139,12 +139,15 @@ not alter manifest, tombstone, or recovery semantics.
 
 Removing a Telegram connection tombstones every visible local object and marks
 all buckets deleted in one metadata transaction, so the active index and its
-statistics disappear immediately. The optional remote-delete choice adds every
-manifest location to the existing evidence-first cleanup outbox. The
-connection-removal job retains object IDs until the worker has removed local
-manifests/chunks and, when selected, the Telegram messages. If remote deletion
-is not selected, Telegram payloads remain by design and cannot be treated as a
-managed backup after the connection is removed.
+statistics disappear immediately. The removal job records the active
+connection generation. The optional remote-delete choice adds every manifest
+location to the existing evidence-first cleanup outbox, with the same
+generation copied onto each target. Local detachment does not wait for remote
+cleanup: after detachment, a new login may create a new generation. Cleanup
+workers refuse to use that new generation for old targets and quarantine them
+for recovery instead. If remote deletion is not selected, Telegram payloads
+remain by design and cannot be treated as a managed backup after the
+connection is removed.
 
 ## Commit State
 
@@ -178,8 +181,9 @@ session and reconciliation handles the stale receiving job as recovery work.
 - A manifest without a local commit row is not visible until reconciliation.
 - A staged upload without a manifest is aborted or resumed.
 - A tombstone must survive until the evidence-first background cleanup worker
-  has removed its Telegram messages; cleanup is due immediately and remains
-  retryable if Telegram is unavailable.
+  has removed its Telegram messages, or until an operator reviews a
+  generation-mismatch/recovery-required target; cleanup is due immediately and
+  remains retryable if Telegram is unavailable.
 - Missing chunks make the object corrupt until repaired.
 - Multipart parts remain hidden until completion publishes the final manifest.
 - Version IDs are derived from the stored manifest identity, so copy and delete

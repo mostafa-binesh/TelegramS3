@@ -201,6 +201,14 @@ Completed in this increment:
   unsupported
 - committed-object deletes now make cleanup due immediately; the existing
   evidence-first cleanup worker removes Telegram messages asynchronously
+- connection removal now detaches the local Telegram generation before remote
+  cleanup completes; generation-tagged targets cannot be deleted through a
+  newly logged-in account, and ambiguous targets remain recoverable instead of
+  blocking re-login
+- Telegram health and the login wizard now share the end-to-end readiness
+  contract: `authorized` is not shown as connected when storage-peer lookup
+  fails, including `AUTH_KEY_UNREGISTERED`; `TELEGRAM_SESSION_PATH` is honored
+  consistently by runtime bootstrap
 - the Telegram setup wizard now uses an accessible modal with an opaque,
   operator-owned flow id; reopening replaces the operator's unfinished attempt,
   while other operators remain isolated by the single-flow lock

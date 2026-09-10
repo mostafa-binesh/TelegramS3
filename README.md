@@ -49,7 +49,10 @@ staging, and recovery artifacts, not committed payloads.
   spans they touch, keeping memory bounded.
 - **Telegram transport** — headless login, persisted session reuse, direct /
   SOCKS5 / bridged proxy support, explicit retry and flood-wait policy, and an
-  in-browser onboarding wizard behind the operator UI.
+  in-browser onboarding wizard behind the operator UI. Login is considered
+  ready only after the storage peer health probe succeeds; connection removal
+  detaches a generation before asynchronous cleanup and never routes old
+  cleanup through a new account.
 - **Bounded memory everywhere** — uploads and downloads stream chunk-by-chunk;
   no whole-object RAM buffering (an explicit project invariant).
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,

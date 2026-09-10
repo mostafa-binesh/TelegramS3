@@ -7,6 +7,7 @@ Use placeholders only:
 ```dotenv
 TELEGRAM_METADATA_PATH=/var/lib/telegram-s3/metadata.sqlite
 TELEGRAM_DATA_DIR=/var/lib/telegram-s3/data
+TELEGRAM_SESSION_PATH=/var/lib/telegram-s3/session/telegram.session
 TELEGRAM_S3_BIND_ADDR=127.0.0.1:9000
 TELEGRAM_ADMIN_BIND_ADDR=127.0.0.1:9001
 TELEGRAM_ADMIN_BOOTSTRAP_SECRET=<generate_secure_random_value>
@@ -27,14 +28,17 @@ RUSTFS_SECRET_KEY=<generate_secure_random_value>
 
 ## Paths
 
-- session path: persistent Telegram session database, derived automatically from
-  the metadata path as `<metadata-dir>/telegram.session`
+- session path: persistent Telegram session database. Set
+  `TELEGRAM_SESSION_PATH` explicitly in deployments; when it is unset the path
+  derives from the metadata path as `<metadata-dir>/telegram.session`. The
+  resolved path is used consistently by login, status, doctor, and the server.
 - metadata path: local SQLite journal and indexes
 - cache path: bounded manifest/chunk cache
 - recovery path: exported backups and repair artifacts
 - transport path: the resolved Telegram bootstrap settings persisted in
   `metadata.sqlite` and used by `auth login`, `auth status`, `auth logout`,
-  `doctor`, and `server`; the session file path itself is system-owned
+  `doctor`, and `server`; the session file path itself is system-owned and must
+  be mounted persistently in Docker.
 - object-format path: `TELEGRAM_DATA_DIR` now houses staged uploads,
   multipart scratch, quarantine artifacts, and mock-transport test blobs; the
   committed payloads themselves live as Telegram documents/messages
@@ -113,6 +117,9 @@ argon2id. There is no per-user `.env` entry.
   save path rejects malformed numeric identifiers before writing them to
   `metadata.sqlite`; connection refresh failures are surfaced as JSON API
   warnings for operator correction after persistence succeeds.
+- A Telegram connection removal detaches the local generation immediately. A
+  later login receives a new connection generation; cleanup targets from the
+  detached generation are never sent through the new account's transport.
 - rotate S3 credentials independently of Telegram session material
 - rotate encryption keys via versioned envelopes
 

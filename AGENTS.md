@@ -22,6 +22,8 @@ honest about Telegram limits, consistency, and recovery semantics.
 - `docs/configuration.md` - environment and runtime configuration.
 - `docs/disaster-recovery.md` - recovery and rebuild procedures.
 - `docs/adr/` - architecture decisions and rejected alternatives.
+- `server_debug.md` - local-only live-server connection reference, read-only
+  diagnostic commands, and the latest TelegramS3 production investigation.
 
 ## Build, Format, Lint, Test
 

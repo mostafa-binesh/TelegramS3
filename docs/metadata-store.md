@@ -49,8 +49,9 @@ Telegram alone to answer read/write consistency questions.
 - `app_settings`
   - admin-managed runtime settings, including Telegram bootstrap credentials,
     storage chat, proxy settings, and durable connection-removal jobs; added in
-    schema v7. The Telegram session
-    file path is system-derived from the metadata path.
+    schema v8. The Telegram session file path is resolved from
+    `TELEGRAM_SESSION_PATH`, with the metadata-path-derived default as
+    fallback.
 
 The phase 3 object-format service also persists chunk and manifest documents
 under the configured data directory, using the metadata store as the
