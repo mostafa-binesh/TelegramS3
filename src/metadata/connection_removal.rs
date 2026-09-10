@@ -10,6 +10,7 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub struct ConnectionRemovalJob {
     pub id: String,
+    pub connection_id: String,
     pub delete_uploaded_files: bool,
     pub state: String,
     pub object_count: u64,
@@ -28,6 +29,14 @@ impl MetadataStore {
     ) -> Result<ConnectionRemovalJob, MetadataError> {
         self.with_connection(|connection| {
             let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let connection_id = tx
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key='telegram_active_connection_id'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .unwrap_or_else(|| "legacy".to_string());
             let active: Option<String> = tx
                 .query_row(
                     "SELECT id FROM connection_removal_jobs WHERE state IN ('pending','running') ORDER BY requested_at LIMIT 1",
@@ -42,8 +51,8 @@ impl MetadataStore {
             let id = Uuid::new_v4().to_string();
             let requested_at = now();
             tx.execute(
-                "INSERT INTO connection_removal_jobs(id,delete_uploaded_files,state,object_count,requested_at,updated_at) VALUES (?1,?2,'pending',0,?3,?3)",
-                params![id, delete_uploaded_files, requested_at],
+                "INSERT INTO connection_removal_jobs(id,connection_id,delete_uploaded_files,state,object_count,requested_at,updated_at) VALUES (?1,?2,?3,'pending',0,?4,?4)",
+                params![id, connection_id, delete_uploaded_files, requested_at],
             )?;
 
             let mut manifests = Vec::new();
@@ -102,8 +111,8 @@ impl MetadataStore {
                 )?;
                 if delete_uploaded_files {
                     tx.execute(
-                        "INSERT OR IGNORE INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,0,'evidence',?3)",
-                        params![upload_id, format!("evidence:{upload_id}"), requested_at],
+                        "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,0,'evidence',?4)",
+                        params![upload_id, connection_id, format!("evidence:{upload_id}"), requested_at],
                     )?;
                     let mut statement = tx.prepare(
                         "SELECT part_json FROM multipart_parts WHERE upload_id=?1 ORDER BY part_number",
@@ -113,8 +122,8 @@ impl MetadataStore {
                         let part = serde_json::from_str::<crate::multipart::MultipartPart>(&row?)?;
                         if part.telegram.message_id > 0 {
                             tx.execute(
-                                "INSERT OR IGNORE INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,'message',?4)",
-                                params![upload_id, part.telegram.peer_id, part.telegram.message_id, requested_at],
+                                "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,?4,'message',?5)",
+                                params![upload_id, connection_id, part.telegram.peer_id, part.telegram.message_id, requested_at],
                             )?;
                         }
                     }
@@ -146,6 +155,7 @@ impl MetadataStore {
             tx.commit()?;
             Ok(ConnectionRemovalJob {
                 id,
+                connection_id,
                 delete_uploaded_files,
                 state: "pending".to_string(),
                 object_count: (manifests.len() + multipart_uploads.len()) as u64,
@@ -161,12 +171,22 @@ impl MetadataStore {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT id,delete_uploaded_files,state,object_count,requested_at,updated_at,completed_at,error FROM connection_removal_jobs WHERE state IN ('pending','running') ORDER BY requested_at LIMIT 1",
+                    "SELECT id,connection_id,delete_uploaded_files,state,object_count,requested_at,updated_at,completed_at,error FROM connection_removal_jobs WHERE state NOT IN ('completed') ORDER BY CASE WHEN state IN ('pending','running') THEN 0 ELSE 1 END, requested_at LIMIT 1",
                     [],
                     connection_removal_row,
                 )
                 .optional()
                 .map_err(MetadataError::from)
+        })
+    }
+
+    pub(crate) fn connection_removal_in_progress(&self) -> Result<bool, MetadataError> {
+        self.with_connection(|connection| {
+            Ok(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM connection_removal_jobs WHERE state IN ('pending','running'))",
+                [],
+                |row| row.get(0),
+            )?)
         })
     }
 
@@ -204,7 +224,7 @@ impl MetadataStore {
     ) -> Result<(), MetadataError> {
         self.with_connection(|connection| {
             connection.execute(
-                "UPDATE connection_removal_jobs SET state=?2,updated_at=?3,completed_at=CASE WHEN ?2='completed' THEN ?3 ELSE completed_at END,error=?4 WHERE id=?1 AND state IN ('pending','running')",
+                "UPDATE connection_removal_jobs SET state=?2,updated_at=?3,completed_at=CASE WHEN ?2='completed' THEN ?3 ELSE completed_at END,error=?4 WHERE id=?1 AND state NOT IN ('completed')",
                 params![job_id, state, now(), error],
             )?;
             Ok(())
@@ -215,13 +235,14 @@ impl MetadataStore {
 fn connection_removal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRemovalJob> {
     Ok(ConnectionRemovalJob {
         id: row.get(0)?,
-        delete_uploaded_files: row.get(1)?,
-        state: row.get(2)?,
-        object_count: row.get(3)?,
-        requested_at: row.get(4)?,
-        updated_at: row.get(5)?,
-        completed_at: row.get(6)?,
-        error: row.get(7)?,
+        connection_id: row.get(1)?,
+        delete_uploaded_files: row.get(2)?,
+        state: row.get(3)?,
+        object_count: row.get(4)?,
+        requested_at: row.get(5)?,
+        updated_at: row.get(6)?,
+        completed_at: row.get(7)?,
+        error: row.get(8)?,
     })
 }
 
@@ -263,8 +284,17 @@ mod tests {
     #[test]
     fn removal_hides_namespace_and_queues_remote_cleanup() {
         let store = store_with_object();
+        store
+            .set_telegram_bootstrap_settings(&crate::metadata::TelegramBootstrapSettings {
+                telegram_api_id: Some("123".into()),
+                telegram_api_hash: Some("hash".into()),
+                telegram_storage_chat_id: Some("-1001234567890".into()),
+                ..Default::default()
+            })
+            .expect("settings");
         let job = store.begin_connection_removal(true).expect("begin removal");
         assert!(job.delete_uploaded_files);
+        assert_ne!(job.connection_id, "legacy");
         assert_eq!(job.object_count, 1);
         assert!(store.list_buckets().expect("buckets").is_empty());
         assert_eq!(store.status().expect("status").active_objects, 0);

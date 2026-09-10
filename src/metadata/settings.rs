@@ -3,6 +3,7 @@ use super::{MetadataError, MetadataStore};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelegramBootstrapSettings {
@@ -48,6 +49,19 @@ impl MetadataStore {
         let json = serde_json::to_string(settings)?;
         self.with_connection(|connection| {
             let tx = connection.transaction()?;
+            let connection_id: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key='telegram_active_connection_id'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if connection_id.is_none() {
+                tx.execute(
+                    "INSERT INTO app_settings(key,value,updated_at) VALUES('telegram_active_connection_id',?1,?2)",
+                    params![Uuid::new_v4().to_string(), timestamp_now()?],
+                )?;
+            }
             tx.execute(
                 r#"
                 INSERT INTO app_settings (key, value, updated_at)
@@ -67,6 +81,29 @@ impl MetadataStore {
         self.with_connection(|connection| {
             connection.execute(
                 "DELETE FROM app_settings WHERE key='telegram_bootstrap'",
+                [],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn active_connection_id(&self) -> Result<Option<String>, MetadataError> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key='telegram_active_connection_id'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(MetadataError::from)
+        })
+    }
+
+    pub fn clear_active_connection_id(&self) -> Result<(), MetadataError> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "DELETE FROM app_settings WHERE key='telegram_active_connection_id'",
                 [],
             )?;
             Ok(())

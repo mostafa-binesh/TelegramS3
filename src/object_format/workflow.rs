@@ -333,7 +333,14 @@ impl ObjectFormatService {
         let Some(job) = self.metadata.connection_removal_job()? else {
             return Ok(());
         };
-        if job.delete_uploaded_files && self.metadata.connection_removal_cleanup_pending(&job.id)? {
+        if job.state == "remote_cleanup_pending" {
+            if !self.metadata.connection_removal_cleanup_pending(&job.id)? {
+                self.metadata
+                    .finish_connection_removal(&job.id, "completed", None)?;
+            }
+            return Ok(());
+        }
+        if !matches!(job.state.as_str(), "pending" | "running") {
             return Ok(());
         }
 
@@ -351,16 +358,28 @@ impl ObjectFormatService {
                 }
             }
         }
-        let _ = fs::remove_dir_all(self.data_dir.join(STAGING_ROOT));
-        let _ = fs::remove_dir_all(self.data_dir.join(MULTIPART_ROOT));
-        fs::create_dir_all(self.data_dir.join(STAGING_ROOT))?;
-        fs::create_dir_all(self.data_dir.join(MULTIPART_ROOT))?;
-
-        self.metadata.clear_telegram_bootstrap_settings()?;
-        self.set_storage_chat_id(String::new());
-        self.transport_manager.disconnect().await;
+        let active_connection_matches = match self.metadata.active_connection_id()? {
+            Some(active) => active == job.connection_id,
+            None => {
+                job.connection_id == "legacy"
+                    && self.metadata.telegram_bootstrap_settings()?.is_some()
+            }
+        };
+        if active_connection_matches {
+            self.metadata.clear_telegram_bootstrap_settings()?;
+            self.metadata.clear_active_connection_id()?;
+            self.set_storage_chat_id(String::new());
+            self.transport_manager.disconnect().await;
+        }
+        let next_state = if job.delete_uploaded_files
+            && self.metadata.connection_removal_cleanup_pending(&job.id)?
+        {
+            "remote_cleanup_pending"
+        } else {
+            "completed"
+        };
         self.metadata
-            .finish_connection_removal(&job.id, "completed", None)?;
+            .finish_connection_removal(&job.id, next_state, None)?;
         Ok(())
     }
 
@@ -617,6 +636,14 @@ impl ObjectFormatService {
         &self,
         target: &CleanupTarget,
     ) -> Result<(), ObjectFormatError> {
+        if self.metadata.active_connection_id()?.as_deref() != Some(target.connection_id.as_str()) {
+            self.metadata.quarantine_cleanup(
+                target.id,
+                &target.lease,
+                "Cleanup belongs to a detached Telegram connection; recovery material retained",
+            )?;
+            return Ok(());
+        }
         if Uuid::parse_str(&target.object_id)
             .ok()
             .is_some_and(|object_id| self.is_read_pinned(object_id))

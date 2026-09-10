@@ -10,6 +10,27 @@ pub(crate) fn now() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
 }
 
+fn active_connection_id(tx: &rusqlite::Transaction<'_>) -> Result<String, MetadataError> {
+    let has_settings: Option<String> = tx
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='app_settings'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if has_settings.is_none() {
+        return Ok("legacy".to_string());
+    }
+    Ok(tx
+        .query_row(
+            "SELECT value FROM app_settings WHERE key='telegram_active_connection_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "legacy".to_string()))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TransferJob {
     pub id: String,
@@ -42,6 +63,7 @@ pub struct TransferWriteConditionals {
 pub(crate) struct CleanupTarget {
     pub id: i64,
     pub object_id: String,
+    pub connection_id: String,
     pub peer_id: String,
     pub message_id: i64,
     pub kind: String,
@@ -85,14 +107,15 @@ pub(crate) fn enqueue_part_cleanup(
     tx: &rusqlite::Transaction<'_>,
     part: &crate::multipart::MultipartPart,
 ) -> Result<(), MetadataError> {
+    let connection_id = active_connection_id(tx)?;
     let cleanup_object_id = part
         .manifest
         .as_ref()
         .map(|m| m.object_id.to_string())
         .unwrap_or_else(|| part.upload_id.to_string());
     tx.execute(
-        "INSERT OR IGNORE INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,0,'evidence',?3)",
-        params![cleanup_object_id, format!("evidence:{cleanup_object_id}"), now() + 7 * 86400],
+        "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,0,'evidence',?4)",
+        params![cleanup_object_id, connection_id, format!("evidence:{cleanup_object_id}"), now() + 7 * 86400],
     )?;
     let mut locations = vec![part.telegram.clone()];
     if let Some(m) = &part.manifest {
@@ -103,7 +126,7 @@ pub(crate) fn enqueue_part_cleanup(
         }));
     }
     for l in locations {
-        tx.execute("INSERT OR IGNORE INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,'message',?4)",params![cleanup_object_id,l.peer_id,l.message_id,now()+7*86400])?;
+        tx.execute("INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,?4,'message',?5)",params![cleanup_object_id,connection_id,l.peer_id,l.message_id,now()+7*86400])?;
     }
     Ok(())
 }
@@ -129,22 +152,23 @@ pub(crate) fn enqueue_manifest_cleanup_at(
     due_at: i64,
 ) -> Result<(), MetadataError> {
     let object_id = manifest.object_id.to_string();
+    let connection_id = active_connection_id(tx)?;
     tx.execute(
-        "INSERT OR IGNORE INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,0,'evidence',?3)",
-        params![object_id, format!("evidence:{object_id}"), due_at],
+        "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,0,'evidence',?4)",
+        params![object_id, connection_id, format!("evidence:{object_id}"), due_at],
     )?;
     for chunk in &manifest.chunks {
         if chunk.telegram_message_id > 0 {
             tx.execute(
-                "INSERT OR IGNORE INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,'message',?4)",
-                params![object_id, chunk.telegram_peer_id, chunk.telegram_message_id, due_at],
+                "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,?4,'message',?5)",
+                params![object_id, connection_id, chunk.telegram_peer_id, chunk.telegram_message_id, due_at],
             )?;
         }
     }
     if manifest.telegram.message_id > 0 {
         tx.execute(
-            "INSERT OR IGNORE INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,'message',?4)",
-            params![object_id, manifest.telegram.peer_id, manifest.telegram.message_id, due_at],
+            "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,?4,'message',?5)",
+            params![object_id, connection_id, manifest.telegram.peer_id, manifest.telegram.message_id, due_at],
         )?;
     }
     Ok(())
@@ -199,19 +223,19 @@ impl MetadataStore {
     pub(crate) fn claim_cleanup(&self) -> Result<Option<CleanupTarget>, MetadataError> {
         self.with_connection(|c| {
             let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let row: Option<(i64, String, String, i64, String)> = tx.query_row(
-                "SELECT t.id,t.object_id,t.peer_id,t.message_id,t.target_kind FROM cleanup_targets t WHERE t.completed=0 AND ((t.state IN ('pending','retry_wait') AND t.due_at<=?1 AND t.next_retry<=?1) OR (t.state='running' AND t.lease_until<?1)) AND (t.target_kind='evidence' OR EXISTS(SELECT 1 FROM cleanup_targets e WHERE e.object_id=t.object_id AND e.target_kind='evidence' AND e.completed=1)) ORDER BY CASE t.target_kind WHEN 'evidence' THEN 0 ELSE 1 END,t.id LIMIT 1",
+            let row: Option<(i64, String, String, String, i64, String)> = tx.query_row(
+                "SELECT t.id,t.object_id,t.connection_id,t.peer_id,t.message_id,t.target_kind FROM cleanup_targets t WHERE t.completed=0 AND ((t.state IN ('pending','retry_wait') AND t.due_at<=?1 AND t.next_retry<=?1) OR (t.state='running' AND t.lease_until<?1)) AND (t.target_kind='evidence' OR EXISTS(SELECT 1 FROM cleanup_targets e WHERE e.object_id=t.object_id AND e.target_kind='evidence' AND e.completed=1)) ORDER BY CASE t.target_kind WHEN 'evidence' THEN 0 ELSE 1 END,t.id LIMIT 1",
                 [now()],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
             ).optional()?;
-            let Some((id, object_id, peer_id, message_id, kind)) = row else { return Ok(None); };
+            let Some((id, object_id, connection_id, peer_id, message_id, kind)) = row else { return Ok(None); };
             let lease = Uuid::new_v4().to_string();
             tx.execute(
                 "UPDATE cleanup_targets SET state='running',lease=?2,lease_until=?3+120,attempts=attempts+1,error=NULL WHERE id=?1",
                 params![id, lease, now()],
             )?;
             tx.commit()?;
-            Ok(Some(CleanupTarget { id, object_id, peer_id, message_id, kind, lease }))
+            Ok(Some(CleanupTarget { id, object_id, connection_id, peer_id, message_id, kind, lease }))
         })
     }
 
@@ -646,6 +670,7 @@ impl MetadataStore {
                 |r| r.get(0),
             ).optional()?;
             let Some(object_id) = object_id else { return Ok(false); };
+            let connection_id = active_connection_id(&tx)?;
             let locations = {
                 let mut statement = tx.prepare("SELECT location_json FROM transfer_chunks WHERE job_id=?1")?;
                 statement.query_map([id], |r| r.get::<_, String>(0))?
@@ -653,14 +678,14 @@ impl MetadataStore {
             };
             if !locations.is_empty() {
                 tx.execute(
-                    "INSERT OR IGNORE INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,0,'evidence',?3)",
-                    params![object_id, format!("evidence:{object_id}"), now()],
+                    "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,0,'evidence',?4)",
+                    params![object_id, connection_id, format!("evidence:{object_id}"), now()],
                 )?;
                 for json in locations {
                     let location: TelegramLocation = serde_json::from_str(&json)?;
                     tx.execute(
-                        "INSERT OR IGNORE INTO cleanup_targets(object_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,'message',?4)",
-                        params![object_id, location.peer_id, location.message_id, now()],
+                        "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,?4,'message',?5)",
+                        params![object_id, connection_id, location.peer_id, location.message_id, now()],
                     )?;
                 }
             }
@@ -763,6 +788,13 @@ mod tests {
     #[test]
     fn cleanup_outbox_follows_evidence_and_retry_state_machine() {
         let s = store();
+        s.set_telegram_bootstrap_settings(&crate::metadata::TelegramBootstrapSettings {
+            telegram_api_id: Some("123".into()),
+            telegram_api_hash: Some("hash".into()),
+            telegram_storage_chat_id: Some("-1001234567890".into()),
+            ..Default::default()
+        })
+        .unwrap();
         let manifest = ObjectManifest::committed(CommittedManifestArgs {
             bucket: "test".into(),
             key: "key".into(),
@@ -784,6 +816,7 @@ mod tests {
 
         let evidence = s.claim_cleanup().unwrap().expect("evidence target");
         assert_eq!(evidence.kind, "evidence");
+        assert_ne!(evidence.connection_id, "legacy");
         s.complete_cleanup(
             evidence.id,
             &evidence.lease,

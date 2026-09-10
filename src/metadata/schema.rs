@@ -285,6 +285,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
             object_id TEXT NOT NULL,
             peer_id TEXT NOT NULL,
             message_id INTEGER NOT NULL,
+            connection_id TEXT NOT NULL DEFAULT 'legacy',
             target_kind TEXT NOT NULL DEFAULT 'message',
             due_at INTEGER NOT NULL,
             state TEXT NOT NULL DEFAULT 'pending',
@@ -324,6 +325,7 @@ fn ensure_connection_removal_schema(connection: &mut Connection) -> Result<(), M
         r#"
         CREATE TABLE IF NOT EXISTS connection_removal_jobs (
             id TEXT PRIMARY KEY,
+            connection_id TEXT NOT NULL DEFAULT 'legacy',
             delete_uploaded_files INTEGER NOT NULL,
             state TEXT NOT NULL,
             object_count INTEGER NOT NULL DEFAULT 0,
@@ -343,6 +345,12 @@ fn ensure_connection_removal_schema(connection: &mut Connection) -> Result<(), M
             ON connection_removal_objects(object_id);
         "#,
     )?;
+    if !column_exists(connection, "connection_removal_jobs", "connection_id")? {
+        connection.execute(
+            "ALTER TABLE connection_removal_jobs ADD COLUMN connection_id TEXT NOT NULL DEFAULT 'legacy'",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -351,6 +359,7 @@ fn ensure_phase10_schema(connection: &mut Connection) -> Result<(), MetadataErro
         return Ok(());
     }
     for (column, definition) in [
+        ("connection_id", "TEXT NOT NULL DEFAULT 'legacy'"),
         ("target_kind", "TEXT NOT NULL DEFAULT 'message'"),
         ("state", "TEXT NOT NULL DEFAULT 'pending'"),
         ("attempts", "INTEGER NOT NULL DEFAULT 0"),
@@ -563,6 +572,7 @@ mod tests {
                     object_id TEXT NOT NULL,
                     peer_id TEXT NOT NULL,
                     message_id INTEGER NOT NULL,
+                    connection_id TEXT NOT NULL DEFAULT 'legacy',
                     target_kind TEXT NOT NULL DEFAULT 'message',
                     due_at INTEGER NOT NULL,
                     state TEXT NOT NULL DEFAULT 'pending',

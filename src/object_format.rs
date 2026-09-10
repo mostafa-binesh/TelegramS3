@@ -2079,7 +2079,7 @@ impl ObjectFormatService {
     }
 
     fn ensure_connection_not_removing(&self) -> Result<(), ObjectFormatError> {
-        if self.metadata.connection_removal_job()?.is_some() {
+        if self.metadata.connection_removal_in_progress()? {
             return Err(ObjectFormatError::InvalidPlan(
                 "Telegram connection removal is in progress".to_string(),
             ));
