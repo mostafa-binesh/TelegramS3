@@ -158,7 +158,8 @@
     setItem(index, { cancelled: true, paused: false, busy: false, state: 'cancelled', error: undefined });
     controllers.get(index)?.abort();
     if (item.receptionId) {
-      try { await abortResumableUpload(item.receptionId, csrf); } catch { /* the session may already have expired */ }
+      const receptionId = item.receptionId;
+      void abortResumableUpload(receptionId, csrf).catch(() => { /* the session may already have expired */ });
       forget(item);
     }
   }
