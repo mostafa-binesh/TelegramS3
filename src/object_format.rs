@@ -2135,6 +2135,27 @@ impl ObjectFormatService {
     ) -> Result<TelegramLocation, ObjectFormatError> {
         let transport = self.transport_manager.current().await?;
         if transport.is_mock() {
+            // The mock runtime is also the deterministic fault-injection
+            // backend used by release tests. It is intentionally controlled
+            // only through an explicit test-prefixed environment variable and
+            // is never consulted by a live Telegram transport.
+            let fault = std::env::var("TELEGRAM_MOCK_FAULT").ok();
+            if let Some(fault) = fault.as_deref() {
+                let message = match fault {
+                    "peer_lookup" => "storage peer lookup failed: scripted test fault",
+                    "timeout" => "request timeout: scripted test fault",
+                    "proxy_disconnect" => "proxy disconnected: scripted test fault",
+                    "flood_wait" => "FLOOD_WAIT_7: scripted test fault",
+                    "auth_key_unregistered" => "AUTH_KEY_UNREGISTERED: scripted test fault",
+                    "missing" => "remote document was not acknowledged: scripted test fault",
+                    _ => "",
+                };
+                if !message.is_empty() {
+                    return Err(ObjectFormatError::Telegram(
+                        crate::telegram::TelegramTransportError::Rpc(message.to_string()),
+                    ));
+                }
+            }
             let message_id = self.next_mock_message_id()?;
             let mock_dir = self.mock_telegram_dir();
             fs::create_dir_all(&mock_dir)?;
@@ -2144,6 +2165,22 @@ impl ObjectFormatService {
                 mock_dir.join(format!("{message_id}.json")),
                 serde_json::to_vec(&serde_json::json!({ "file_name": file_name }))?,
             )?;
+            if fault.as_deref() == Some("ambiguous") {
+                return Err(ObjectFormatError::Telegram(
+                    crate::telegram::TelegramTransportError::Rpc(
+                        "request timeout after remote send: scripted ambiguous acknowledgement"
+                            .to_string(),
+                    ),
+                ));
+            }
+            if fault.as_deref() == Some("byte_collision") {
+                fs::write(&destination, b"different encrypted bytes")?;
+                return Err(ObjectFormatError::Telegram(
+                    crate::telegram::TelegramTransportError::Rpc(
+                        "request timeout after remote send: scripted byte collision".to_string(),
+                    ),
+                ));
+            }
             return Ok(TelegramLocation {
                 peer_id: self.storage_chat_id()?,
                 message_id: i64::from(message_id),
@@ -2197,6 +2234,13 @@ impl ObjectFormatService {
     async fn download_message_bytes(&self, message_id: i32) -> Result<Vec<u8>, ObjectFormatError> {
         let transport = self.transport_manager.current().await?;
         if transport.is_mock() {
+            if let Ok(fault) = std::env::var("TELEGRAM_MOCK_READ_FAULT") {
+                return Err(ObjectFormatError::Telegram(
+                    crate::telegram::TelegramTransportError::Rpc(format!(
+                        "{fault}: scripted mock read fault for message {message_id}"
+                    )),
+                ));
+            }
             let path = self.mock_telegram_dir().join(format!("{message_id}.bin"));
             if !path.exists() {
                 return Err(ObjectFormatError::InvalidRead(format!(
@@ -2377,6 +2421,7 @@ mod tests {
     use crate::manifest::CommittedManifestArgs;
     use crate::metadata::TelegramBootstrapSettings;
     use crate::multipart::{MultipartCompletionPlan, MultipartPartPlan};
+    use crate::object_format::workflow::RemoteReconciliation;
     use crate::telegram::{
         TelegramConnectionHealth, TelegramConnectionState, TelegramTransportManager,
     };
@@ -2445,6 +2490,48 @@ mod tests {
         let checksum = sha256_hex(b"hello world");
         let decoded = parse_checksum_hex(&checksum).expect("checksum");
         assert_eq!(decoded.len(), 32);
+    }
+
+    #[test]
+    fn chunk_plan_covers_empty_and_all_boundary_lengths() {
+        for (content_length, expected_sizes) in [
+            (0, Vec::new()),
+            (1, vec![1]),
+            (1023, vec![1023]),
+            (1024, vec![1024]),
+            (1025, vec![1024, 1]),
+            (2048, vec![1024, 1024]),
+            (2049, vec![1024, 1024, 1]),
+        ] {
+            let plan = ObjectFormatService::plan_chunks(content_length, 1024).expect("plan");
+            assert_eq!(
+                plan.chunks
+                    .iter()
+                    .map(|chunk| chunk.size)
+                    .collect::<Vec<_>>(),
+                expected_sizes,
+                "content length {content_length}"
+            );
+            assert_eq!(
+                plan.chunks
+                    .iter()
+                    .map(|chunk| chunk.offset)
+                    .collect::<Vec<_>>(),
+                plan.chunks
+                    .iter()
+                    .scan(0, |offset, chunk| {
+                        let current = *offset;
+                        *offset += chunk.size;
+                        Some(current)
+                    })
+                    .collect::<Vec<_>>(),
+                "content length {content_length}"
+            );
+            assert_eq!(
+                plan.chunks.iter().map(|chunk| chunk.size).sum::<u64>(),
+                content_length
+            );
+        }
     }
 
     #[tokio::test]
@@ -2748,6 +2835,83 @@ mod tests {
 
         let stored = fs::read(tempdir.path().join("data/mock-telegram/1.bin")).expect("mock blob");
         assert_ne!(stored, payload);
+    }
+
+    #[tokio::test]
+    async fn mock_remote_reconciliation_requires_token_and_exact_bytes() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        let local = tempdir.path().join("data/reconcile.bin");
+        fs::write(&local, b"local encrypted bytes").expect("local bytes");
+        let remote = tempdir.path().join("data/mock-telegram");
+        fs::create_dir_all(&remote).expect("mock directory");
+        fs::write(remote.join("41.bin"), b"local encrypted bytes").expect("remote bytes");
+        fs::write(
+            remote.join("41.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "file_name": "telegram-s3-test-token"
+            }))
+            .expect("sidecar"),
+        )
+        .expect("remote sidecar");
+
+        let match_result = service
+            .reconcile_remote_file(&local, "telegram-s3-test-token", 0)
+            .await
+            .expect("matching remote document");
+        assert!(matches!(
+            match_result,
+            RemoteReconciliation::Match(TelegramLocation { message_id: 41, .. })
+        ));
+
+        fs::write(remote.join("42.bin"), b"different bytes").expect("collision bytes");
+        fs::write(
+            remote.join("42.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "file_name": "telegram-s3-collision-token"
+            }))
+            .expect("collision sidecar"),
+        )
+        .expect("collision remote sidecar");
+        let collision = service
+            .reconcile_remote_file(&local, "telegram-s3-collision-token", 0)
+            .await
+            .expect_err("byte collision must remain recovery-required");
+        assert!(collision.to_string().contains("token collision"));
+
+        let absent = service
+            .reconcile_remote_file(&local, "telegram-s3-absent-token", 0)
+            .await
+            .expect("absent scan");
+        assert!(matches!(absent, RemoteReconciliation::Absent));
+    }
+
+    #[tokio::test]
+    async fn corrupt_mock_remote_payload_is_rejected_on_read() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        let manifest = service
+            .put_bytes("bucket", "corrupt.txt", "text/plain", b"verified payload")
+            .await
+            .expect("put");
+        let chunk = manifest.chunks.first().expect("chunk").telegram_message_id;
+        fs::write(
+            tempdir
+                .path()
+                .join(format!("data/mock-telegram/{chunk}.bin")),
+            b"corrupted remote bytes",
+        )
+        .expect("corrupt remote payload");
+
+        let error = service
+            .read_bytes("bucket", "corrupt.txt", 0..manifest.content_length)
+            .await
+            .expect_err("corrupt remote payload must fail closed");
+        assert!(
+            error.to_string().contains("decrypt")
+                || error.to_string().contains("checksum")
+                || error.to_string().contains("aead")
+        );
     }
 
     #[tokio::test]

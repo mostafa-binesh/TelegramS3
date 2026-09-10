@@ -2,7 +2,8 @@ use super::*;
 use crate::durable::{CleanupTarget, TransferJob, TransferWriteConditionals};
 use std::sync::atomic::Ordering;
 
-enum RemoteReconciliation {
+#[derive(Debug)]
+pub(crate) enum RemoteReconciliation {
     Match(TelegramLocation),
     Absent,
 }
@@ -653,7 +654,7 @@ impl ObjectFormatService {
         Ok(())
     }
 
-    async fn reconcile_remote_file(
+    pub(crate) async fn reconcile_remote_file(
         &self,
         path: &std::path::Path,
         token: &str,

@@ -542,8 +542,14 @@ impl MetadataStore {
                 "UPDATE transfer_jobs SET state='recovery_required',lease=NULL,lease_until=0,error='Telegram acknowledgement is unknown; automatic reconciliation is pending' WHERE state IN ('uploading','committing') AND lease_until<?1 AND EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=transfer_jobs.id AND a.state IN ('sending','unknown'))",
                 [now()],
             )?;
+            // A worker can lose its lease after it has already moved the job to
+            // recovery_required. In that case the job no longer has an active
+            // lease, so the normal uploading/committing transition above will
+            // not run on the next process start. Normalize the durable send
+            // attempt independently of the old lease so reconciliation can
+            // make progress instead of leaving a permanent `sending` row.
             tx.execute(
-                "UPDATE transfer_send_attempts SET state='unknown',error_kind='lease_expired',error='Worker lease expired before Telegram acknowledgement',finished_at=?1 WHERE state='sending' AND job_id IN (SELECT id FROM transfer_jobs WHERE state='recovery_required' AND error='Telegram acknowledgement is unknown; automatic reconciliation is pending')",
+                "UPDATE transfer_send_attempts SET state='unknown',error_kind='lease_expired',error='Worker lease expired before Telegram acknowledgement',finished_at=?1 WHERE state='sending' AND EXISTS (SELECT 1 FROM transfer_jobs WHERE transfer_jobs.id=transfer_send_attempts.job_id AND ((transfer_jobs.state='recovery_required' AND transfer_jobs.lease IS NULL) OR (transfer_jobs.state IN ('uploading','committing') AND transfer_jobs.lease_until<?1)))",
                 [now()],
             )?;
             tx.execute(
@@ -561,7 +567,14 @@ impl MetadataStore {
                 [now()],
                 |r| r.get(0),
             ).optional()?;
-            let Some(id) = id else { return Ok(None); };
+            let Some(id) = id else {
+                // The normalization above is itself durable recovery work.
+                // Commit it even when there is no newly claimable transfer;
+                // otherwise a recovery-required job with no active lease
+                // rolls back to the stuck `sending` state on every poll.
+                tx.commit()?;
+                return Ok(None);
+            };
             let lease = Uuid::new_v4().to_string();
             tx.execute("UPDATE transfer_jobs SET state='uploading',lease=?2,lease_until=?3+120,attempts=attempts+1,updated_at=?3 WHERE id=?1",params![id,lease,now()])?;
             let job = tx.query_row(&format!("SELECT {COLUMNS} FROM transfer_jobs WHERE id=?1"),[id],row_job)?;
@@ -927,6 +940,95 @@ mod tests {
                 1
             )
         );
+    }
+
+    #[test]
+    fn recovery_required_without_lease_normalizes_inflight_send_for_reconciliation() {
+        let s = store();
+        let id = s
+            .begin_transfer(Uuid::new_v4(), "test", "stuck.bin")
+            .unwrap();
+        s.reserve_staging(&id, 8, 8).unwrap();
+        s.queue_transfer(&id, Uuid::new_v4(), 1).unwrap();
+        let job = s.claim_transfer().unwrap().unwrap();
+        let lease = job.lease.as_deref().unwrap();
+        let attempt = s.begin_send_attempt(&id, lease, 237).unwrap();
+
+        // Reproduce the persisted production state: the worker has already
+        // fenced the job as recovery-required, but the send row remained in
+        // `sending` because the lease-fenced transition could not run.
+        s.with_connection(|connection| {
+            connection.execute(
+                "UPDATE transfer_jobs SET state='recovery_required',lease=NULL,lease_until=0,error='Telegram acknowledgement is unknown; automatic reconciliation is pending' WHERE id=?1",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let before: (String, Option<String>, String) = s
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT j.state,j.lease,a.state FROM transfer_jobs j JOIN transfer_send_attempts a ON a.job_id=j.id WHERE j.id=?1",
+                    [&id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(before, ("recovery_required".into(), None, "sending".into()));
+
+        assert!(s.claim_transfer().unwrap().is_none());
+        let after: (String, Option<String>, String) = s
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT j.state,j.lease,a.state FROM transfer_jobs j JOIN transfer_send_attempts a ON a.job_id=j.id WHERE j.id=?1",
+                    [&id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(after, ("recovery_required".into(), None, "unknown".into()));
+        let unresolved = s.unresolved_send_attempts(&id).unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].order, 237);
+        assert_eq!(unresolved[0].token, attempt.token);
+
+        s.resolve_send_attempt(&unresolved[0], None, Some("remote document absent"))
+            .unwrap();
+        assert!(s.queue_after_reconciliation(&id).unwrap());
+        let repaired = s.transfer(&id).unwrap().unwrap();
+        assert_eq!(repaired.state, "queued");
+        assert_eq!(repaired.chunks_done, 0);
+    }
+
+    #[test]
+    fn retry_action_is_not_permanently_blocked_by_stale_sending_row() {
+        let s = store();
+        let id = s
+            .begin_transfer(Uuid::new_v4(), "test", "retry.bin")
+            .unwrap();
+        s.reserve_staging(&id, 8, 8).unwrap();
+        s.queue_transfer(&id, Uuid::new_v4(), 1).unwrap();
+        let job = s.claim_transfer().unwrap().unwrap();
+        let lease = job.lease.as_deref().unwrap();
+        let attempt = s.begin_send_attempt(&id, lease, 0).unwrap();
+        s.with_connection(|connection| {
+            connection.execute(
+                "UPDATE transfer_jobs SET state='recovery_required',lease=NULL,lease_until=0,error='Telegram acknowledgement is unknown; automatic reconciliation is pending',operation_id=?2 WHERE id=?1",
+                rusqlite::params![id, Uuid::new_v4().to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(!s.transfer_action(&id, "retry").unwrap());
+        assert!(s.claim_transfer().unwrap().is_none());
+        let unresolved = s.unresolved_send_attempts(&id).unwrap();
+        assert_eq!(unresolved[0].id, attempt.id);
+        s.resolve_send_attempt(&unresolved[0], None, Some("remote document absent"))
+            .unwrap();
+        assert!(s.queue_after_reconciliation(&id).unwrap());
+        assert_eq!(s.transfer(&id).unwrap().unwrap().state, "queued");
     }
 
     #[test]
