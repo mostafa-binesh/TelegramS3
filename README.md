@@ -242,8 +242,9 @@ Per-object expiry is available as a Telegram S3 extension. Send either
 `x-amz-meta-telegram-s3-expires-at: <RFC3339 timestamp>` or
 `x-amz-meta-telegram-s3-expires-in: <positive seconds>` on a PUT (and on
 multipart initiation). Expired objects disappear from S3/admin listings and
-return as missing on reads; their Telegram cleanup remains subject to the
-normal conservative GC policy. The admin browser exposes the same seconds-
+return as missing on reads; the background cleanup worker sweeps them into the
+evidence-first tombstone path, after which the normal retention-aware GC policy
+removes their Telegram data. The admin browser exposes the same seconds-
 based expiry control. Operators can create bearer share links from the object
 browser at `/share/<token>`, with an optional link expiry capped by the object
 expiry.

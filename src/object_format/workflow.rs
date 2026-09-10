@@ -327,6 +327,9 @@ impl ObjectFormatService {
                     break;
                 }
                 let _ = service.finalize_connection_removal().await;
+                let _ = service
+                    .metadata
+                    .tombstone_expired_active_manifests(time::OffsetDateTime::now_utc());
                 match service.metadata.claim_cleanup() {
                     Ok(Some(target)) => {
                         if let Err(error) = service.process_cleanup_target(&target).await {

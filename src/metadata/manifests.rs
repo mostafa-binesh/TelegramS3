@@ -437,6 +437,77 @@ impl MetadataStore {
         })
     }
 
+    /// Tombstone expired objects that are still the active version of their key.
+    ///
+    /// Expiry discovery and removal of the active pointer happen in one
+    /// metadata transaction. Remote locations are handed to the existing
+    /// evidence-first cleanup outbox.
+    pub fn tombstone_expired_active_manifests(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<u64, MetadataError> {
+        self.with_connection(|connection| {
+            let tx = connection.transaction()?;
+            let candidates = {
+                let mut statement = tx.prepare(
+                    r#"
+                    SELECT m.object_id, m.manifest_json
+                    FROM active_objects a
+                    JOIN object_manifests m ON m.object_id = a.object_id
+                    WHERE m.commit_state = 'committed'
+                      AND m.connection_id = COALESCE(
+                          (SELECT value FROM app_settings WHERE key='telegram_active_connection_id'),
+                          'legacy'
+                      )
+                    "#,
+                )?;
+                statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let mut tombstoned = 0_u64;
+            for (object_id, manifest_json) in candidates {
+                let mut manifest: ObjectManifest = serde_json::from_str(&manifest_json)?;
+                if !manifest.is_expired(now) {
+                    continue;
+                }
+                let tombstoned_at = timestamp_now()?;
+                manifest.commit_state = CommitState::Tombstoned;
+                crate::durable::enqueue_manifest_cleanup(&tx, &manifest)?;
+                let manifest_json = serde_json::to_string(&manifest)?;
+                tx.execute(
+                    r#"
+                    UPDATE object_manifests
+                    SET commit_state='tombstoned', manifest_json=?2, tombstoned_at=?3
+                    WHERE object_id=?1 AND commit_state='committed'
+                    "#,
+                    params![object_id, manifest_json, tombstoned_at],
+                )?;
+                tx.execute(
+                    "DELETE FROM active_objects WHERE object_id=?1",
+                    params![object_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM recovery_markers WHERE object_id=?1",
+                    params![object_id],
+                )?;
+                tx.execute(
+                    r#"
+                    UPDATE operation_journal
+                    SET state='tombstoned', error='object expired', updated_at=?2
+                    WHERE object_id=?1
+                    "#,
+                    params![object_id, tombstoned_at],
+                )?;
+                tombstoned += 1;
+            }
+            tx.commit()?;
+            Ok(tombstoned)
+        })
+    }
+
     pub fn get_manifest(&self, object_id: Uuid) -> Result<Option<ObjectManifest>, MetadataError> {
         let object_id = object_id.to_string();
         self.with_connection(|connection| load_manifest_by_object_id(connection, &object_id))
@@ -792,6 +863,39 @@ mod tests {
                 .expect("fetch history")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn expired_active_manifest_is_tombstoned_and_queued() {
+        let store = MetadataStore::open_in_memory().expect("open");
+        let mut manifest = sample_manifest("bucket", "expired.txt");
+        manifest.expires_at = Some(time::OffsetDateTime::now_utc() - time::Duration::seconds(1));
+        let operation_id = store
+            .stage_manifest(OperationKind::Put, manifest.clone())
+            .expect("stage");
+        store.commit_manifest(operation_id).expect("commit");
+
+        assert_eq!(
+            store
+                .tombstone_expired_active_manifests(time::OffsetDateTime::now_utc())
+                .expect("expire"),
+            1
+        );
+        assert!(
+            store
+                .get_active_manifest("bucket", "expired.txt")
+                .expect("active")
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .get_manifest(manifest.object_id)
+                .expect("history")
+                .expect("manifest")
+                .commit_state,
+            CommitState::Tombstoned
+        );
+        assert!(store.claim_cleanup().expect("cleanup claim").is_some());
     }
 
     #[test]

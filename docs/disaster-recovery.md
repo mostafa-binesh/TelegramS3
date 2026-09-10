@@ -10,8 +10,9 @@
 
 Expiry policy is recoverable because `expires_at` is embedded in each manifest,
 not only in a browser or SQLite index row. Rebuilding the index therefore
-preserves which objects are hidden. An expired object may still have Telegram
-payloads until the normal evidence-first tombstone/GC workflow removes them;
+preserves which objects are hidden. An expired object may briefly have Telegram
+payloads until the background expiry sweep creates an evidence-first tombstone
+and cleanup/GC removes them;
 do not treat an expired object as proof that its remote bytes were already
 deleted.
 
