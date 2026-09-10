@@ -14,6 +14,7 @@ pub(crate) struct ReceptionState {
     pub bucket: String,
     pub key: String,
     pub content_type: String,
+    pub expires_at: Option<OffsetDateTime>,
     pub chunks: Vec<ChunkRef>,
     pub hasher: Sha256,
     pub offset: u64,
@@ -26,6 +27,17 @@ impl ObjectFormatService {
         bucket: &str,
         key: &str,
         content_type: &str,
+    ) -> Result<ReceptionStatus, ObjectFormatError> {
+        self.begin_reception_with_expiry(bucket, key, content_type, None)
+            .await
+    }
+
+    pub async fn begin_reception_with_expiry(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: &str,
+        expires_at: Option<OffsetDateTime>,
     ) -> Result<ReceptionStatus, ObjectFormatError> {
         self.ensure_connection_not_removing()?;
         let object_id = Uuid::new_v4();
@@ -44,6 +56,7 @@ impl ObjectFormatService {
             bucket: bucket.to_string(),
             key: key.to_string(),
             content_type: content_type.to_string(),
+            expires_at,
             chunks: Vec::new(),
             hasher: Sha256::new(),
             offset: 0,
@@ -132,6 +145,7 @@ impl ObjectFormatService {
         let bucket = state.bucket.clone();
         let key = state.key.clone();
         let content_type = state.content_type.clone();
+        let expires_at = state.expires_at;
         let chunks = std::mem::take(&mut state.chunks);
         let result = self.finalize_reception(
             id,
@@ -140,6 +154,7 @@ impl ObjectFormatService {
                 bucket,
                 key,
                 content_type,
+                expires_at,
                 commit_state: CommitState::Staging,
                 chunks,
                 whole_checksum: checksum,

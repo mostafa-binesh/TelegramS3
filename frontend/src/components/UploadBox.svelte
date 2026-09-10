@@ -39,6 +39,9 @@
   let uploadStarted = false;
   let componentActive = true;
   let serverUploadCount = 0;
+  let expiresInSeconds = '';
+  let expiryError = '';
+  let selectedExpiry: number | null = null;
   const controllers = new Map<number, AbortController>();
 
   function setServerUploadActivity(active: boolean) {
@@ -102,6 +105,12 @@
 
   async function startQueued() {
     if (uploadStarted) return;
+    expiryError = '';
+    if (expiresInSeconds.trim() && (!/^\d+$/.test(expiresInSeconds.trim()) || Number(expiresInSeconds) < 1)) {
+      expiryError = 'Expiry must be a positive number of seconds.';
+      return;
+    }
+    selectedExpiry = expiresInSeconds.trim() ? Number(expiresInSeconds) : null;
     uploadStarted = true;
     try {
       for (let index = 0; index < items.length; index += 1) await doUpload(index);
@@ -124,7 +133,8 @@
           signal: controller.signal,
           receptionId: item.receptionId,
           onReception: (id) => { setItem(index, { receptionId: id, state: 'receiving' }); remember({ ...items[index], receptionId: id }); },
-          waitUntilResumed: () => waitUntilResumed(index)
+          waitUntilResumed: () => waitUntilResumed(index),
+          expiresInSeconds: selectedExpiry
         });
       } finally {
         setServerUploadActivity(false);
@@ -185,6 +195,8 @@
 
 <div class:dropzone={dragging} class="upload-box" role="region" aria-label="Drop files to upload, or choose files below" on:dragover={onDragOver} on:dragleave={onDragLeave} on:drop={onDrop}>
   <div class="upload-prompt"><span class="upload-glyph" aria-hidden="true">↑</span><div><strong>Drop files here</strong><span>Upload into {prefix ? `“${prefix}”` : 'bucket root'}</span></div><label class="choose-files"><span>Choose files</span><input class="visually-hidden" type="file" multiple accept="*/*" on:change={onInputChange} /></label></div>
+  <div class="expiry-control"><label><span>Object expiry (optional)</span><input bind:value={expiresInSeconds} type="number" min="1" step="1" placeholder="Never" aria-describedby="expiry-help" /></label><span id="expiry-help" class="fine-print">Hide this object after this many seconds.</span></div>
+  {#if expiryError}<p class="fine-print error-hint" role="alert">{expiryError}</p>{/if}
   {#if dragging}<div class="drop-hint">Release to add files</div>{/if}
   {#if items.length > 0}<div class="row-inline"><button class="primary" type="button" on:click={startQueued} disabled={uploadStarted || items.every((item) => item.jobId || item.cancelled)}>Upload {items.length}</button></div>{/if}
   {#if items.length > 0}<ul class="upload-queue">{#each items as item, i (item.fullKey + item.file.lastModified)}<li>
@@ -194,5 +206,5 @@
 </div>
 
 <style>
-  .upload-box{border:1px dashed var(--border);border-radius:var(--radius-lg);padding:16px;margin:8px 0 4px;background:rgba(255,255,255,.5);transition:background 120ms ease,border-color 120ms ease}.dropzone{background:var(--accent-soft);border-color:var(--accent-ring)}.upload-prompt{display:flex;align-items:center;gap:12px}.upload-prompt>div{display:grid;gap:4px;margin-right:auto}.upload-prompt>div span{font-size:.82rem;color:var(--muted)}.upload-glyph{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-size:1.5rem}.choose-files{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.65rem .85rem;font-weight:700;cursor:pointer;background:var(--surface)}.visually-hidden{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.drop-hint{margin-top:10px;font-weight:700;color:var(--accent)}.row-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0 0}.upload-queue{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:8px}.upload-queue li{display:grid;gap:6px;padding:9px 10px;border-radius:var(--radius-md);background:rgba(255,255,255,.8);border:1px solid var(--border)}.queue-meta{display:flex;align-items:center;justify-content:space-between;gap:8px}.queue-name{display:block;font-weight:700;word-break:break-all}.queue-sub{display:block;font-size:.82rem;color:var(--muted)}.queue-actions{display:flex;gap:4px;align-items:center}.queue-actions button{padding:.3rem .55rem;font-size:.78rem}.queue-remove{flex:0 0 auto;background:transparent;color:var(--muted);border:1px solid var(--border)}.bar-track{height:6px;border-radius:999px;background:color-mix(in srgb,var(--text) 14%,transparent);overflow:hidden}.bar-fill{height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),#12648d);transition:width 120ms linear}.error-hint{margin:0;color:var(--danger,#b00020)}@media(max-width:520px){.upload-prompt{align-items:flex-start;flex-wrap:wrap}.choose-files{margin-left:50px}}
+  .upload-box{border:1px dashed var(--border);border-radius:var(--radius-lg);padding:16px;margin:8px 0 4px;background:rgba(255,255,255,.5);transition:background 120ms ease,border-color 120ms ease}.dropzone{background:var(--accent-soft);border-color:var(--accent-ring)}.upload-prompt{display:flex;align-items:center;gap:12px}.upload-prompt>div{display:grid;gap:4px;margin-right:auto}.upload-prompt>div span{font-size:.82rem;color:var(--muted)}.upload-glyph{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-size:1.5rem}.choose-files{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.65rem .85rem;font-weight:700;cursor:pointer;background:var(--surface)}.expiry-control{display:grid;gap:4px;margin-top:14px}.expiry-control label{display:grid;grid-template-columns:minmax(150px,1fr) minmax(120px,180px);gap:10px;align-items:center}.expiry-control input{width:100%}.visually-hidden{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.drop-hint{margin-top:10px;font-weight:700;color:var(--accent)}.row-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0 0}.upload-queue{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:8px}.upload-queue li{display:grid;gap:6px;padding:9px 10px;border-radius:var(--radius-md);background:rgba(255,255,255,.8);border:1px solid var(--border)}.queue-meta{display:flex;align-items:center;justify-content:space-between;gap:8px}.queue-name{display:block;font-weight:700;word-break:break-all}.queue-sub{display:block;font-size:.82rem;color:var(--muted)}.queue-actions{display:flex;gap:4px;align-items:center}.queue-actions button{padding:.3rem .55rem;font-size:.78rem}.queue-remove{flex:0 0 auto;background:transparent;color:var(--muted);border:1px solid var(--border)}.bar-track{height:6px;border-radius:999px;background:color-mix(in srgb,var(--text) 14%,transparent);overflow:hidden}.bar-fill{height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),#12648d);transition:width 120ms linear}.error-hint{margin:0;color:var(--danger,#b00020)}@media(max-width:520px){.upload-prompt{align-items:flex-start;flex-wrap:wrap}.choose-files{margin-left:50px}.expiry-control label{grid-template-columns:1fr}}
 </style>

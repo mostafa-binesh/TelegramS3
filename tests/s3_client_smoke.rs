@@ -150,6 +150,31 @@ async fn s3_crud_list_and_range_smoke_test() {
     .await;
     assert_eq!(put_root.status, 200, "put root object");
 
+    let expiring_key = "expiring.txt";
+    let put_expiring = signed_request(
+        &tempdir,
+        &bind_addr,
+        "PUT",
+        &format!("/{bucket}/{expiring_key}"),
+        None,
+        &[("x-amz-meta-telegram-s3-expires-in", "1")],
+        b"short lived",
+    )
+    .await;
+    assert_eq!(put_expiring.status, 200, "put expiring object");
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let expired_get = signed_request(
+        &tempdir,
+        &bind_addr,
+        "GET",
+        &format!("/{bucket}/{expiring_key}"),
+        None,
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(expired_get.status, 404, "expired object must be hidden");
+
     let head = signed_request(
         &tempdir,
         &bind_addr,

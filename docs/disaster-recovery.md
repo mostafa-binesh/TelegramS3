@@ -8,6 +8,13 @@
 4. Rebuild the local index with `telegram-s3 index rebuild`.
 5. Verify object counts and checksum samples with `telegram-s3 index verify`.
 
+Expiry policy is recoverable because `expires_at` is embedded in each manifest,
+not only in a browser or SQLite index row. Rebuilding the index therefore
+preserves which objects are hidden. An expired object may still have Telegram
+payloads until the normal evidence-first tombstone/GC workflow removes them;
+do not treat an expired object as proof that its remote bytes were already
+deleted.
+
 > The same `metadata.sqlite` now also stores operator accounts, Telegram
 > bootstrap settings, connection-generation state, and session tombstones
 > (schema v8). A backup/restore of

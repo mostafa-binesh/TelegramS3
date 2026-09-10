@@ -29,6 +29,7 @@ export interface ObjectEntry {
   size: number;
   last_modified: string;
   etag: string;
+  expires_at?: string | null;
 }
 
 export interface ObjectsState {

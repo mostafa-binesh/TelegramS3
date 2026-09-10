@@ -68,6 +68,7 @@ The manifest must not depend on captions alone.
   "user_metadata": {},
   "tags": {},
   "created_at": "2026-08-29T00:00:00Z",
+  "expires_at": null,
   "checksum": {
     "algorithm": "sha256",
     "whole_object": "hex"
@@ -95,6 +96,13 @@ The manifest must not depend on captions alone.
   ]
 }
 ```
+
+`expires_at` is optional for backward-compatible manifests. When present, it
+is an RFC3339 UTC timestamp. The local index and all S3/admin read and list
+paths treat the object as missing at or after that instant, while the manifest
+and Telegram chunks remain recoverable until normal tombstone retention and
+garbage collection complete. Share-link expiry is stored separately in local
+metadata and can never extend beyond this manifest deadline.
 
 ## Encryption Envelope
 

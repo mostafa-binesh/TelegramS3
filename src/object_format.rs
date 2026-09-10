@@ -242,6 +242,7 @@ struct ManifestBuildArgs {
     bucket: String,
     key: String,
     content_type: String,
+    expires_at: Option<OffsetDateTime>,
     commit_state: CommitState,
     chunks: Vec<ChunkRef>,
     whole_checksum: String,
@@ -489,6 +490,13 @@ impl ObjectFormatService {
     }
 
     pub fn delete_bucket(&self, bucket: &str) -> Result<(), ObjectFormatError> {
+        let now = OffsetDateTime::now_utc();
+        for manifest in self.metadata.list_bucket_manifests(bucket, None)? {
+            if manifest.is_expired(now) {
+                self.metadata
+                    .tombstone_manifest(manifest.object_id, "object expired")?;
+            }
+        }
         Ok(self.metadata.delete_bucket(bucket)?)
     }
 
@@ -501,7 +509,10 @@ impl ObjectFormatService {
         bucket: &str,
         key: &str,
     ) -> Result<Option<ObjectManifest>, ObjectFormatError> {
-        Ok(self.metadata.get_active_manifest(bucket, key)?)
+        Ok(self
+            .metadata
+            .get_active_manifest(bucket, key)?
+            .filter(|manifest| !manifest.is_expired(OffsetDateTime::now_utc())))
     }
 
     pub fn list_bucket_manifests(
@@ -509,7 +520,19 @@ impl ObjectFormatService {
         bucket: &str,
         prefix: Option<&str>,
     ) -> Result<Vec<ObjectManifest>, ObjectFormatError> {
-        Ok(self.metadata.list_bucket_manifests(bucket, prefix)?)
+        Ok(self
+            .metadata
+            .list_bucket_manifests(bucket, prefix)?
+            .into_iter()
+            .filter(|manifest| !manifest.is_expired(OffsetDateTime::now_utc()))
+            .collect())
+    }
+
+    pub fn get_manifest(
+        &self,
+        object_id: Uuid,
+    ) -> Result<Option<ObjectManifest>, ObjectFormatError> {
+        Ok(self.metadata.get_manifest(object_id)?)
     }
 
     pub fn delete_object(
@@ -562,6 +585,23 @@ impl ObjectFormatService {
         content_type: &str,
         checksum_algorithm: Option<&str>,
     ) -> Result<MultipartSession, ObjectFormatError> {
+        self.initiate_multipart_upload_with_expiry(
+            bucket,
+            key,
+            content_type,
+            checksum_algorithm,
+            None,
+        )
+    }
+
+    pub fn initiate_multipart_upload_with_expiry(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: &str,
+        checksum_algorithm: Option<&str>,
+        expires_at: Option<OffsetDateTime>,
+    ) -> Result<MultipartSession, ObjectFormatError> {
         self.ensure_connection_not_removing()?;
         if !self.bucket_exists(bucket)? {
             return Err(ObjectFormatError::InvalidPlan(format!(
@@ -576,6 +616,7 @@ impl ObjectFormatService {
             version_id: Some(upload_id.to_string()),
             content_type: content_type.to_string(),
             checksum_algorithm: checksum_algorithm.unwrap_or(CHECKSUM_ALGORITHM).to_string(),
+            expires_at,
             state: MultipartState::Initiated,
             created_at: OffsetDateTime::now_utc(),
             updated_at: OffsetDateTime::now_utc(),
@@ -621,6 +662,7 @@ impl ObjectFormatService {
                 body,
                 Some((upload_id, part_number, checksum.map(str::to_string))),
                 None,
+                session.expires_at,
             )
             .await?;
         self.wait_transfer(&job.id).await?;
@@ -740,6 +782,7 @@ impl ObjectFormatService {
                 Some(body),
                 Some((plan.upload_id, 0, None)),
                 None,
+                session.expires_at,
             )
             .await?;
         self.wait_transfer(&job.id).await
@@ -759,7 +802,11 @@ impl ObjectFormatService {
         let object_id = Uuid::parse_str(version_id)
             .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
         let manifest = self.metadata.get_manifest(object_id)?;
-        Ok(manifest.filter(|manifest| manifest.bucket == bucket && manifest.key == key))
+        Ok(manifest.filter(|manifest| {
+            manifest.bucket == bucket
+                && manifest.key == key
+                && !manifest.is_expired(OffsetDateTime::now_utc())
+        }))
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -1090,6 +1137,7 @@ impl ObjectFormatService {
             bucket: bucket.to_string(),
             key: key.to_string(),
             content_type: content_type.to_string(),
+            expires_at: None,
             commit_state: CommitState::Staging,
             chunks: chunk_refs,
             whole_checksum,
@@ -1146,8 +1194,21 @@ impl ObjectFormatService {
         body: Option<StreamingBlob>,
         conditionals: Option<crate::durable::TransferWriteConditionals>,
     ) -> Result<ObjectManifest, ObjectFormatError> {
+        self.put_stream_with_expiry(bucket, key, content_type, body, conditionals, None)
+            .await
+    }
+
+    pub async fn put_stream_with_expiry(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: &str,
+        body: Option<StreamingBlob>,
+        conditionals: Option<crate::durable::TransferWriteConditionals>,
+        expires_at: Option<OffsetDateTime>,
+    ) -> Result<ObjectManifest, ObjectFormatError> {
         let job = self
-            .enqueue_stream(bucket, key, content_type, body, conditionals)
+            .enqueue_stream_with_expiry(bucket, key, content_type, body, conditionals, expires_at)
             .await?;
         self.wait_transfer(&job.id).await
     }
@@ -1181,6 +1242,11 @@ impl ObjectFormatService {
             return Err(ObjectFormatError::InvalidRead(format!(
                 "object is not committed: {}/{}",
                 bucket, key
+            )));
+        }
+        if manifest.is_expired(OffsetDateTime::now_utc()) {
+            return Err(ObjectFormatError::InvalidRead(format!(
+                "object not found: {bucket}/{key}"
             )));
         }
         let _pin = self.pin_object(manifest.object_id);
@@ -2107,6 +2173,7 @@ impl ObjectFormatService {
             version_id: Some(args.object_id.to_string()),
             content_length: args.chunks.iter().map(|chunk| chunk.size).sum(),
             content_type: args.content_type,
+            expires_at: args.expires_at,
             user_metadata: BTreeMap::new(),
             tags: BTreeMap::new(),
             created_at: OffsetDateTime::now_utc(),

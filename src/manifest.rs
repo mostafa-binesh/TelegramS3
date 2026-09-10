@@ -69,6 +69,10 @@ pub struct ObjectManifest {
     pub user_metadata: BTreeMap<String, String>,
     pub tags: BTreeMap<String, String>,
     pub created_at: OffsetDateTime,
+    /// When present, the object is no longer visible after this instant.
+    /// Expiry is part of the manifest so rebuilds preserve the access policy.
+    #[serde(default)]
+    pub expires_at: Option<OffsetDateTime>,
     pub checksum: ObjectChecksum,
     pub encryption: EncryptionInfo,
     pub telegram: TelegramLocation,
@@ -114,6 +118,7 @@ impl ObjectManifest {
             user_metadata: BTreeMap::new(),
             tags: BTreeMap::new(),
             created_at: OffsetDateTime::now_utc(),
+            expires_at: None,
             checksum: ObjectChecksum {
                 algorithm: args.checksum_algorithm,
                 whole_object: args.whole_object,
@@ -130,6 +135,10 @@ impl ObjectManifest {
             },
             chunks,
         }
+    }
+
+    pub fn is_expired(&self, now: OffsetDateTime) -> bool {
+        self.expires_at.is_some_and(|expires_at| expires_at <= now)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -216,5 +225,26 @@ mod tests {
         assert_eq!(restored.bucket, "bucket");
         assert_eq!(restored.chunks.len(), 1);
         assert!(restored.validate().is_ok());
+    }
+
+    #[test]
+    fn expiry_round_trip_and_boundary() {
+        let mut manifest = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "bucket".to_string(),
+            key: "key.txt".to_string(),
+            content_length: 0,
+            content_type: "text/plain".to_string(),
+            checksum_algorithm: "sha256".to_string(),
+            whole_object: "deadbeef".to_string(),
+            peer_id: "peer".to_string(),
+            message_id: 42,
+        });
+        let expiry = manifest.created_at + time::Duration::seconds(30);
+        manifest.expires_at = Some(expiry);
+        let restored: ObjectManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).expect("serialize"))
+                .expect("deserialize");
+        assert!(!restored.is_expired(expiry - time::Duration::seconds(1)));
+        assert!(restored.is_expired(expiry));
     }
 }

@@ -17,9 +17,13 @@ impl AdminUiState {
                 "bucket and valid object key required",
             );
         }
+        let expires_at = match expiry_from_seconds(body.expires_in_seconds) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
         match self
             .object_format
-            .begin_reception(&body.bucket, &body.key, &body.content_type)
+            .begin_reception_with_expiry(&body.bucket, &body.key, &body.content_type, expires_at)
             .await
         {
             Ok(status) => json_response(StatusCode::CREATED, status),
@@ -180,6 +184,18 @@ impl AdminUiState {
                 "bucket and valid object key required",
             );
         }
+        let expires_in_seconds = match params
+            .remove("expires_in_seconds")
+            .map(|value| value.parse::<u64>())
+            .transpose()
+        {
+            Ok(value) => value,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid expiry seconds"),
+        };
+        let expires_at = match expiry_from_seconds(expires_in_seconds) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
         let content_type = request
             .headers()
             .get(header::CONTENT_TYPE)
@@ -188,12 +204,13 @@ impl AdminUiState {
             .to_string();
         match self
             .object_format
-            .enqueue_stream(
+            .enqueue_stream_with_expiry(
                 &bucket,
                 &key,
                 &content_type,
                 Some(body_to_streaming_blob(request.into_body())),
                 None,
+                expires_at,
             )
             .await
         {

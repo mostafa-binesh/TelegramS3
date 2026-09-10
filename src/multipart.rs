@@ -37,6 +37,8 @@ pub struct MultipartSession {
     pub version_id: Option<String>,
     pub content_type: String,
     pub checksum_algorithm: String,
+    #[serde(default)]
+    pub expires_at: Option<OffsetDateTime>,
     pub state: MultipartState,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,

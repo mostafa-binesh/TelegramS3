@@ -18,11 +18,33 @@ impl ObjectFormatService {
         body: Option<StreamingBlob>,
         conditionals: Option<TransferWriteConditionals>,
     ) -> Result<TransferJob, ObjectFormatError> {
-        self.ensure_connection_not_removing()?;
-        self.enqueue_with_part(bucket, key, content_type, body, None, conditionals)
+        self.enqueue_stream_with_expiry(bucket, key, content_type, body, conditionals, None)
             .await
     }
 
+    pub async fn enqueue_stream_with_expiry(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: &str,
+        body: Option<StreamingBlob>,
+        conditionals: Option<TransferWriteConditionals>,
+        expires_at: Option<OffsetDateTime>,
+    ) -> Result<TransferJob, ObjectFormatError> {
+        self.ensure_connection_not_removing()?;
+        self.enqueue_with_part(
+            bucket,
+            key,
+            content_type,
+            body,
+            None,
+            conditionals,
+            expires_at,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn enqueue_with_part(
         &self,
         bucket: &str,
@@ -31,6 +53,7 @@ impl ObjectFormatService {
         body: Option<StreamingBlob>,
         part: Option<(Uuid, u32, Option<String>)>,
         conditionals: Option<TransferWriteConditionals>,
+        expires_at: Option<OffsetDateTime>,
     ) -> Result<TransferJob, ObjectFormatError> {
         self.ensure_connection_not_removing()?;
         let object_id = Uuid::new_v4();
@@ -97,6 +120,7 @@ impl ObjectFormatService {
                 bucket: bucket.into(),
                 key: key.into(),
                 content_type: content_type.into(),
+                expires_at,
                 commit_state: CommitState::Staging,
                 chunks,
                 whole_checksum: hex::encode(hasher.finalize()),
@@ -117,6 +141,7 @@ impl ObjectFormatService {
                     bucket: bucket.into(),
                     key: key.into(),
                     content_type: content_type.into(),
+                    expires_at,
                     commit_state: CommitState::Staging,
                     chunks: manifest.chunks,
                     whole_checksum: manifest.checksum.whole_object,
