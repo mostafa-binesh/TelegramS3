@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tokio::fs as async_fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -2140,6 +2140,10 @@ impl ObjectFormatService {
             fs::create_dir_all(&mock_dir)?;
             let destination = mock_dir.join(format!("{message_id}.bin"));
             fs::copy(path, &destination)?;
+            fs::write(
+                mock_dir.join(format!("{message_id}.json")),
+                serde_json::to_vec(&serde_json::json!({ "file_name": file_name }))?,
+            )?;
             return Ok(TelegramLocation {
                 peer_id: self.storage_chat_id()?,
                 message_id: i64::from(message_id),
@@ -2148,11 +2152,17 @@ impl ObjectFormatService {
         }
         let client = transport.client()?;
         let storage_peer = transport.storage_peer().await?;
-        let uploaded = client.upload_file(path).await.map_err(|error| {
-            ObjectFormatError::Telegram(crate::telegram::TelegramTransportError::Rpc(format!(
-                "upload_file({file_name}) failed: {error}"
-            )))
-        })?;
+        let mut file = async_fs::File::open(path).await?;
+        let size = file.metadata().await?.len();
+        file.seek(std::io::SeekFrom::Start(0)).await?;
+        let uploaded = client
+            .upload_stream(&mut file, size as usize, file_name.to_string())
+            .await
+            .map_err(|error| {
+                ObjectFormatError::Telegram(crate::telegram::TelegramTransportError::Rpc(format!(
+                    "upload_file({file_name}) failed: {error}"
+                )))
+            })?;
         let message = client
             .send_message(
                 storage_peer,
@@ -2234,6 +2244,10 @@ impl ObjectFormatService {
                 let path = mock_dir.join(format!("{message_id}.bin"));
                 if path.exists() {
                     fs::remove_file(path)?;
+                }
+                let sidecar = mock_dir.join(format!("{message_id}.json"));
+                if sidecar.exists() {
+                    fs::remove_file(sidecar)?;
                 }
             }
             return Ok(());

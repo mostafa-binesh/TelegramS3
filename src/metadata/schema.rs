@@ -266,10 +266,14 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
             job_id TEXT NOT NULL REFERENCES transfer_jobs(id),
             chunk_order INTEGER NOT NULL,
             attempt_id TEXT NOT NULL,
+            attempt_token TEXT NOT NULL,
             state TEXT NOT NULL,
             started_at INTEGER NOT NULL,
             finished_at INTEGER,
             location_json TEXT,
+            error_kind TEXT,
+            error TEXT,
+            retryable INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(job_id, chunk_order, attempt_id)
         );
         CREATE INDEX IF NOT EXISTS idx_transfer_send_attempt_state
@@ -385,16 +389,33 @@ fn ensure_phase10_schema(connection: &mut Connection) -> Result<(), MetadataErro
             job_id TEXT NOT NULL REFERENCES transfer_jobs(id),
             chunk_order INTEGER NOT NULL,
             attempt_id TEXT NOT NULL,
+            attempt_token TEXT NOT NULL DEFAULT '',
             state TEXT NOT NULL,
             started_at INTEGER NOT NULL,
             finished_at INTEGER,
             location_json TEXT,
+            error_kind TEXT,
+            error TEXT,
+            retryable INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(job_id, chunk_order, attempt_id)
         );
         CREATE INDEX IF NOT EXISTS idx_transfer_send_attempt_state
             ON transfer_send_attempts(job_id, state);
         "#,
     )?;
+    for (column, definition) in [
+        ("attempt_token", "TEXT NOT NULL DEFAULT ''"),
+        ("error_kind", "TEXT"),
+        ("error", "TEXT"),
+        ("retryable", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !column_exists(connection, "transfer_send_attempts", column)? {
+            connection.execute(
+                &format!("ALTER TABLE transfer_send_attempts ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
+    }
     Ok(())
 }
 

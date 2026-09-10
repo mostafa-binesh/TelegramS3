@@ -2,6 +2,11 @@ use super::*;
 use crate::durable::{CleanupTarget, TransferJob, TransferWriteConditionals};
 use std::sync::atomic::Ordering;
 
+enum RemoteReconciliation {
+    Match(TelegramLocation),
+    Absent,
+}
+
 impl ObjectFormatService {
     /// Accept the complete request on durable local storage; remote work is independent.
     pub async fn enqueue_stream(
@@ -217,6 +222,7 @@ impl ObjectFormatService {
                 if *transfer_shutdown.borrow() {
                     break;
                 }
+                let _ = service.reconcile_unknown_transfers().await;
                 match service.metadata.claim_transfer() {
                     Ok(Some(job)) => {
                         let lease = job.lease.clone().unwrap_or_default();
@@ -494,14 +500,28 @@ impl ObjectFormatService {
                             let attempt =
                                 self.metadata
                                     .begin_send_attempt(&job.id, lease, chunk.order)?;
-                            let location = self
-                                .upload_local_file_to_telegram(&path, &chunk_file_name(chunk.order))
-                                .await?;
+                            let location = match self
+                                .upload_local_file_to_telegram(&path, &attempt.token)
+                                .await
+                            {
+                                Ok(location) => location,
+                                Err(error) => {
+                                    let _ = self.metadata.mark_send_attempt_unknown(
+                                        &job.id,
+                                        lease,
+                                        chunk.order,
+                                        &attempt.id,
+                                        "telegram_send",
+                                        &error.to_string(),
+                                    );
+                                    return Err(error);
+                                }
+                            };
                             self.metadata.finish_send_attempt(
                                 &job.id,
                                 lease,
                                 chunk.order,
-                                &attempt,
+                                &attempt.id,
                                 &location,
                             )?;
                             location
@@ -530,11 +550,30 @@ impl ObjectFormatService {
             Some(location) => location,
             None => {
                 let attempt = self.metadata.begin_send_attempt(&job.id, lease, u32::MAX)?;
-                let location = self
-                    .upload_local_file_to_telegram(&path, MANIFEST_FILE_NAME)
-                    .await?;
-                self.metadata
-                    .finish_send_attempt(&job.id, lease, u32::MAX, &attempt, &location)?;
+                let location = match self
+                    .upload_local_file_to_telegram(&path, &attempt.token)
+                    .await
+                {
+                    Ok(location) => location,
+                    Err(error) => {
+                        let _ = self.metadata.mark_send_attempt_unknown(
+                            &job.id,
+                            lease,
+                            u32::MAX,
+                            &attempt.id,
+                            "telegram_send",
+                            &error.to_string(),
+                        );
+                        return Err(error);
+                    }
+                };
+                self.metadata.finish_send_attempt(
+                    &job.id,
+                    lease,
+                    u32::MAX,
+                    &attempt.id,
+                    &location,
+                )?;
                 location
             }
         };
@@ -555,6 +594,152 @@ impl ObjectFormatService {
         // Cleanup failure cannot change a committed upload into an HTTP failure.
         let _ = self.cleanup_completed_staging().await;
         Ok(())
+    }
+
+    async fn reconcile_unknown_transfers(&self) -> Result<(), ObjectFormatError> {
+        for job in self
+            .metadata
+            .transfers(100, 0)?
+            .into_iter()
+            .filter(|job| job.state == "recovery_required")
+        {
+            let attempts = self.metadata.unresolved_send_attempts(&job.id)?;
+            if attempts.is_empty() {
+                continue;
+            }
+            let operation = Uuid::parse_str(job.operation_id.as_deref().unwrap_or(""))
+                .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+            let directory = self.staging_dir(operation);
+            let mut all_resolved = true;
+            for attempt in attempts {
+                let path = if attempt.order == u32::MAX {
+                    directory.join(MANIFEST_FILE_NAME)
+                } else {
+                    directory.join(chunk_file_name(attempt.order))
+                };
+                if !path.exists() {
+                    all_resolved = false;
+                    continue;
+                }
+                match self
+                    .reconcile_remote_file(&path, &attempt.token, attempt.started_at)
+                    .await
+                {
+                    Ok(RemoteReconciliation::Match(location)) => {
+                        self.metadata
+                            .resolve_send_attempt(&attempt, Some(&location), None)?;
+                    }
+                    Ok(RemoteReconciliation::Absent) => {
+                        self.metadata.resolve_send_attempt(
+                            &attempt,
+                            None,
+                            Some("No matching document was found after scanning messages newer than the attempt"),
+                        )?;
+                    }
+                    Err(error) => {
+                        all_resolved = false;
+                        let _ = self.metadata.set_transfer_error(
+                            &job.id,
+                            "Automatic reconciliation is waiting for Telegram connectivity",
+                        );
+                        tracing::warn!(job_id = %job.id, error = %error, "transfer reconciliation deferred");
+                    }
+                }
+            }
+            if all_resolved {
+                let _ = self.metadata.queue_after_reconciliation(&job.id)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn reconcile_remote_file(
+        &self,
+        path: &std::path::Path,
+        token: &str,
+        started_at: i64,
+    ) -> Result<RemoteReconciliation, ObjectFormatError> {
+        let transport = self.transport_manager.current().await?;
+        if transport.is_mock() {
+            let directory = self.mock_telegram_dir();
+            for entry in fs::read_dir(&directory)? {
+                let entry = entry?;
+                if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+                    continue;
+                }
+                let details: serde_json::Value = serde_json::from_slice(&fs::read(entry.path())?)?;
+                if details.get("file_name").and_then(serde_json::Value::as_str) != Some(token) {
+                    continue;
+                }
+                let message_id = entry
+                    .path()
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .ok_or_else(|| {
+                        ObjectFormatError::InvalidPlan("invalid mock message id".into())
+                    })?;
+                if fs::read(path)? != fs::read(directory.join(format!("{message_id}.bin")))? {
+                    return Err(ObjectFormatError::InvalidPlan(
+                        "Telegram reconciliation found a token collision with different bytes"
+                            .into(),
+                    ));
+                }
+                return Ok(RemoteReconciliation::Match(TelegramLocation {
+                    peer_id: self.storage_chat_id()?,
+                    message_id: i64::from(message_id),
+                    document_id: Some(format!("mock:{message_id}:{token}")),
+                }));
+            }
+            return Ok(RemoteReconciliation::Absent);
+        }
+        let client = transport.client()?;
+        let storage_peer = transport.storage_peer().await?;
+        let mut messages = client.iter_messages(storage_peer).limit(1000);
+        let mut scanned = 0_usize;
+        let mut reached_attempt_boundary = false;
+        while let Some(message) = messages.next().await.map_err(|error| {
+            ObjectFormatError::Telegram(crate::telegram::TelegramTransportError::Rpc(
+                error.to_string(),
+            ))
+        })? {
+            scanned += 1;
+            if message.date().timestamp() < started_at {
+                reached_attempt_boundary = true;
+                break;
+            }
+            let Some(Media::Document(document)) = message.media() else {
+                continue;
+            };
+            if document.name() != Some(token) {
+                continue;
+            }
+            let mut download = client.iter_download(&Media::Document(document.clone()));
+            let mut remote = Vec::new();
+            while let Some(chunk) = download.next().await.map_err(|error| {
+                ObjectFormatError::Telegram(crate::telegram::TelegramTransportError::Rpc(
+                    error.to_string(),
+                ))
+            })? {
+                remote.extend_from_slice(&chunk);
+            }
+            if fs::read(path)? != remote {
+                return Err(ObjectFormatError::InvalidPlan(
+                    "Telegram reconciliation found a token collision with different bytes".into(),
+                ));
+            }
+            return Ok(RemoteReconciliation::Match(TelegramLocation {
+                peer_id: self.storage_chat_id()?,
+                message_id: i64::from(message.id()),
+                document_id: Some(document.id().to_string()),
+            }));
+        }
+        if !reached_attempt_boundary && scanned >= 1000 {
+            return Err(ObjectFormatError::InvalidPlan(
+                "Telegram reconciliation scan limit reached before the attempt boundary".into(),
+            ));
+        }
+        Ok(RemoteReconciliation::Absent)
     }
 
     fn import_legacy_staging(&self) -> Result<(), ObjectFormatError> {

@@ -53,6 +53,22 @@ pub struct TransferJob {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SendAttempt {
+    pub id: String,
+    pub token: String,
+    pub started_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnresolvedSendAttempt {
+    pub job_id: String,
+    pub order: u32,
+    pub id: String,
+    pub token: String,
+    pub started_at: i64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransferWriteConditionals {
     pub if_match: Option<String>,
@@ -523,7 +539,11 @@ impl MetadataStore {
             // A send that may have reached Telegram but was not checkpointed is
             // deliberately not replayed. Retain it for operator reconciliation.
             tx.execute(
-                "UPDATE transfer_jobs SET state='recovery_required',lease=NULL,lease_until=0,error='Telegram acknowledgement is unknown; staged data and send evidence retained' WHERE state IN ('uploading','committing') AND lease_until<?1 AND EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=transfer_jobs.id AND a.state='sending')",
+                "UPDATE transfer_jobs SET state='recovery_required',lease=NULL,lease_until=0,error='Telegram acknowledgement is unknown; automatic reconciliation is pending' WHERE state IN ('uploading','committing') AND lease_until<?1 AND EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=transfer_jobs.id AND a.state IN ('sending','unknown'))",
+                [now()],
+            )?;
+            tx.execute(
+                "UPDATE transfer_send_attempts SET state='unknown',error_kind='lease_expired',error='Worker lease expired before Telegram acknowledgement',finished_at=?1 WHERE state='sending' AND job_id IN (SELECT id FROM transfer_jobs WHERE state='recovery_required' AND error='Telegram acknowledgement is unknown; automatic reconciliation is pending')",
                 [now()],
             )?;
             tx.execute(
@@ -537,7 +557,7 @@ impl MetadataStore {
                 [],
             )?;
             let id: Option<String> = tx.query_row(
-                "SELECT candidate.id FROM transfer_jobs candidate WHERE (((candidate.state IN ('queued','retry_wait') AND candidate.next_retry<=?1) OR (candidate.state IN ('uploading','committing') AND candidate.lease_until<?1)) AND NOT EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=candidate.id AND a.state='sending') AND NOT EXISTS(SELECT 1 FROM transfer_jobs older WHERE older.bucket=candidate.bucket AND older.object_key=candidate.object_key AND older.sequence<candidate.sequence AND older.state NOT IN ('completed','cleaned','cancelled','reception_failed','superseded'))) ORDER BY candidate.sequence LIMIT 1",
+                "SELECT candidate.id FROM transfer_jobs candidate WHERE (((candidate.state IN ('queued','retry_wait') AND candidate.next_retry<=?1) OR (candidate.state IN ('uploading','committing') AND candidate.lease_until<?1)) AND NOT EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=candidate.id AND a.state IN ('sending','unknown')) AND NOT EXISTS(SELECT 1 FROM transfer_jobs older WHERE older.bucket=candidate.bucket AND older.object_key=candidate.object_key AND older.sequence<candidate.sequence AND older.state NOT IN ('completed','cleaned','cancelled','reception_failed','superseded'))) ORDER BY candidate.sequence LIMIT 1",
                 [now()],
                 |r| r.get(0),
             ).optional()?;
@@ -558,8 +578,10 @@ impl MetadataStore {
         id: &str,
         lease: &str,
         order: u32,
-    ) -> Result<String, MetadataError> {
+    ) -> Result<SendAttempt, MetadataError> {
         let attempt = Uuid::new_v4().to_string();
+        let token = format!("telegram-s3-{id}-{order}-{attempt}");
+        let started_at = now();
         self.with_connection(|c| {
             let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let valid: bool = tx.query_row(
@@ -571,13 +593,17 @@ impl MetadataStore {
                 return Err(MetadataError::InvalidManifest("transfer lease lost".into()));
             }
             tx.execute(
-                "INSERT INTO transfer_send_attempts(job_id,chunk_order,attempt_id,state,started_at) VALUES (?1,?2,?3,'sending',?4)",
-                params![id, order, attempt, now()],
+                "INSERT INTO transfer_send_attempts(job_id,chunk_order,attempt_id,attempt_token,state,started_at) VALUES (?1,?2,?3,?4,'sending',?5)",
+                params![id, order, attempt, token, started_at],
             )?;
             tx.commit()?;
             Ok(())
         })?;
-        Ok(attempt)
+        Ok(SendAttempt {
+            id: attempt,
+            token,
+            started_at,
+        })
     }
 
     pub(crate) fn finish_send_attempt(
@@ -599,7 +625,7 @@ impl MetadataStore {
                 return Err(MetadataError::InvalidManifest("transfer lease lost".into()));
             }
             if tx.execute(
-                "UPDATE transfer_send_attempts SET state='checkpointed',location_json=?4,finished_at=?5 WHERE job_id=?1 AND chunk_order=?2 AND attempt_id=?3 AND state='sending'",
+                "UPDATE transfer_send_attempts SET state='checkpointed',location_json=?4,finished_at=?5,error_kind=NULL,error=NULL,retryable=0 WHERE job_id=?1 AND chunk_order=?2 AND attempt_id=?3 AND state='sending'",
                 params![id, order, attempt, serde_json::to_string(location)?, now()],
             )? != 1 {
                 return Err(MetadataError::InvalidManifest("send attempt fence lost".into()));
@@ -614,6 +640,107 @@ impl MetadataStore {
             )?;
             tx.commit()?;
             Ok(())
+        })
+    }
+
+    pub(crate) fn mark_send_attempt_unknown(
+        &self,
+        id: &str,
+        lease: &str,
+        order: u32,
+        attempt: &str,
+        error_kind: &str,
+        error: &str,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|c| {
+            let changed = c.execute(
+                "UPDATE transfer_send_attempts SET state='unknown',error_kind=?4,error=?5,finished_at=?6,retryable=0 WHERE job_id=?1 AND chunk_order=?2 AND attempt_id=?3 AND state='sending' AND EXISTS(SELECT 1 FROM transfer_jobs WHERE id=?1 AND lease=?7 AND state IN ('uploading','committing'))",
+                params![id, order, attempt, error_kind, error, now(), lease],
+            )?;
+            if changed != 1 {
+                return Err(MetadataError::InvalidManifest(
+                    "send attempt could not be marked unknown".into(),
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn unresolved_send_attempts(
+        &self,
+        id: &str,
+    ) -> Result<Vec<UnresolvedSendAttempt>, MetadataError> {
+        self.with_connection(|c| {
+            let mut statement = c.prepare(
+                "SELECT job_id,chunk_order,attempt_id,attempt_token,started_at FROM transfer_send_attempts WHERE job_id=?1 AND state='unknown' ORDER BY chunk_order",
+            )?;
+            Ok(statement
+                .query_map([id], |row| {
+                    Ok(UnresolvedSendAttempt {
+                        job_id: row.get(0)?,
+                        order: row.get(1)?,
+                        id: row.get(2)?,
+                        token: row.get(3)?,
+                        started_at: row.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub(crate) fn resolve_send_attempt(
+        &self,
+        attempt: &UnresolvedSendAttempt,
+        location: Option<&TelegramLocation>,
+        error: Option<&str>,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|c| {
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let (state, location_json, retryable) = if let Some(location) = location {
+                ("checkpointed", Some(serde_json::to_string(location)?), 0)
+            } else {
+                ("retryable", None, 1)
+            };
+            if tx.execute(
+                "UPDATE transfer_send_attempts SET state=?4,location_json=COALESCE(?5,location_json),error_kind=CASE WHEN ?4='retryable' THEN 'reconciliation_absent' ELSE NULL END,error=?6,finished_at=?7,retryable=?8 WHERE job_id=?1 AND chunk_order=?2 AND attempt_id=?3 AND state='unknown'",
+                params![attempt.job_id, attempt.order, attempt.id, state, location_json, error, now(), retryable],
+            )? != 1 {
+                return Err(MetadataError::InvalidManifest("send attempt resolution fence lost".into()));
+            }
+            if let Some(location) = location {
+                tx.execute(
+                    "INSERT INTO transfer_chunks(job_id,chunk_order,location_json) VALUES (?1,?2,?3) ON CONFLICT(job_id,chunk_order) DO UPDATE SET location_json=excluded.location_json",
+                    params![attempt.job_id, attempt.order, serde_json::to_string(location)?],
+                )?;
+            }
+            tx.execute(
+                "UPDATE transfer_jobs SET chunks_done=(SELECT COUNT(*) FROM transfer_chunks WHERE job_id=?1 AND chunk_order<4294967295),updated_at=?2 WHERE id=?1",
+                params![attempt.job_id, now()],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn queue_after_reconciliation(&self, id: &str) -> Result<bool, MetadataError> {
+        self.with_connection(|c| {
+            Ok(c.execute(
+                "UPDATE transfer_jobs SET state='queued',error='Automatic reconciliation completed; retry scheduled',next_retry=0,updated_at=?2 WHERE id=?1 AND state='recovery_required' AND NOT EXISTS(SELECT 1 FROM transfer_send_attempts WHERE job_id=?1 AND state IN ('sending','unknown'))",
+                params![id, now()],
+            )? == 1)
+        })
+    }
+
+    pub(crate) fn set_transfer_error(
+        &self,
+        id: &str,
+        message: &str,
+    ) -> Result<bool, MetadataError> {
+        self.with_connection(|c| {
+            Ok(c.execute(
+                "UPDATE transfer_jobs SET error=?,updated_at=?2 WHERE id=?1 AND state='recovery_required'",
+                params![id, message, now()],
+            )? == 1)
         })
     }
     pub(crate) fn checkpoint_location(
@@ -642,12 +769,12 @@ impl MetadataStore {
     ) -> Result<(), MetadataError> {
         self.with_connection(|c| {
             let ambiguous: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM transfer_send_attempts WHERE job_id=?1 AND state='sending')",
+                "SELECT EXISTS(SELECT 1 FROM transfer_send_attempts WHERE job_id=?1 AND state IN ('sending','unknown'))",
                 [id],
                 |r| r.get(0),
             )?;
             let state = if ambiguous { "recovery_required" } else if retry_after.is_some() { "retry_wait" } else { "recovery_required" };
-            let error = if ambiguous { "Telegram acknowledgement is unknown; staged data and send evidence retained" } else { message };
+            let error = if ambiguous { "Telegram acknowledgement is unknown; automatic reconciliation is pending" } else { message };
             c.execute("UPDATE transfer_jobs SET state=?3,error=?4,next_retry=?5,lease=NULL,lease_until=0,updated_at=?6 WHERE id=?1 AND lease=?2 AND state IN ('uploading','committing')",params![id,lease,state,error,now().saturating_add(retry_after.unwrap_or(0) as i64),now()])?;
             Ok(())
         })
@@ -656,7 +783,7 @@ impl MetadataStore {
         self.with_connection(|c| {
             if action == "retry" {
                 return Ok(c.execute(
-                    "UPDATE transfer_jobs SET state='queued',error=NULL,next_retry=0 WHERE id=?1 AND state IN ('retry_wait','recovery_required') AND operation_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM transfer_send_attempts WHERE job_id=?1 AND state='sending')",
+                    "UPDATE transfer_jobs SET state='queued',error=NULL,next_retry=0 WHERE id=?1 AND state IN ('retry_wait','recovery_required') AND operation_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM transfer_send_attempts WHERE job_id=?1 AND state IN ('sending','unknown'))",
                     [id],
                 )? == 1);
             }
@@ -750,6 +877,56 @@ mod tests {
         assert!(s.claim_transfer().unwrap().is_none());
         assert!(!s.renew_transfer(&id, "stale").unwrap());
         assert!(s.renew_transfer(&id, j.lease.as_deref().unwrap()).unwrap());
+    }
+
+    #[test]
+    fn ambiguous_send_is_durable_and_can_be_reconciled() {
+        let s = store();
+        let id = s
+            .begin_transfer(Uuid::new_v4(), "test", "ambiguous.bin")
+            .unwrap();
+        s.reserve_staging(&id, 8, 8).unwrap();
+        s.queue_transfer(&id, Uuid::new_v4(), 1).unwrap();
+        let job = s.claim_transfer().unwrap().unwrap();
+        let lease = job.lease.as_deref().unwrap();
+        let attempt = s.begin_send_attempt(&id, lease, 0).unwrap();
+        assert!(attempt.token.contains(&id));
+        s.mark_send_attempt_unknown(
+            &id,
+            lease,
+            0,
+            &attempt.id,
+            "telegram_send",
+            "timeout after upload",
+        )
+        .unwrap();
+        let unresolved = s.unresolved_send_attempts(&id).unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].token, attempt.token);
+        s.transfer_failed(&id, lease, Some(1), "telegram send failed")
+            .unwrap();
+        s.resolve_send_attempt(&unresolved[0], None, Some("not found"))
+            .unwrap();
+        assert!(s.queue_after_reconciliation(&id).unwrap());
+        assert_eq!(s.transfer(&id).unwrap().unwrap().state, "queued");
+        let state: (String, String, String, i64) = s
+            .with_connection(|c| {
+                Ok(c.query_row(
+                    "SELECT state,error_kind,error,retryable FROM transfer_send_attempts WHERE job_id=?1",
+                    [&id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            state,
+            (
+                "retryable".into(),
+                "reconciliation_absent".into(),
+                "not found".into(),
+                1
+            )
+        );
     }
 
     #[test]
