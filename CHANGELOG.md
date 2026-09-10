@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.7.15-rc.7 - 2026-09-11
+
+- Fixed admin object deletion so success is reported only after the local
+  tombstone commits; missing objects now return `404`.
+- Guarded folder deletion against active child objects and pending transfers,
+  returning a conflict instead of falsely reporting a non-empty folder deleted.
+- Aligned bucket-table columns and row action icons, and added regression
+  coverage for delete visibility, folder conflicts, and action alignment.
+
 ## 0.7.15-rc.2 - 2026-09-10
 
 - Added background expiry sweeping so expired active objects are tombstoned
