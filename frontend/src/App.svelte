@@ -583,7 +583,8 @@
     const key = typeof obj === 'string' ? `${currentPrefix}${obj}${folder ? '/' : ''}` : obj.key;
     busy = true;
     try {
-      await removeObject(session?.csrf_token, selectedBucket, key);
+      const result = await removeObject(session?.csrf_token, selectedBucket, key);
+      if (result.deleted === false) throw new Error('The item was not deleted. Refresh and try again.');
       notifySuccess('Deleted.');
       await refreshObjects();
     } catch (cause) {

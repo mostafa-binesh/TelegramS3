@@ -156,63 +156,58 @@ impl MetadataStore {
         self.with_connection(|connection| {
             let tx =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let active_transfer: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM transfer_jobs WHERE bucket=?1 AND object_key=?2 AND state IN ('uploading','committing'))",
-                params![bucket, object_key],
-                |r| r.get(0),
-            )?;
-            if active_transfer {
-                return Err(MetadataError::InvalidManifest(
-                    "object publication in progress; retry delete".into(),
-                ));
-            }
-            tx.execute(
-                "UPDATE transfer_jobs SET state='cancelled',lease=NULL,lease_until=0,error='Superseded by deletion',updated_at=?3 WHERE bucket=?1 AND object_key=?2 AND state IN ('receiving','queued','retry_wait','recovery_required')",
-                params![bucket, object_key, crate::durable::now()],
-            )?;
-
-            let object_id: Option<String> = tx.query_row(
-                "SELECT object_id FROM active_objects WHERE bucket=?1 AND object_key=?2",
-                params![bucket, object_key],
-                |r| r.get(0),
-            ).optional()?;
-            let Some(object_id) = object_id else {
-                tx.commit()?;
-                return Ok(None);
-            };
-            let object_id_for_update = object_id.clone();
-            let object_id_for_delete = object_id.clone();
-            let object_id_for_journal = object_id.clone();
-            let mut manifest = super::rows::load_manifest_by_object_id(&tx, &object_id)?
-                .ok_or_else(|| MetadataError::ManifestNotFound(object_id.clone()))?;
-            super::manifests::enforce_delete_conditionals_snapshot(
+            let deleted = delete_active_key_in_transaction(
+                &tx,
+                bucket,
+                object_key,
+                reason,
                 if_match,
                 if_match_last_modified_time,
                 if_match_size,
-                &manifest,
-            )?;
-            let tombstoned_at = timestamp_now()?;
-            manifest.commit_state = CommitState::Tombstoned;
-            crate::durable::enqueue_manifest_cleanup(&tx, &manifest)?;
-            let manifest_json = serde_json::to_string(&manifest)?;
-            tx.execute(
-                "UPDATE object_manifests SET commit_state='tombstoned',manifest_json=?2,tombstoned_at=?3 WHERE object_id=?1",
-                params![object_id_for_update, manifest_json, tombstoned_at],
-            )?;
-            tx.execute(
-                "DELETE FROM active_objects WHERE bucket=?1 AND object_key=?2 AND object_id=?3",
-                params![bucket, object_key, object_id_for_delete],
-            )?;
-            tx.execute(
-                "DELETE FROM recovery_markers WHERE object_id=?1",
-                [object_id_for_delete.as_str()],
-            )?;
-            tx.execute(
-                "UPDATE operation_journal SET state='tombstoned',error=?2,updated_at=?3 WHERE object_id=?1",
-                params![object_id_for_journal, reason, tombstoned_at],
             )?;
             tx.commit()?;
-            Ok(Some(manifest))
+            Ok(deleted)
+        })
+    }
+
+    pub fn delete_empty_folder(
+        &self,
+        bucket: &str,
+        folder_key: &str,
+        reason: &str,
+    ) -> Result<Option<crate::manifest::ObjectManifest>, MetadataError> {
+        if !folder_key.ends_with('/') {
+            return Err(MetadataError::InvalidManifest(
+                "folder key must end with '/'".into(),
+            ));
+        }
+        self.with_connection(|connection| {
+            let tx =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let has_children: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM active_objects WHERE bucket=?1 AND instr(object_key, ?2)=1 AND object_key<>?2)",
+                params![bucket, folder_key],
+                |row| row.get(0),
+            )?;
+            let has_pending_children: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM transfer_jobs WHERE bucket=?1 AND instr(object_key, ?2)=1 AND object_key<>?2 AND state NOT IN ('completed','cancelled','cleaned'))",
+                params![bucket, folder_key],
+                |row| row.get(0),
+            )?;
+            if has_children || has_pending_children {
+                return Err(MetadataError::FolderNotEmpty(folder_key.to_string()));
+            }
+            let deleted = delete_active_key_in_transaction(
+                &tx,
+                bucket,
+                folder_key,
+                reason,
+                None,
+                None,
+                None,
+            )?;
+            tx.commit()?;
+            Ok(deleted)
         })
     }
 
@@ -367,6 +362,74 @@ impl MetadataStore {
             Ok(n as u64)
         })
     }
+}
+
+fn delete_active_key_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    bucket: &str,
+    object_key: &str,
+    reason: &str,
+    if_match: Option<&ETagCondition>,
+    if_match_last_modified_time: Option<&Timestamp>,
+    if_match_size: Option<i64>,
+) -> Result<Option<crate::manifest::ObjectManifest>, MetadataError> {
+    let active_transfer: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM transfer_jobs WHERE bucket=?1 AND object_key=?2 AND state IN ('uploading','committing'))",
+        params![bucket, object_key],
+        |r| r.get(0),
+    )?;
+    if active_transfer {
+        return Err(MetadataError::InvalidManifest(
+            "object publication in progress; retry delete".into(),
+        ));
+    }
+    tx.execute(
+        "UPDATE transfer_jobs SET state='cancelled',lease=NULL,lease_until=0,error='Superseded by deletion',updated_at=?3 WHERE bucket=?1 AND object_key=?2 AND state IN ('receiving','queued','retry_wait','recovery_required')",
+        params![bucket, object_key, crate::durable::now()],
+    )?;
+
+    let object_id: Option<String> = tx
+        .query_row(
+            "SELECT object_id FROM active_objects WHERE bucket=?1 AND object_key=?2",
+            params![bucket, object_key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(object_id) = object_id else {
+        return Ok(None);
+    };
+    let object_id_for_update = object_id.clone();
+    let object_id_for_delete = object_id.clone();
+    let object_id_for_journal = object_id.clone();
+    let mut manifest = super::rows::load_manifest_by_object_id(tx, &object_id)?
+        .ok_or_else(|| MetadataError::ManifestNotFound(object_id.clone()))?;
+    super::manifests::enforce_delete_conditionals_snapshot(
+        if_match,
+        if_match_last_modified_time,
+        if_match_size,
+        &manifest,
+    )?;
+    let tombstoned_at = timestamp_now()?;
+    manifest.commit_state = CommitState::Tombstoned;
+    crate::durable::enqueue_manifest_cleanup(tx, &manifest)?;
+    let manifest_json = serde_json::to_string(&manifest)?;
+    tx.execute(
+        "UPDATE object_manifests SET commit_state='tombstoned',manifest_json=?2,tombstoned_at=?3 WHERE object_id=?1",
+        params![object_id_for_update, manifest_json, tombstoned_at],
+    )?;
+    tx.execute(
+        "DELETE FROM active_objects WHERE bucket=?1 AND object_key=?2 AND object_id=?3",
+        params![bucket, object_key, object_id_for_delete],
+    )?;
+    tx.execute(
+        "DELETE FROM recovery_markers WHERE object_id=?1",
+        [object_id_for_delete.as_str()],
+    )?;
+    tx.execute(
+        "UPDATE operation_journal SET state='tombstoned',error=?2,updated_at=?3 WHERE object_id=?1",
+        params![object_id_for_journal, reason, tombstoned_at],
+    )?;
+    Ok(Some(manifest))
 }
 
 #[cfg(test)]
@@ -524,5 +587,63 @@ mod tests {
             .get_active_manifest(&bucket.name, "key.txt")
             .expect("active");
         assert_eq!(active.expect("present").checksum.whole_object, "efgh");
+    }
+
+    #[test]
+    fn delete_empty_folder_rejects_active_descendants() {
+        let store = MetadataStore::open_in_memory().expect("open");
+        let bucket = store
+            .create_bucket(crate::metadata::BucketRecord {
+                name: "bucket".to_string(),
+                created_at: OffsetDateTime::now_utc(),
+                deleted_at: None,
+                versioning_enabled: false,
+                object_locking_enabled: false,
+            })
+            .expect("bucket");
+
+        for manifest in [
+            sample_manifest(&bucket.name, "docs/", "marker"),
+            sample_manifest(&bucket.name, "docs/report.txt", "report"),
+        ] {
+            let operation = store
+                .stage_manifest(OperationKind::Put, manifest)
+                .expect("stage");
+            store.commit_manifest(operation).expect("commit");
+        }
+
+        let error = store
+            .delete_empty_folder(&bucket.name, "docs/", "deleted via admin")
+            .expect_err("non-empty folder must not be reported as deleted");
+        assert!(matches!(error, MetadataError::FolderNotEmpty(path) if path == "docs/"));
+        assert!(
+            store
+                .get_active_manifest(&bucket.name, "docs/report.txt")
+                .expect("child")
+                .is_some()
+        );
+
+        store
+            .delete_active_key(
+                &bucket.name,
+                "docs/report.txt",
+                "deleted via admin",
+                None,
+                None,
+                None,
+            )
+            .expect("delete child");
+        assert!(
+            store
+                .delete_empty_folder(&bucket.name, "docs/", "deleted via admin")
+                .expect("delete empty folder")
+                .is_some()
+        );
+        assert!(
+            store
+                .get_active_manifest(&bucket.name, "docs/")
+                .expect("folder marker")
+                .is_none()
+        );
     }
 }

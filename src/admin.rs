@@ -942,11 +942,21 @@ impl AdminUiState {
         if key.is_empty() {
             return json_error(StatusCode::BAD_REQUEST, "key is required");
         }
-        match self
-            .object_format
-            .delete_object(&bucket, &key, None, None, None)
-        {
-            Ok(_) => json_response(StatusCode::OK, serde_json::json!({ "ok": true })),
+        let deletion = if key.ends_with('/') {
+            self.object_format.delete_empty_folder(&bucket, &key)
+        } else {
+            self.object_format
+                .delete_object(&bucket, &key, None, None, None)
+        };
+        match deletion {
+            Ok(Some(_)) => json_response(
+                StatusCode::OK,
+                serde_json::json!({ "ok": true, "deleted": true }),
+            ),
+            Ok(None) => json_error(StatusCode::NOT_FOUND, "object not found"),
+            Err(crate::object_format::ObjectFormatError::Metadata(
+                crate::metadata::MetadataError::FolderNotEmpty(folder),
+            )) => json_error(StatusCode::CONFLICT, &format!("folder not empty: {folder}")),
             Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         }
     }

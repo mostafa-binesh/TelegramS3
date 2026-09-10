@@ -58,7 +58,8 @@ staging, and recovery artifacts, not committed payloads.
   no whole-object RAM buffering (an explicit project invariant).
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
   operator account management, in-app bucket creation, bucket/object browser
-  with per-file upload and ranged download, and the Telegram setup wizard.
+  with per-file upload, ranged download, and guarded folder deletion, plus the
+  Telegram setup wizard.
 - **Operational tooling** — a `telegram-s3` CLI (`users`, `config check`,
   `doctor`, `db`, `index`, `repair`, `gc --dry-run`), loopback-only health and
   metrics endpoints, and a production Docker image published to GHCR.
@@ -306,6 +307,9 @@ per-operation matrix is [docs/s3-compatibility.md](docs/s3-compatibility.md).
   rate-limited with per-account lockout.
 - Deletes leave recoverable state (tombstones) before any physical cleanup;
   garbage collection is conservative, retention-aware, and dry-run reviewed.
+- The admin bucket browser reports a delete as successful only after the local
+  active pointer is removed. Non-empty folders are rejected; their child
+  objects must be deleted first. Telegram payload removal remains asynchronous.
 - Local metadata is a fast path, **not** the only source of truth — manifest
   documents are the authoritative recovery source, and the index can be rebuilt
   from them (see [docs/disaster-recovery.md](docs/disaster-recovery.md)).

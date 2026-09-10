@@ -229,6 +229,9 @@ Completed in this increment:
 - invalid Telegram codes remain retryable, and the bucket browser now provides
   empty-bucket deletion, parent navigation, and skeleton loading on refresh and
   folder transitions
+- bucket/object deletion now reports only committed local deletes, returns a
+  conflict for non-empty folders, and keeps folder and file action columns
+  aligned in the browser table
 - the account view can remove the current Telegram connection behind an
   explicit confirmation; local buckets, objects, and statistics are hidden
   immediately, while optional Telegram payload deletion is a durable,

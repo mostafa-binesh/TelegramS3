@@ -85,7 +85,9 @@ features, so they are documented separately.
   (avoiding whole-object RAM buffering) and is an explicit future item.
 - The bucket browser preserves bucket names exactly, including Unicode names;
   its delete action maps to the existing empty-bucket-only API and does not
-  bypass tombstone/recovery rules.
+  bypass tombstone/recovery rules. Object deletion hides the object only after
+  the local tombstone is committed; missing objects return `404`, and folders
+  with active descendants return `409` instead of a false success.
 - The object browser shows object expiry, accepts seconds-based expiry for
   browser uploads, and creates opaque `/_public/` share URLs with an optional expiry.
   Share URLs are public bearer capabilities bounded by object expiry.

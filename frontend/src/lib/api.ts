@@ -40,6 +40,7 @@ async function requestJson<T>(
   const response = await fetch(`${API_PREFIX}${path}`, {
     method: options.method ?? 'GET',
     credentials: 'include',
+    cache: 'no-store',
     headers,
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined
   });
@@ -171,7 +172,7 @@ export function createFolder(csrf?: string | null, bucket = '', path = '') {
 }
 
 export function removeObject(csrf?: string | null, bucket = '', key = '') {
-  return requestJson<{ ok?: boolean }>('/objects/delete', csrf, {
+  return requestJson<{ ok?: boolean; deleted?: boolean }>('/objects/delete', csrf, {
     method: 'POST',
     body: { bucket, key }
   });

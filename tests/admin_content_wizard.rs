@@ -375,6 +375,107 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
         "share HEAD body should be empty"
     );
 
+    // Folder deletion must not silently remove only the directory marker while
+    // leaving its children visible. Once the child is removed, the empty marker
+    // can be deleted normally.
+    let create_folder_payload = format!(r#"{{"bucket":"{bucket}","path":"folder/"}}"#);
+    let create_folder = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/objects/folder",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        create_folder_payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(create_folder.status_code, 201, "folder marker creation");
+
+    let folder_delete_payload = format!(r#"{{"bucket":"{bucket}","key":"folder/"}}"#);
+    let non_empty_folder_delete = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/objects/delete",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        folder_delete_payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(non_empty_folder_delete.status_code, 409);
+    assert!(
+        non_empty_folder_delete.bytes_json["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("folder not empty"))
+    );
+
+    let delete_object_payload = format!(r#"{{"bucket":"{bucket}","key":"{key}"}}"#);
+    let delete_object = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/objects/delete",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        delete_object_payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(delete_object.status_code, 200);
+    assert_eq!(delete_object.bytes_json["deleted"], Value::Bool(true));
+    let deleted_content = raw_request(
+        &client,
+        &bind_addr,
+        "GET",
+        &upload_path,
+        &[("Cookie", &cookie)],
+        b"",
+    )
+    .await;
+    assert_eq!(deleted_content.status, 404, "deleted object must be hidden");
+
+    let repeat_delete = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/objects/delete",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        delete_object_payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        repeat_delete.status_code, 404,
+        "missing delete must not succeed"
+    );
+
+    let delete_folder = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/objects/delete",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        folder_delete_payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(delete_folder.status_code, 200);
+    assert_eq!(delete_folder.bytes_json["deleted"], Value::Bool(true));
+
     // ---- Telegram login wizard phases ----------------------------------------
     // Start: idle, with an authorized flag on the wire.
     let state = json_request(

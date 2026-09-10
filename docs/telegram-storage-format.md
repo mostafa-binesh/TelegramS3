@@ -160,8 +160,11 @@ the metadata store and reconciliation path. Both legacy `ListObjects` and
 separate views of the bucket.
 
 The admin bucket browser preserves bucket names exactly, including Unicode
-characters. Its delete action only requests deletion of an empty bucket; it does
-not alter manifest, tombstone, or recovery semantics.
+characters. Directory markers represent empty folders in the browser view: an
+admin folder delete is rejected while active child objects or pending child
+transfers exist. Object and empty-folder deletes commit a local tombstone before
+reporting success; physical Telegram cleanup remains asynchronous and
+evidence-first.
 
 Removing a Telegram connection tombstones every visible local object and marks
 all buckets deleted in one metadata transaction, so the active index and its

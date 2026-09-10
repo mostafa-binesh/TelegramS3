@@ -570,6 +570,16 @@ impl ObjectFormatService {
         )?)
     }
 
+    pub fn delete_empty_folder(
+        &self,
+        bucket: &str,
+        folder_key: &str,
+    ) -> Result<Option<ObjectManifest>, ObjectFormatError> {
+        Ok(self
+            .metadata
+            .delete_empty_folder(bucket, folder_key, "deleted via admin")?)
+    }
+
     pub fn tombstone_manifest(
         &self,
         object_id: Uuid,

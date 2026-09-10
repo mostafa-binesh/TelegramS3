@@ -130,8 +130,10 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
       return route.fulfill({ status: 201, json: { url: '/_public/mock-share-token', expires_at: body.expires_in_seconds ? '2026-01-01T01:00:00Z' : null } });
     }
     if (path === '/objects/delete' && request.method() === 'POST') {
-      deletedKeys.add((request.postDataJSON() as { key: string }).key);
-      return route.fulfill({ json: { ok: true } });
+      const key = (request.postDataJSON() as { key: string }).key;
+      if (key === 'docs/') return route.fulfill({ status: 409, json: { error: 'folder not empty: docs/' } });
+      deletedKeys.add(key);
+      return route.fulfill({ json: { ok: true, deleted: true } });
     }
     if (path === '/objects/folder' && request.method() === 'POST') {
       const pathName = (request.postDataJSON() as { path: string }).path;
@@ -241,10 +243,17 @@ test('share modal supports a never-expire link and surfaces creation errors', as
   await expect(page.getByRole('heading', { name: 'Share archive.bin' })).toBeVisible();
 });
 
-test('object and folder deletion require confirmation, while cancel leaves the listing unchanged', async ({ page }) => {
+test('object deletion hides the item, while non-empty folder deletion is rejected', async ({ page }) => {
   await mockAdminApi(page);
   await signIn(page);
   await openBucket(page);
+
+  const folderDeleteAction = await page.getByRole('button', { name: 'Delete folder docs' }).boundingBox();
+  const objectDeleteAction = await page.getByRole('button', { name: 'Delete readme.txt' }).boundingBox();
+  expect(folderDeleteAction).not.toBeNull();
+  expect(objectDeleteAction).not.toBeNull();
+  if (!folderDeleteAction || !objectDeleteAction) throw new Error('delete actions were not rendered');
+  expect(Math.abs((folderDeleteAction.x + folderDeleteAction.width) - (objectDeleteAction.x + objectDeleteAction.width))).toBeLessThan(2);
 
   await page.getByRole('button', { name: 'Delete readme.txt' }).click();
   await expect(page.getByRole('heading', { name: 'Delete object?' })).toBeVisible();
@@ -262,6 +271,8 @@ test('object and folder deletion require confirmation, while cancel leaves the l
   await expect(page.getByRole('heading', { name: 'Delete folder?' })).toBeVisible();
   await page.locator('.compact-modal').getByRole('button', { name: 'Delete', exact: true }).click();
   expect((await folderDelete).postDataJSON()).toMatchObject({ bucket: 'release-test', key: 'docs/' });
+  await expect(page.getByRole('alert')).toContainText('folder not empty: docs/');
+  await expect(page.getByRole('button', { name: 'Delete folder docs' })).toBeVisible();
 });
 
 test('bucket toolbar creates a folder and folder navigation updates the breadcrumb', async ({ page }) => {

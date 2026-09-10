@@ -35,6 +35,8 @@ pub enum MetadataError {
     BucketAlreadyExists(String),
     #[error("bucket not empty: {0}")]
     BucketNotEmpty(String),
+    #[error("folder not empty: {0}")]
+    FolderNotEmpty(String),
     #[error("a connection removal is already in progress")]
     ConnectionRemovalInProgress,
     #[error("metadata state is poisoned")]

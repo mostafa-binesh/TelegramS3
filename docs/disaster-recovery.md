@@ -67,6 +67,13 @@ normal worker/reconciliation path.
 4. Run `telegram-s3 gc` only when the dry-run output matches the intended
    cleanup scope.
 
+The admin object browser follows the same recovery boundary. A delete response
+is successful only after the local active pointer is tombstoned, so the item is
+hidden from subsequent listings immediately. Deleting a folder with active
+children is rejected; delete the children first, then remove the empty folder
+marker. Telegram documents may remain until the background cleanup worker has
+completed its evidence-first work.
+
 ## Removing the Current Telegram Connection
 
 The admin Connection tab requires confirmation before removal. The transaction
