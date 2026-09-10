@@ -220,6 +220,9 @@ Completed in this increment:
   explicit confirmation; local buckets, objects, and statistics are hidden
   immediately, while optional Telegram payload deletion is a durable,
   restart-safe worker job
+- Telegram sends now have durable attempt tokens and diagnostics; ambiguous
+  acknowledgements are automatically reconciled by token plus exact encrypted
+  bytes, and unmatched sends are safely retried after a complete history scan
 
 Multi-user boundary for the next increment:
 
@@ -232,10 +235,14 @@ Multi-user boundary for the next increment:
 - add two-account isolation, restart, and cross-account cleanup tests before
   changing the single-connection reservation into concurrent cleanup
 
-Planned work:
+Remaining Phase 10 work:
 
-- introduce a durable upload worker / queue so staging is not tied to a single foreground request path; the worker should own chunk fan-out, retry, and final commit
-- add periodic reconciliation for staged uploads so missing chunks, orphaned staging trees, and interrupted commits are repaired or quarantined before they become user-visible corruption
+- expand fault-injection coverage for Telegram timeouts, process crashes, and
+  history-scan limits; live Telegram verification remains a separate release
+  gate
+- add periodic reconciliation for staged uploads so missing chunks, orphaned
+  staging trees, and interrupted commits are repaired or quarantined before
+  they become user-visible corruption
 - make the startup path fail soft for recoverable upload issues: the app should boot, expose health, and let operators inspect or repair state instead of disappearing when staging is damaged
 
 Notes:

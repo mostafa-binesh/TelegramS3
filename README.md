@@ -121,6 +121,11 @@ A full request-lifecycle and consistency walkthrough is in
 - Uploads write to staging, verify every chunk checksum, publish the chunk
   payloads to Telegram, then commit the manifest and local index **atomically**
   — readers never see a partial object.
+- Every Telegram send has a durable attempt token and outcome. If a timeout or
+  restart leaves the acknowledgement ambiguous, the worker scans recent
+  Telegram documents for that token and repairs the checkpoint only after an
+  exact encrypted-byte match; otherwise it schedules a safe retry. It never
+  guesses from captions or silently duplicates an unknown send.
 - Deletes first record a recoverable tombstone and hide the object, then queue
   evidence-first physical cleanup for the durable worker to remove Telegram
   messages asynchronously with retry support.

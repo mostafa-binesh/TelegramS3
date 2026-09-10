@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added durable Telegram send-attempt tokens and diagnostics. Ambiguous upload
+  acknowledgements are automatically reconciled by exact document-token and
+  encrypted-byte matching, with safe retry when a complete scan finds no
+  matching document.
+
 ## 0.7.1-rc.7 - 2026-09-10
 
 - Fixed connection-removal cleanup so the owning Telegram transport remains

@@ -106,6 +106,11 @@ The manifest must not depend on captions alone.
 - Each chunk records order, offset, size, and checksum.
 - Chunk documents are uploaded to Telegram and identified by peer/message
   metadata in the manifest.
+- Each send also uses a durable, unique filename token. The token is forensic
+  evidence only; the manifest's peer/message/document identifiers remain the
+  authoritative object reference. If an acknowledgement is lost, recovery
+  scans Telegram messages newer than the attempt boundary and accepts a match
+  only when the token and complete encrypted bytes both match.
 - Local disk keeps only temporary staging, quarantine, or mock transport
   artifacts.
 - Chunk payloads must be independently verifiable.
@@ -185,6 +190,11 @@ session and reconciliation handles the stale receiving job as recovery work.
   generation-mismatch/recovery-required target; cleanup is due immediately and
   remains retryable if Telegram is unavailable.
 - Missing chunks make the object corrupt until repaired.
+- An ambiguous send first enters `unknown`. The background worker can resolve
+  it to `checkpointed` after an exact remote match, or to `retryable` after a
+  complete history scan finds no matching document. An incomplete scan,
+  unavailable Telegram session, missing staging file, or byte mismatch stays
+  `recovery_required` for operator review.
 - Multipart parts remain hidden until completion publishes the final manifest.
 - Version IDs are derived from the stored manifest identity, so copy and delete
   marker flows can remain explicit across restarts.

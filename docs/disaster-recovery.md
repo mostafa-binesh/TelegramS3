@@ -70,8 +70,13 @@ target stores its connection generation; if that generation is no longer
 owned by the removal job, the worker quarantines the target instead of guessing
 which account may authorize it.
 Unknown Telegram acknowledgements remain `recovery_required` and keep evidence
-material. If the checkbox is not selected, local data is still removed from the
-active installation but remote Telegram files are intentionally left in place.
+material until the worker can inspect them. The worker records a unique send
+token before upload, searches Telegram history back to the attempt timestamp,
+and repairs a checkpoint only for an exact encrypted-byte match. If no match is
+found after a complete scan, it schedules the chunk for retry; connectivity,
+scan-limit, missing-staging, and byte-mismatch cases remain recovery-required.
+If the checkbox is not selected, local data is still removed from the active
+installation but remote Telegram files are intentionally left in place.
 Do not describe those retained files as deleted or recoverable through the
 removed connection.
 

@@ -80,6 +80,12 @@ Any storage change must include coverage for:
   through a replacement account. Local visibility is hidden immediately, but
   the owning connection remains reserved while `remote_cleanup_pending`.
 - Range reads must stay bounded in memory.
+- Every Telegram send must persist an attempt token and outcome before the
+  remote call; ambiguous acknowledgements may be repaired only by matching the
+  token and exact encrypted bytes, never by captions alone.
+- Automatic retry is allowed only after a complete reconciliation scan proves
+  that no matching remote document exists. Unbounded history scans, missing
+  staging, unavailable Telegram, and byte mismatches remain recovery-required.
 - Compatibility notes must distinguish implemented, designed, and unsupported behavior.
 
 ## Multi-user Preparation

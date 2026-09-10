@@ -16,7 +16,7 @@
 </script>
 <section class="card surface">
   <div class="section-head"><div><p class="card-label">{recoveryOnly?'Recovery':'Background transfers'}</p><h2>{recoveryOnly?'Resolve interrupted work':'Transfer activity'}</h2></div><button class="ghost" on:click={refresh} disabled={refreshing}>{#if refreshing}<span class="spinner" aria-hidden="true"></span>{/if}Refresh</button></div>
-  <p class="fine-print">{recoveryOnly?'Staged files are retained until recovery or cancellation.':'Files appear in Buckets after Telegram upload and commit finish.'}</p>
+  <p class="fine-print">{recoveryOnly?'Staged files are retained while the worker checks ambiguous Telegram sends; only a verified byte match is repaired automatically.':'Files appear in Buckets after Telegram upload and commit finish. Transient Telegram failures retry in the background.'}</p>
   {#if error}<LoadError title="Could not load transfer activity" message={error} onRetry={refresh} />{/if}
   {#if loading}<div class="skeleton-stack"><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:48px"></div></div>{:else if !visible.length && !error}<p class="empty">{recoveryOnly?'No transfers need attention on this page.':'No transfers yet. Upload a file from Buckets to get started.'}</p>{:else if visible.length}
   <div class="table-scroll"><table><thead><tr><th>Object</th><th>Progress</th><th>Status</th><th>Actions</th></tr></thead><tbody>
