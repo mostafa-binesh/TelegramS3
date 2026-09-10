@@ -19,6 +19,7 @@ pub(crate) struct ReceptionState {
     pub hasher: Sha256,
     pub offset: u64,
     pub final_received: bool,
+    pub chunk_size: u64,
 }
 
 impl ObjectFormatService {
@@ -41,6 +42,7 @@ impl ObjectFormatService {
     ) -> Result<ReceptionStatus, ObjectFormatError> {
         self.ensure_connection_not_removing()?;
         let object_id = Uuid::new_v4();
+        let chunk_size = self.chunk_size();
         let id = self.metadata.begin_transfer(object_id, bucket, key)?;
         let dir = self.staging_dir(object_id);
         if let Err(error) = async_fs::create_dir_all(&dir).await {
@@ -61,6 +63,7 @@ impl ObjectFormatService {
             hasher: Sha256::new(),
             offset: 0,
             final_received: false,
+            chunk_size,
         };
         self.receptions
             .lock()
@@ -69,7 +72,7 @@ impl ObjectFormatService {
         Ok(ReceptionStatus {
             id,
             received: 0,
-            chunk_size: self.chunk_size,
+            chunk_size,
         })
     }
 
@@ -87,7 +90,7 @@ impl ObjectFormatService {
         Ok(ReceptionStatus {
             id: id.to_string(),
             received: state.offset,
-            chunk_size: self.chunk_size,
+            chunk_size: state.chunk_size,
         })
     }
 
@@ -106,10 +109,10 @@ impl ObjectFormatService {
                 received: state.offset,
             });
         }
-        if bytes.len() as u64 > self.chunk_size {
+        if bytes.len() as u64 > state.chunk_size {
             return Err(ObjectFormatError::ReceptionChunkTooLarge);
         }
-        if !final_chunk && bytes.len() as u64 != self.chunk_size {
+        if !final_chunk && bytes.len() as u64 != state.chunk_size {
             return Err(ObjectFormatError::ReceptionChunkSizeMismatch);
         }
         if !bytes.is_empty() {
@@ -129,7 +132,7 @@ impl ObjectFormatService {
         Ok(ReceptionStatus {
             id: id.to_string(),
             received: state.offset,
-            chunk_size: self.chunk_size,
+            chunk_size: state.chunk_size,
         })
     }
 

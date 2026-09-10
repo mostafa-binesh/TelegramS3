@@ -170,6 +170,8 @@ struct TelegramSettingsRequest {
 struct TelegramDisconnectRequest {
     #[serde(default)]
     delete_uploaded_files: bool,
+    #[serde(default)]
+    phone_confirmation: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -462,6 +464,10 @@ impl AdminUiState {
             (Method::GET, "telegram/settings") => self.telegram_settings(&principal).await,
             (Method::POST, "telegram/settings") => {
                 self.telegram_save_settings(request, &principal).await
+            }
+            (Method::GET, "telegram/storage-settings") => self.telegram_storage_settings().await,
+            (Method::POST, "telegram/storage-settings") => {
+                self.telegram_save_storage_settings(request).await
             }
             (Method::POST, "telegram/disconnect") => self.telegram_disconnect(request).await,
             _ => json_error(StatusCode::NOT_FOUND, "not found"),
@@ -1165,11 +1171,17 @@ impl AdminUiState {
             }
         };
         let owner = &principal.user.username;
+        let phone_for_confirmation = phone.clone();
         match driver
             .begin(&transport, phone, &flow_id, replace, owner)
             .await
         {
             Ok(step) => {
+                if let Some(phone) = phone_for_confirmation.as_deref()
+                    && let Err(error) = self.store().set_telegram_account_phone(phone)
+                {
+                    eprintln!("failed to store Telegram phone confirmation hash: {error}");
+                }
                 if driver.is_authorized() {
                     self.finalize_wizard_success().await;
                 }
@@ -1418,6 +1430,7 @@ impl AdminUiState {
     async fn telegram_disconnect(&self, request: Request<Incoming>) -> Response<Body> {
         let TelegramDisconnectRequest {
             delete_uploaded_files,
+            phone_confirmation,
         } = match read_json::<TelegramDisconnectRequest>(request).await {
             Ok(body) => body,
             Err(_) => {
@@ -1427,6 +1440,25 @@ impl AdminUiState {
                 );
             }
         };
+        if phone_confirmation.trim().is_empty() {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "enter the phone number linked to this Telegram account",
+            );
+        }
+        match self
+            .store()
+            .telegram_account_phone_matches(&phone_confirmation)
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return json_error(
+                    StatusCode::FORBIDDEN,
+                    "the phone number does not match the connected Telegram account",
+                );
+            }
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        }
         let job = match self.store().begin_connection_removal(delete_uploaded_files) {
             Ok(job) => job,
             Err(crate::metadata::MetadataError::ConnectionRemovalInProgress) => {
@@ -1451,6 +1483,41 @@ impl AdminUiState {
                 }
             }),
         )
+    }
+
+    async fn telegram_storage_settings(&self) -> Response<Body> {
+        json_response(StatusCode::OK, self.telegram_storage_settings_wire())
+    }
+
+    async fn telegram_save_storage_settings(&self, request: Request<Incoming>) -> Response<Body> {
+        let StorageSettingsRequest { chunk_size } = match read_json(request).await {
+            Ok(body) => body,
+            Err(_) => {
+                return json_error(StatusCode::BAD_REQUEST, "invalid storage settings payload");
+            }
+        };
+        let Some(chunk_size) = chunk_size else {
+            return json_error(StatusCode::BAD_REQUEST, "chunk_size is required");
+        };
+        if let Err(error) = crate::config::AppConfig::validate_chunk_size(chunk_size) {
+            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+        if let Err(error) = self.store().set_telegram_chunk_size(chunk_size) {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self.object_format.set_chunk_size(chunk_size) {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        json_response(StatusCode::OK, self.telegram_storage_settings_wire())
+    }
+
+    fn telegram_storage_settings_wire(&self) -> StorageSettingsWire {
+        StorageSettingsWire {
+            chunk_size: self.object_format.chunk_size(),
+            min_chunk_size: crate::config::MIN_CHUNK_SIZE,
+            max_chunk_size: crate::config::MAX_CHUNK_SIZE,
+            source: "database".to_string(),
+        }
     }
 
     fn telegram_settings_wire(&self) -> TelegramSettingsWire {
@@ -2324,6 +2391,21 @@ struct TelegramSettingsWire {
     telegram_proxy_username: String,
     telegram_proxy_password: String,
     telegram_proxy_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct StorageSettingsRequest {
+    chunk_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct StorageSettingsWire {
+    chunk_size: u64,
+    min_chunk_size: u64,
+    max_chunk_size: u64,
+    source: String,
 }
 
 // ---- cookie / csrf primitives -----------------------------------------------

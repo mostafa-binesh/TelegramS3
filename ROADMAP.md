@@ -201,6 +201,9 @@ Completed in this increment:
 - the admin console now has history-routed bucket/folder locations, SVG
   navigation icons, a folder-aware move browser, and Telegram connection/proxy
   sub-tabs
+- the Telegram settings page now exposes a database-backed Storage policy tab;
+  chunk size can be changed live for new uploads while existing manifests and
+  active receptions retain their captured boundaries
 - lazy-loaded console views now surface a retryable asset-load error instead of
   remaining on an infinite skeleton; Docker/static serving keeps hashed Vite
   chunks under `/_admin/assets/`

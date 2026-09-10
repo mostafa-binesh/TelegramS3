@@ -57,6 +57,7 @@ impl ObjectFormatService {
     ) -> Result<TransferJob, ObjectFormatError> {
         self.ensure_connection_not_removing()?;
         let object_id = Uuid::new_v4();
+        let chunk_size = self.chunk_size();
         let id = self.metadata.begin_transfer(object_id, bucket, key)?;
         let dir = self.staging_dir(object_id);
         let metadata = Arc::clone(&self.metadata);
@@ -81,7 +82,7 @@ impl ObjectFormatService {
             }
             async_fs::create_dir_all(&dir).await?;
             let mut body = body.unwrap_or_else(|| StreamingBlob::new(Body::empty()));
-            let mut pending = Vec::with_capacity(self.chunk_size as usize);
+            let mut pending = Vec::with_capacity(chunk_size as usize);
             let mut chunks = Vec::new();
             let mut hasher = Sha256::new();
             let mut offset = 0;
@@ -95,10 +96,10 @@ impl ObjectFormatService {
                 while !remaining.is_empty() {
                     let take = remaining
                         .len()
-                        .min(self.chunk_size as usize - pending.len());
+                        .min(chunk_size as usize - pending.len());
                     pending.extend_from_slice(&remaining[..take]);
                     remaining = &remaining[take..];
-                    if pending.len() == self.chunk_size as usize {
+                    if pending.len() == chunk_size as usize {
                         self.stage_transfer_chunk(
                             object_id,
                             &pending,

@@ -94,6 +94,16 @@ argon2id. There is no per-user `.env` entry.
   There is **no email/password-reset flow**; recovery is CLI-admin only.
 - Deleting the last remaining superadmin is refused.
 
+## Dynamic Storage Policy
+
+`TELEGRAM_CHUNK_SIZE` is used as the one-time import value when an existing
+metadata database has no stored chunk policy. The value is then persisted in
+the `app_settings` table and becomes authoritative. The authenticated admin
+console exposes it under **Telegram settings → Storage policy** and applies a
+new value immediately to new uploads and resumable receptions. Existing
+manifests and active transfers retain their recorded chunk boundaries; no
+rechunking or Telegram migration is performed.
+
 ## Required Runtime Settings
 
 - chunk size

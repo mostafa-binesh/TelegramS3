@@ -2,8 +2,11 @@ use super::rows::timestamp_now;
 use super::{MetadataError, MetadataStore};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use uuid::Uuid;
+
+const CHUNK_SIZE_SETTING: &str = "telegram_chunk_size";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelegramBootstrapSettings {
@@ -18,6 +21,62 @@ pub struct TelegramBootstrapSettings {
 }
 
 impl MetadataStore {
+    pub fn telegram_chunk_size(&self) -> Result<Option<u64>, MetadataError> {
+        self.with_connection(|connection| {
+            let value: Option<String> = connection
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key=?1",
+                    [CHUNK_SIZE_SETTING],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            value
+                .map(|value| {
+                    value.parse::<u64>().map_err(|_| {
+                        MetadataError::InvalidManifest("invalid stored chunk size".into())
+                    })
+                })
+                .transpose()
+        })
+    }
+
+    pub fn set_telegram_chunk_size(&self, chunk_size: u64) -> Result<(), MetadataError> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO app_settings(key,value,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                params![CHUNK_SIZE_SETTING, chunk_size.to_string(), timestamp_now()?],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn set_telegram_account_phone(&self, phone: &str) -> Result<(), MetadataError> {
+        let normalized = normalize_phone(phone);
+        let hash = hex::encode(Sha256::digest(normalized.as_bytes()));
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO app_settings(key,value,updated_at) VALUES('telegram_account_phone_hash',?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                params![hash, timestamp_now()?],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn telegram_account_phone_matches(&self, phone: &str) -> Result<bool, MetadataError> {
+        let normalized = normalize_phone(phone);
+        let expected = hex::encode(Sha256::digest(normalized.as_bytes()));
+        self.with_connection(|connection| {
+            let stored: Option<String> = connection
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key='telegram_account_phone_hash'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(stored.as_deref() == Some(expected.as_str()))
+        })
+    }
+
     pub fn telegram_bootstrap_settings(
         &self,
     ) -> Result<Option<TelegramBootstrapSettings>, MetadataError> {
@@ -163,6 +222,29 @@ impl MetadataStore {
             Ok(())
         })
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MetadataStore;
+
+    #[test]
+    fn chunk_size_setting_round_trips_without_schema_changes() {
+        let store = MetadataStore::open_in_memory().expect("metadata");
+        assert_eq!(store.telegram_chunk_size().expect("read"), None);
+        store
+            .set_telegram_chunk_size(8 * 1024 * 1024)
+            .expect("write");
+        assert_eq!(
+            store.telegram_chunk_size().expect("read"),
+            Some(8 * 1024 * 1024)
+        );
+        assert_eq!(store.schema_version().expect("schema"), 11);
+    }
+}
+
+fn normalize_phone(phone: &str) -> String {
+    phone.chars().filter(char::is_ascii_digit).collect()
 }
 
 /// Fingerprint -> who acknowledged it and when.

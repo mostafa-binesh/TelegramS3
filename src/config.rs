@@ -7,6 +7,9 @@ use thiserror::Error;
 
 const DEFAULT_METADATA_PATH: &str = "data/metadata.sqlite";
 const DEFAULT_DATA_DIR: &str = "data";
+pub const MIN_CHUNK_SIZE: u64 = 1;
+pub const MAX_CHUNK_SIZE: u64 = 2_000_000_000;
+pub const DEFAULT_CHUNK_SIZE: u64 = 1_048_576;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppConfig {
@@ -116,10 +119,17 @@ impl AppConfig {
         parse_u64(
             "TELEGRAM_CHUNK_SIZE",
             self.telegram_chunk_size.as_deref(),
-            1,
-            2_000_000_000,
-            1_048_576,
+            MIN_CHUNK_SIZE,
+            MAX_CHUNK_SIZE,
+            DEFAULT_CHUNK_SIZE,
         )
+    }
+
+    pub fn validate_chunk_size(value: u64) -> Result<u64, ConfigError> {
+        if !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&value) {
+            return Err(ConfigError::Invalid("TELEGRAM_CHUNK_SIZE"));
+        }
+        Ok(value)
     }
 
     pub fn connection_timeout_secs(&self) -> Result<u64, ConfigError> {

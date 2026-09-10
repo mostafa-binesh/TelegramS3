@@ -44,8 +44,14 @@ Each object is represented by:
 
 The initial default is `1 MiB`, matching the conservative Telegram Drive
 TDENC2 chunk size and staying far below Telegram's approximate `2,000,000,000`
-byte file limit. The final implementation should keep the value configurable and
-validate it against the Telegram client behavior in tests.
+byte file limit. The configured chunk size is an upload-time policy, not a
+format requirement: each committed manifest records the exact chunk references,
+offsets, and sizes it uses. An operator may change `TELEGRAM_CHUNK_SIZE` for
+later uploads after restarting the process; existing objects remain readable
+and mixed chunk sizes are valid. Changing it does not rechunk or migrate
+existing Telegram documents. A live database-backed setting could remove the
+restart requirement, but it would still need to be captured per upload so one
+transfer cannot change shape halfway through.
 
 ## Manifest Document
 

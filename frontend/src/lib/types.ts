@@ -120,6 +120,15 @@ export interface TelegramSettingsState {
   refresh_error?: string | null;
 }
 
+export interface StorageSettings {
+  chunk_size: number;
+  min_chunk_size: number;
+  max_chunk_size: number;
+  source: 'database' | string;
+}
+
+export interface StorageSettingsState extends StorageSettings {}
+
 export type WizardPhase = 'idle' | 'code' | 'two_fa' | 'authorized';
 
 export interface WizardState {

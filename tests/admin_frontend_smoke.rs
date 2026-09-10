@@ -77,6 +77,9 @@ fn seed_telegram_settings(tempdir: &TempDir) {
             ..TelegramBootstrapSettings::default()
         })
         .expect("telegram settings");
+    store
+        .set_telegram_account_phone("+15551234567")
+        .expect("telegram phone confirmation");
 }
 
 #[tokio::test]
@@ -408,6 +411,20 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     .await;
     assert_eq!(delete_bucket.status, 200);
 
+    let wrong_phone_disconnect = http_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/telegram/disconnect",
+        &[
+            ("Cookie", cookie_header.as_str()),
+            ("X-CSRF-Token", csrf.as_str()),
+        ],
+        br#"{"delete_uploaded_files":false,"phone_confirmation":"+15550000000"}"#,
+    )
+    .await;
+    assert_eq!(wrong_phone_disconnect.status, 403);
+
     let disconnect = http_request(
         &client,
         &bind_addr,
@@ -417,7 +434,7 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
             ("Cookie", cookie_header.as_str()),
             ("X-CSRF-Token", csrf.as_str()),
         ],
-        br#"{"delete_uploaded_files":false}"#,
+        br#"{"delete_uploaded_files":false,"phone_confirmation":"+15551234567"}"#,
     )
     .await;
     assert_eq!(disconnect.status, 202);

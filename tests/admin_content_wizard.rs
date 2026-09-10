@@ -185,6 +185,33 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
             .expect("session set-cookie"),
     );
 
+    let storage_settings = json_request(
+        &client,
+        &bind_addr,
+        "GET",
+        "/_admin/api/telegram/storage-settings",
+        &[("Cookie", &cookie)],
+        b"",
+    )
+    .await;
+    assert_eq!(storage_settings.status_code, 200, "storage settings GET");
+    assert_eq!(storage_settings.bytes_json["chunk_size"], 1_048_576);
+    let storage_update = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/telegram/storage-settings",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        br#"{"chunk_size":2097152}"#,
+    )
+    .await;
+    assert_eq!(storage_update.status_code, 200, "storage settings update");
+    assert_eq!(storage_update.bytes_json["chunk_size"], 2_097_152);
+
     // ---- content route, backed by a freshly created S3 bucket ----------------
     let bucket = format!("wiz-{}", uuid::Uuid::new_v4().simple());
     let key = "folder/hello.txt";
@@ -336,6 +363,11 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
     let shared = raw_request(&client, &bind_addr, "GET", &share_url, &[], b"").await;
     assert_eq!(shared.status, 200, "public share GET");
     assert_eq!(shared.body, raw, "public share body must equal raw bytes");
+    assert!(
+        header(&shared, "content-disposition").contains("hello.txt"),
+        "public share should preserve the object filename, got {:?}",
+        shared.headers.get("content-disposition")
+    );
     let shared_head = raw_request(&client, &bind_addr, "HEAD", &share_url, &[], b"").await;
     assert_eq!(shared_head.status, 200, "public share HEAD");
     assert!(

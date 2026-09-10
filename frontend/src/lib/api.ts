@@ -4,6 +4,7 @@ import type {
   ObjectsState,
   OverviewState,
   SessionState,
+  StorageSettingsState,
   TelegramSettingsState,
   UsersState,
   WizardState
@@ -176,6 +177,20 @@ export function removeObject(csrf?: string | null, bucket = '', key = '') {
   });
 }
 
+export function getStorageSettings() {
+  return requestJson<StorageSettingsState>('/telegram/storage-settings');
+}
+
+export function saveStorageSettings(
+  csrf?: string | null,
+  body?: Partial<StorageSettingsState>
+) {
+  return requestJson<StorageSettingsState>('/telegram/storage-settings', csrf, {
+    method: 'POST',
+    body
+  });
+}
+
 export function createShareLink(
   csrf: string | null | undefined,
   bucket: string,
@@ -283,12 +298,13 @@ export async function uploadObject(
 
 export function removeTelegramConnection(
   csrf: string | null | undefined,
-  deleteUploadedFiles: boolean
+  deleteUploadedFiles: boolean,
+  phoneConfirmation: string
 ) {
   return requestJson<{ ok: boolean; job: { id: string; state: string; delete_uploaded_files: boolean }; message: string }>(
     '/telegram/disconnect',
     csrf,
-    { method: 'POST', body: { delete_uploaded_files: deleteUploadedFiles } }
+    { method: 'POST', body: { delete_uploaded_files: deleteUploadedFiles, phone_confirmation: phoneConfirmation } }
   );
 }
 

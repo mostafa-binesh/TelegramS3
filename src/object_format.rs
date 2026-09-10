@@ -293,7 +293,7 @@ pub struct ObjectFormatService {
     metadata: Arc<MetadataStore>,
     transport_manager: std::sync::Arc<TelegramTransportManager>,
     data_dir: PathBuf,
-    chunk_size: u64,
+    chunk_size: Arc<RwLock<u64>>,
     storage_chat_id: Arc<RwLock<String>>,
     worker_runtime: Arc<WorkerRuntime>,
     read_pins: Arc<Mutex<HashMap<Uuid, u64>>>,
@@ -380,11 +380,19 @@ impl ObjectFormatService {
             .ok()
             .map(|bootstrap| bootstrap.telegram_storage_chat_id)
             .unwrap_or_default();
+        let chunk_size = match metadata.telegram_chunk_size()? {
+            Some(chunk_size) => crate::config::AppConfig::validate_chunk_size(chunk_size)?,
+            None => {
+                let chunk_size = config.chunk_size()?;
+                metadata.set_telegram_chunk_size(chunk_size)?;
+                chunk_size
+            }
+        };
         let mut service = Self::new(
             metadata,
             transport_manager,
             config.data_dir(),
-            config.chunk_size()?,
+            chunk_size,
             storage_chat_id,
             ObjectEncryption::from_master_key(&master_key),
         )?;
@@ -412,7 +420,7 @@ impl ObjectFormatService {
             metadata: Arc::new(metadata),
             transport_manager,
             data_dir,
-            chunk_size,
+            chunk_size: Arc::new(RwLock::new(chunk_size)),
             storage_chat_id: Arc::new(RwLock::new(storage_chat_id)),
             worker_runtime: Arc::new(WorkerRuntime::default()),
             read_pins: Arc::new(Mutex::new(HashMap::new())),
@@ -440,7 +448,14 @@ impl ObjectFormatService {
     }
 
     pub fn chunk_size(&self) -> u64 {
-        self.chunk_size
+        *self.chunk_size.read().expect("chunk size lock")
+    }
+
+    pub fn set_chunk_size(&self, chunk_size: u64) -> Result<(), ObjectFormatError> {
+        crate::config::AppConfig::validate_chunk_size(chunk_size)
+            .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+        *self.chunk_size.write().expect("chunk size lock") = chunk_size;
+        Ok(())
     }
 
     /// Reach the shared SQLite store (single writer) for operator/auth tables.
@@ -842,7 +857,7 @@ impl ObjectFormatService {
 
         Ok(ObjectFormatStatus {
             data_dir: self.data_dir.clone(),
-            chunk_size: self.chunk_size,
+            chunk_size: self.chunk_size(),
             committed_objects,
             staged_objects,
             recovery_required_objects,
@@ -1043,7 +1058,7 @@ impl ObjectFormatService {
     }
 
     pub fn plan_upload(&self, content_length: u64) -> Result<ChunkPlan, ObjectFormatError> {
-        Self::plan_chunks(content_length, self.chunk_size)
+        Self::plan_chunks(content_length, self.chunk_size())
     }
 
     pub fn stage_bytes(
@@ -1079,14 +1094,15 @@ impl ObjectFormatService {
         };
         fs::create_dir_all(&scratch_dir)?;
 
+        let chunk_size = self.chunk_size();
         let mut chunk_plan = ChunkPlan {
-            chunk_size: self.chunk_size,
+            chunk_size,
             content_length: 0,
             chunks: Vec::new(),
         };
         let mut chunk_refs = Vec::new();
         let mut whole_hasher = Sha256::new();
-        let mut buffer = vec![0_u8; self.chunk_size as usize];
+        let mut buffer = vec![0_u8; chunk_size as usize];
         let mut offset = 0_u64;
 
         loop {
@@ -2550,6 +2566,46 @@ mod tests {
         assert_eq!(plan.chunks.len(), 5);
         assert_eq!(plan.chunks[0].offset, 0);
         assert_eq!(plan.chunks[4].size, 1);
+    }
+
+    #[tokio::test]
+    async fn changing_chunk_size_preserves_existing_object_reads() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        assert_eq!(
+            service
+                .metadata_store()
+                .telegram_chunk_size()
+                .expect("setting"),
+            Some(AppConfig::default().chunk_size().expect("default chunk"))
+        );
+
+        service.set_chunk_size(1024).expect("small chunks");
+        let payload = vec![b'x'; 2500];
+        let manifest = service
+            .put_bytes(
+                "bucket",
+                "chunk-policy.bin",
+                "application/octet-stream",
+                &payload,
+            )
+            .await
+            .expect("put");
+        assert_eq!(manifest.chunks.len(), 3);
+
+        service.set_chunk_size(2048).expect("new chunks");
+        assert_eq!(service.chunk_size(), 2048);
+        assert_eq!(
+            service
+                .read_bytes("bucket", "chunk-policy.bin", 0..payload.len() as u64)
+                .await
+                .expect("read after policy change"),
+            payload
+        );
+        assert_eq!(
+            service.plan_upload(2500).expect("new plan").chunk_size,
+            2048
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ export const BASE = '/_admin';
 
 export type ViewName = 'overview' | 'buckets' | 'transfers' | 'recovery' | 'telegram' | 'users';
 export type RecoveryTab = 'issues' | 'transfers';
-export type TelegramTab = 'connection' | 'proxy';
+export type TelegramTab = 'connection' | 'proxy' | 'storage';
 
 export interface Route {
   view: ViewName;
@@ -63,7 +63,11 @@ export function parseRoute(pathname: string): Route {
     return { ...DEFAULT_ROUTE, view, recoveryTab: tail[0] === 'transfers' ? 'transfers' : 'issues' };
   }
   if (view === 'telegram') {
-    return { ...DEFAULT_ROUTE, view, telegramTab: tail[0] === 'proxy' ? 'proxy' : 'connection' };
+    return {
+      ...DEFAULT_ROUTE,
+      view,
+      telegramTab: tail[0] === 'proxy' ? 'proxy' : tail[0] === 'storage' ? 'storage' : 'connection'
+    };
   }
   return { ...DEFAULT_ROUTE, view };
 }
@@ -78,6 +82,7 @@ export function routePath(route: Partial<Route>): string {
   }
   if (view === 'recovery' && route.recoveryTab === 'transfers') parts.push('transfers');
   if (view === 'telegram' && route.telegramTab === 'proxy') parts.push('proxy');
+  if (view === 'telegram' && route.telegramTab === 'storage') parts.push('storage');
   return `${BASE}/${parts.map(encodeURIComponent).join('/')}`;
 }
 
