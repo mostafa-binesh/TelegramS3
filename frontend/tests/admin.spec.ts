@@ -43,7 +43,10 @@ const overview = {
   checks: []
 };
 
-async function mockAdminApi(page: import('@playwright/test').Page) {
+async function mockAdminApi(
+  page: import('@playwright/test').Page,
+  options: { telegramSettingsFailure?: boolean } = {}
+) {
   let loggedIn = false;
   let recoveryJobVisible = true;
   let connectionRemoved = false;
@@ -61,6 +64,9 @@ async function mockAdminApi(page: import('@playwright/test').Page) {
       loggedIn = false;
       return route.fulfill({ json: { authenticated: false } });
     }
+    if (path === '/setup' && request.method() === 'GET') {
+      return route.fulfill({ json: { setup_required: false } });
+    }
     if (!loggedIn) return route.fulfill({ status: 401, json: { error: 'unauthorized' } });
     if (path === '/overview') {
       const clearedOverview = {
@@ -76,7 +82,26 @@ async function mockAdminApi(page: import('@playwright/test').Page) {
       recoveryJobVisible = false;
       return route.fulfill({ status: 202, json: { ok: true, job: { id: 'removal-1', state: 'pending', delete_uploaded_files: false }, message: 'Connection removed.' } });
     }
-    if (path === '/telegram/settings') {
+    if (path === '/telegram/settings' && request.method() === 'POST') {
+      if (options.telegramSettingsFailure) {
+        return route.fulfill({ status: 400, json: { error: 'telegram settings rejected for this test' } });
+      }
+      const body = request.postDataJSON() as Record<string, string>;
+      return route.fulfill({
+        json: {
+          settings: {
+            telegram_api_id: body.telegram_api_id ?? '12345',
+            telegram_api_hash: body.telegram_api_hash ?? 'hash',
+            telegram_storage_chat_id: body.telegram_storage_chat_id ?? '-1001234567890',
+            telegram_proxy_url: body.telegram_proxy_url ?? '',
+            telegram_proxy_username: body.telegram_proxy_username ?? '',
+            telegram_proxy_password: body.telegram_proxy_password ?? '',
+            telegram_proxy_mode: body.telegram_proxy_mode ?? 'auto'
+          }
+        }
+      });
+    }
+    if (path === '/telegram/settings' && request.method() === 'GET') {
       return route.fulfill({
         json: {
           settings: {
@@ -152,7 +177,7 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
 
   await expect(page.getByRole('heading', { name: 'Storage at a glance' })).toBeVisible();
   await page.getByRole('button', { name: 'Telegram settings' }).click();
-  await expect(page.getByRole('heading', { name: 'Telegram storage is connected' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Your storage connection, beautifully in sync.' })).toBeVisible();
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page.getByRole('heading', { name: 'Sign in to manage storage' })).toBeVisible();
 });
@@ -207,27 +232,91 @@ test('recovery transfer is visible and retry removes it after reconciliation', a
   await expect(page.getByText('No transfers yet. Upload a file from Buckets to get started.')).toBeVisible();
 });
 
-test('telegram wizard advances each step when Enter is pressed', async ({ page }) => {
+test('telegram account wizard validates, preserves, saves, and authorizes the account', async ({ page }) => {
   await mockAdminApi(page);
+  const requestOrder: string[] = [];
+  let savedSettings: Record<string, string> | null = null;
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.endsWith('/telegram/settings') && request.method() === 'POST') {
+      requestOrder.push('settings');
+      savedSettings = request.postDataJSON() as Record<string, string>;
+    }
+    if (path.endsWith('/telegram/wizard/begin') && request.method() === 'POST') requestOrder.push('begin');
+  });
   await page.goto('/');
   await page.getByLabel('Username').fill('admin');
   await page.getByLabel('Password').fill('correct-password');
   await page.getByRole('button', { name: 'Sign in' }).click();
   await page.getByRole('button', { name: 'Telegram settings' }).click();
-  await page.getByRole('button', { name: 'Refresh Telegram login' }).click();
+  await expect(page.getByRole('heading', { name: 'Your storage connection, beautifully in sync.' })).toBeVisible();
+  await page.getByRole('button', { name: 'Edit account setup' }).click();
 
-  await page.getByLabel('Phone (international format)').fill('+15550000000');
-  await page.getByLabel('Phone (international format)').press('Enter');
+  await expect(page.getByRole('heading', { name: 'Start with your Telegram app' })).toBeVisible();
+  await expect(page.getByText('Step 1 of 4')).toBeVisible();
+  await page.getByLabel('Telegram API ID').fill('54321');
+  await page.getByLabel('Telegram API hash').fill('');
+  await expect(page.getByRole('button', { name: 'Continue' })).toBeDisabled();
+  await page.getByLabel('Telegram API hash').fill('updated-api-hash');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Choose where objects live' })).toBeVisible();
+  await page.getByLabel('Storage chat ID').fill('-1009876543210');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Make the connection reliable' })).toBeVisible();
+  await page.getByLabel('Connection mode').selectOption('socks5');
+  await page.getByLabel('Proxy URL').fill('socks5://127.0.0.1:12334');
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByLabel('Storage chat ID')).toHaveValue('-1009876543210');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Review & sign in' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Authorize the storage account' })).toBeVisible();
+  await page.getByLabel('Phone number').fill('+15550000000');
+  await page.getByRole('button', { name: 'Save settings & send code' }).click();
   await expect(page.getByLabel('Confirmation code')).toBeVisible();
+  expect(requestOrder.indexOf('settings')).toBeGreaterThanOrEqual(0);
+  expect(requestOrder.indexOf('begin')).toBeGreaterThan(requestOrder.indexOf('settings'));
+  expect(savedSettings).toMatchObject({
+    telegram_api_id: '54321',
+    telegram_api_hash: 'updated-api-hash',
+    telegram_storage_chat_id: '-1009876543210',
+    telegram_proxy_url: 'socks5://127.0.0.1:12334',
+    telegram_proxy_mode: 'socks5'
+  });
 
   await page.getByLabel('Confirmation code').fill('123456');
-  await page.getByLabel('Confirmation code').press('Enter');
+  await page.getByRole('button', { name: 'Confirm code' }).click();
   await expect(page.getByLabel('Cloud password')).toBeVisible();
 
   await page.getByLabel('Cloud password').fill('test-cloud-password');
-  await page.getByLabel('Cloud password').press('Enter');
-  await expect(page.getByRole('heading', { name: 'Set up Telegram storage access' })).toBeHidden();
+  await page.getByRole('button', { name: 'Authorize account' }).click();
+  await expect(page.getByRole('heading', { name: 'Your storage connection, beautifully in sync.' })).toBeVisible();
   await expect(page.getByText('Telegram account authorized.')).toBeVisible();
+});
+
+test('telegram account wizard keeps the sign-in step open when settings cannot be saved', async ({ page }) => {
+  await mockAdminApi(page, { telegramSettingsFailure: true });
+  let beginRequests = 0;
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.endsWith('/telegram/wizard/begin') && request.method() === 'POST') beginRequests += 1;
+  });
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Telegram settings' }).click();
+  await page.getByRole('button', { name: 'Edit account setup' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Review & sign in' }).click();
+  await page.getByLabel('Phone number').fill('+15550000000');
+  await page.getByRole('button', { name: 'Save settings & send code' }).click();
+
+  await expect(page.locator('.wizard-error')).toContainText('telegram settings rejected for this test');
+  await expect(page.getByLabel('Phone number')).toHaveValue('+15550000000');
+  expect(beginRequests).toBe(0);
 });
 
 test('upload dialog confirms cancellation while the file is still uploading to the server', async ({ page }) => {
@@ -282,8 +371,8 @@ test('connection removal clears recovery attention items from the panel', async 
   await page.getByLabel('Password').fill('correct-password');
   await page.getByRole('button', { name: 'Sign in' }).click();
   await page.getByRole('button', { name: 'Telegram settings' }).click();
-  await page.getByRole('button', { name: 'Remove current connection' }).click();
-  await page.getByRole('button', { name: 'Remove connection' }).click();
+  await page.getByRole('button', { name: 'Remove connection' }).first().click();
+  await page.locator('.compact-modal').getByRole('button', { name: 'Remove connection' }).click();
 
   await page.getByRole('button', { name: 'Transfers' }).click();
   await expect(page.getByText('No transfers yet. Upload a file from Buckets to get started.')).toBeVisible();
