@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.7.1-rc.12 - 2026-09-10
+
+- Made the authenticated admin console responsive across phone, tablet, and
+  desktop layouts, including touch-friendly navigation, collapsing forms, and
+  bounded table scrolling.
+- Added viewport-matrix browser coverage for 320px through 1440px layouts.
+
 ## 0.7.1-rc.8 - 2026-09-10
 
 - Added durable Telegram send-attempt tokens and diagnostics. Ambiguous upload
