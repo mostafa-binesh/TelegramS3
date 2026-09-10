@@ -75,6 +75,10 @@ token before upload, searches Telegram history back to the attempt timestamp,
 and repairs a checkpoint only for an exact encrypted-byte match. If no match is
 found after a complete scan, it schedules the chunk for retry; connectivity,
 scan-limit, missing-staging, and byte-mismatch cases remain recovery-required.
+On restart, a job already in `recovery_required` with no lease also has stale
+`sending` rows normalized to `unknown` before reconciliation. That
+normalization is committed even when no new transfer is available to claim, so
+the recovery queue cannot roll back and leave Retry permanently blocked.
 If the checkbox is not selected, local data is still removed from the active
 installation but remote Telegram files are intentionally left in place.
 Do not describe those retained files as deleted or recoverable through the

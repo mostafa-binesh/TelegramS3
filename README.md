@@ -326,6 +326,12 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 
+The repeatable release checklist is available as
+`./scripts/release-test.ps1`. It runs Rust, frontend, browser, packaging, and
+available dependency checks. Add `-LiveTelegram` only for an isolated
+pre-release Telegram drill; it requires dedicated `live-test` paths and the
+local SOCKS5 proxy.
+
 Smoke tests exercise the S3 CRUD/range path against a temporary server, the CLI,
 the Docker packaging, session persistence, and the admin frontend plus
 Telegram-wizard lifecycle. Security and dependency reviews:

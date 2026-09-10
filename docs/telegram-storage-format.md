@@ -25,6 +25,11 @@ layout or relax the recovery rules described here. The frontend's lazy-loaded
 settings view is operational UI only; if its hashed asset is unavailable, the
 console exposes a retry state and does not change Telegram or local metadata.
 
+Every send attempt is durable before the remote call. A restart that finds a
+`recovery_required` job with no lease normalizes any stale `sending` attempt to
+`unknown` and reconciles it by token plus exact encrypted bytes before deciding
+whether a retry is safe.
+
 ## Design
 
 Each object is represented by:

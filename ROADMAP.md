@@ -237,9 +237,14 @@ Multi-user boundary for the next increment:
 
 Remaining Phase 10 work:
 
+- release-grade deterministic fault/restart coverage now includes the persisted
+  `recovery_required` + null-lease + `sending` regression, exact-byte mock
+  reconciliation, corruption rejection, and a repeatable PowerShell release
+  runner; the isolated live Telegram drill remains a separate RC/stable gate
 - expand fault-injection coverage for Telegram timeouts, process crashes, and
-  history-scan limits; live Telegram verification remains a separate release
-  gate
+  history-scan limits beyond the current deterministic matrix
+- expand browser coverage from the Playwright authentication/navigation smoke
+  tests to upload progress, retry/cancel, wizard, and degraded recovery flows
 - add periodic reconciliation for staged uploads so missing chunks, orphaned
   staging trees, and interrupted commits are repaired or quarantined before
   they become user-visible corruption
