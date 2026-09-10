@@ -12,6 +12,7 @@ const DEFAULT_DATA_DIR: &str = "data";
 pub struct AppConfig {
     pub telegram_metadata_path: Option<String>,
     pub telegram_data_dir: Option<String>,
+    pub telegram_session_path: Option<String>,
     pub telegram_chunk_size: Option<String>,
     pub telegram_staging_max_bytes: Option<String>,
     pub telegram_connection_timeout_secs: Option<String>,
@@ -68,6 +69,7 @@ impl AppConfig {
         Self {
             telegram_metadata_path: read("TELEGRAM_METADATA_PATH"),
             telegram_data_dir: read("TELEGRAM_DATA_DIR"),
+            telegram_session_path: read("TELEGRAM_SESSION_PATH"),
             telegram_chunk_size: read("TELEGRAM_CHUNK_SIZE"),
             telegram_staging_max_bytes: read("TELEGRAM_STAGING_MAX_BYTES"),
             telegram_connection_timeout_secs: read("TELEGRAM_CONNECTION_TIMEOUT_SECS"),
@@ -257,7 +259,12 @@ impl AppConfig {
             .ok_or(ConfigError::Missing("telegram api hash"))?;
         let telegram_storage_chat_id =
             normalize_telegram_storage_chat_id(merged.telegram_storage_chat_id.as_deref())?;
-        let telegram_session_path = default_session_path(&self.metadata_path());
+        let telegram_session_path = merged
+            .telegram_session_path
+            .as_deref()
+            .or(self.telegram_session_path.as_deref())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| default_session_path(&self.metadata_path()));
         if telegram_session_path.as_os_str().is_empty() {
             return Err(ConfigError::Missing("telegram session path"));
         }
@@ -574,6 +581,28 @@ mod tests {
         assert_eq!(
             normalize_telegram_storage_chat_id(Some("-1001234567890")).expect("normalize"),
             "-1001234567890"
+        );
+    }
+
+    #[test]
+    fn resolve_uses_explicit_session_path_from_environment_config() {
+        let store = MetadataStore::open_in_memory().expect("store");
+        store
+            .set_telegram_bootstrap_settings(&TelegramBootstrapSettings {
+                telegram_api_id: Some("12345".into()),
+                telegram_api_hash: Some("hash".into()),
+                telegram_storage_chat_id: Some("-1001234567890".into()),
+                ..TelegramBootstrapSettings::default()
+            })
+            .expect("settings");
+        let config = AppConfig {
+            telegram_session_path: Some("session/custom.session".into()),
+            ..AppConfig::default()
+        };
+        let resolved = config.resolve_telegram_bootstrap(&store).expect("resolve");
+        assert_eq!(
+            resolved.telegram_session_path,
+            PathBuf::from("session/custom.session")
         );
     }
 }

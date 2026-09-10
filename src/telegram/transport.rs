@@ -628,8 +628,8 @@ impl TelegramTransportManager {
                     break;
                 }
                 let transport = { manager.transport.read().await.clone() };
-                let result = if let Some(transport) = transport {
-                    match tokio::time::timeout(Duration::from_secs(10), evaluate_health(&transport))
+                let result = if let Some(ref transport) = transport {
+                    match tokio::time::timeout(Duration::from_secs(10), evaluate_health(transport))
                         .await
                     {
                         Ok(result) => result,
@@ -640,6 +640,18 @@ impl TelegramTransportManager {
                 };
                 match result {
                     Ok(health) => *manager.health.write().await = health,
+                    Err(error) if is_auth_key_unregistered(&error) => {
+                        if let Some(transport) = transport.as_ref() {
+                            *manager.health.write().await =
+                                reauth_health(transport.as_ref(), error.to_string());
+                        } else {
+                            let mut health = manager.health.write().await;
+                            health.state = TelegramConnectionState::NeedsReauth;
+                            health.status.session_state = SessionState::Unauthorized;
+                            health.detail = error.to_string();
+                            health.checked_at = time::OffsetDateTime::now_utc().unix_timestamp();
+                        }
+                    }
                     Err(_) => {
                         let mut health = manager.health.write().await;
                         health.state = TelegramConnectionState::Disconnected;
@@ -681,7 +693,13 @@ impl TelegramTransportManager {
     pub async fn refresh(&self) -> Result<TelegramConnectionHealth, TelegramTransportError> {
         let _refresh = self.refresh_lock.lock().await;
         if let Some(transport) = self.transport.read().await.clone() {
-            let health = evaluate_health(transport.as_ref()).await?;
+            let health = match evaluate_health(transport.as_ref()).await {
+                Ok(health) => health,
+                Err(error) if is_auth_key_unregistered(&error) => {
+                    reauth_health(transport.as_ref(), error.to_string())
+                }
+                Err(error) => return Err(error),
+            };
             *self.health.write().await = health.clone();
             return Ok(health);
         }
@@ -693,7 +711,13 @@ impl TelegramTransportManager {
             Ok(Err(error)) => return Err(error),
             Err(_) => return Err(TelegramTransportError::InitializationPanic),
         };
-        let health = evaluate_health(transport.as_ref()).await?;
+        let health = match evaluate_health(transport.as_ref()).await {
+            Ok(health) => health,
+            Err(error) if is_auth_key_unregistered(&error) => {
+                reauth_health(transport.as_ref(), error.to_string())
+            }
+            Err(error) => return Err(error),
+        };
         *self.transport.write().await = Some(transport);
         *self.health.write().await = health.clone();
         Ok(health)
@@ -796,11 +820,29 @@ async fn evaluate_health(
                     TelegramConnectionState::Connected,
                     "live Telegram probe and storage chat lookup succeeded".to_string(),
                 ),
+                Err(error)
+                    if is_auth_key_unregistered(&TelegramTransportError::Rpc(
+                        error.to_string(),
+                    )) =>
+                {
+                    (
+                        TelegramConnectionState::NeedsReauth,
+                        format!(
+                            "Telegram session is no longer registered; reauthorize this account ({error})"
+                        ),
+                    )
+                }
                 Err(error) => (
                     TelegramConnectionState::Disconnected,
                     format!("live Telegram probe failed: {error}"),
                 ),
             },
+            Err(error) if is_auth_key_unregistered(&error) => (
+                TelegramConnectionState::NeedsReauth,
+                format!(
+                    "Telegram session is no longer registered; reauthorize this account ({error})"
+                ),
+            ),
             Err(error) => (
                 TelegramConnectionState::Disconnected,
                 format!("storage peer lookup failed: {error}"),
@@ -824,6 +866,26 @@ async fn evaluate_health(
         checked_at,
         last_success_at: connected.then_some(checked_at),
     })
+}
+
+fn is_auth_key_unregistered(error: &TelegramTransportError) -> bool {
+    error.to_string().contains("AUTH_KEY_UNREGISTERED")
+}
+
+fn reauth_health(transport: &TelegramTransport, detail: String) -> TelegramConnectionHealth {
+    TelegramConnectionHealth {
+        status: TelegramTransportStatus {
+            session_path: transport.bootstrap.telegram_session_path.clone(),
+            proxy_kind: transport.proxy.kind,
+            proxy_url: transport.proxy.proxy_url.clone(),
+            session_state: SessionState::Unauthorized,
+            storage_chat_id: transport.bootstrap.telegram_storage_chat_id.clone(),
+        },
+        state: TelegramConnectionState::NeedsReauth,
+        detail,
+        checked_at: time::OffsetDateTime::now_utc().unix_timestamp(),
+        last_success_at: None,
+    }
 }
 
 impl TelegramTransport {

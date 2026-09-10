@@ -42,11 +42,13 @@
 
   function restoreFocus() { previouslyFocused?.focus(); }
 
-  function handToPhase(state: { phase: WizardPhase }) {
+  function handToPhase(state: { phase: WizardPhase; connection_ready?: boolean; health_detail?: string; message?: string | null }) {
     phase = state.phase;
-    inlineError = '';
+    inlineError = state.phase === 'authorized' && state.connection_ready === false
+      ? (state.health_detail || state.message || 'Telegram account authorized, but storage is not ready.')
+      : '';
     if (state.phase === 'two_fa') code = '';
-    if (state.phase === 'authorized') { code = ''; password = ''; restoreFocus(); onDone(); }
+    if (state.phase === 'authorized' && state.connection_ready !== false) { code = ''; password = ''; restoreFocus(); onDone(); }
   }
 
   function fail(cause: unknown) { inlineError = cause instanceof Error ? cause.message : 'Something went wrong'; }
@@ -121,6 +123,11 @@
         <p class="wizard-desc">This account has two-step verification enabled. Enter its cloud password.</p>
         <label><span>Cloud password</span><input bind:value={password} type="password" autocomplete="current-password" /></label>
         <button class="primary" type="button" on:click={submitPassword} disabled={pending || !password.trim()}>{pending ? 'Authorizing…' : 'Authorize'}</button>
+      </div>
+    {:else if phase === 'authorized'}
+      <div class="wizard-step">
+        <p class="wizard-desc">Telegram accepted the login, but the storage chat is not reachable yet. Fix the connection and retry the health check before using storage.</p>
+        <button class="ghost" type="button" on:click={restart} disabled={pending}>Start another login</button>
       </div>
     {/if}
 

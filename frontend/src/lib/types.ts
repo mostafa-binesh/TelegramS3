@@ -93,6 +93,7 @@ export interface OverviewState {
   checks?: { label: string; ok: boolean; detail: string }[];
   connection_removal?: {
     id: string;
+    connection_id: string;
     delete_uploaded_files: boolean;
     state: string;
     object_count: number;
@@ -124,6 +125,9 @@ export interface WizardState {
   phase: WizardPhase;
   needs_2fa: boolean;
   authorized: boolean;
+  connection_ready?: boolean;
+  connection_state?: string;
+  health_detail?: string;
   owner?: string | null;
   message?: string | null;
 }

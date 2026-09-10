@@ -1021,14 +1021,26 @@ impl AdminUiState {
     async fn wizard_state(&self, _principal: &ResolvedPrincipal) -> Response<Body> {
         let driver = self.wizard_driver.lock().await;
         let snapshot = driver.snapshot();
+        let health = self.telegram_health_snapshot().await;
         let authorized = driver.is_authorized()
+            || matches!(health.status.session_state, SessionState::Authorized)
             || matches!(
-                self.telegram_health_snapshot().await.status.session_state,
-                SessionState::Authorized | SessionState::Reused
+                health.state,
+                crate::telegram::TelegramConnectionState::Connected
             );
         json_response(
             StatusCode::OK,
-            wizard_wire(snapshot.stage, authorized, snapshot.owner.as_deref(), None),
+            wizard_wire_value(
+                snapshot.stage,
+                authorized,
+                snapshot.owner.as_deref(),
+                None,
+                matches!(
+                    health.state,
+                    crate::telegram::TelegramConnectionState::Connected
+                ),
+                &health,
+            ),
         )
     }
 
@@ -1052,12 +1064,13 @@ impl AdminUiState {
         if driver.is_authorized() {
             return json_response(
                 StatusCode::OK,
-                wizard_wire(
+                self.wizard_wire(
                     LoginStage::Authorized,
                     true,
                     None,
                     Some("already authorized"),
-                ),
+                )
+                .await,
             );
         }
         let transport = match self.transport_manager.current().await {
@@ -1077,12 +1090,13 @@ impl AdminUiState {
                 }
                 json_response(
                     StatusCode::OK,
-                    wizard_wire(
+                    self.wizard_wire(
                         step.stage,
                         driver.is_authorized(),
                         None,
                         Some(&step.message),
-                    ),
+                    )
+                    .await,
                 )
             }
             Err(error) => driver_error_response(&error),
@@ -1121,12 +1135,13 @@ impl AdminUiState {
                 }
                 json_response(
                     StatusCode::OK,
-                    wizard_wire(
+                    self.wizard_wire(
                         step.stage,
                         driver.is_authorized(),
                         None,
                         Some(&step.message),
-                    ),
+                    )
+                    .await,
                 )
             }
             Err(error) => driver_error_response(&error),
@@ -1169,12 +1184,13 @@ impl AdminUiState {
                 }
                 json_response(
                     StatusCode::OK,
-                    wizard_wire(
+                    self.wizard_wire(
                         step.stage,
                         driver.is_authorized(),
                         None,
                         Some(&step.message),
-                    ),
+                    )
+                    .await,
                 )
             }
             Err(error) => driver_error_response(&error),
@@ -1201,6 +1217,27 @@ impl AdminUiState {
     /// object operations use the refreshed Telegram session immediately.
     async fn finalize_wizard_success(&self) {
         let _ = self.transport_manager.refresh().await;
+    }
+
+    async fn wizard_wire(
+        &self,
+        stage: LoginStage,
+        authorized: bool,
+        owner: Option<&str>,
+        message: Option<&str>,
+    ) -> serde_json::Value {
+        let health = self.telegram_health_snapshot().await;
+        wizard_wire_value(
+            stage,
+            authorized,
+            owner,
+            message,
+            matches!(
+                health.state,
+                crate::telegram::TelegramConnectionState::Connected
+            ),
+            &health,
+        )
     }
 
     async fn telegram_settings(&self, _principal: &ResolvedPrincipal) -> Response<Body> {
@@ -1743,18 +1780,32 @@ fn percent_encode_filename(value: &str) -> String {
     out
 }
 
-fn wizard_wire(
+fn wizard_wire_value(
     stage: LoginStage,
     authorized: bool,
     owner: Option<&str>,
     message: Option<&str>,
+    connection_ready: bool,
+    health: &TelegramConnectionHealth,
 ) -> serde_json::Value {
+    let message = if authorized && !connection_ready {
+        Some(format!(
+            "{} Storage connection is not ready: {}",
+            message.unwrap_or("Telegram account authorized."),
+            health.detail
+        ))
+    } else {
+        message.map(str::to_string)
+    };
     serde_json::json!({
         "phase": login_stage_name(&stage),
         "needs_2fa": stage == LoginStage::TwoFa,
         "authorized": authorized,
         "owner": owner,
         "message": message,
+        "connection_ready": connection_ready,
+        "connection_state": telegram_connection_state_label(&health.state),
+        "health_detail": health.detail,
     })
 }
 
