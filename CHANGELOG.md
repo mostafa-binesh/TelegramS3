@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.7.1-rc.6 - 2026-09-10
+
+- Isolated Telegram connection-removal cleanup by durable connection
+  generation so a new login cannot operate on a previous account's cleanup
+  targets.
+- Detached local namespace state before remote cleanup completes, preserving
+  recovery-required evidence without blocking re-login.
+- Required end-to-end Telegram storage health before reporting login success,
+  mapped `AUTH_KEY_UNREGISTERED` to reauthorization, and honored
+  `TELEGRAM_SESSION_PATH` consistently.
+- Added schema-v8 migration coverage, lifecycle documentation, ADR-0008, and
+  the local-only server debugging runbook.
+
 ## 0.7.1-rc.5 - 2026-09-09
 
 - Added contextual retry panels for failed overview, recovery, bucket, folder,
