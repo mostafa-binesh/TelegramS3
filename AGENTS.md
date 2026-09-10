@@ -42,6 +42,29 @@ cargo audit
 cargo deny check
 ```
 
+## UI Feature Coverage
+
+- Every user-visible behavior change must add or update a Playwright test under
+  `frontend/tests/`; `npm run check` and `npm run build` are compilation gates,
+  not UI acceptance tests.
+- UI tests must drive the running SPA in a real browser and assert the visible
+  result, the relevant request payload, and the error/cancel path where one
+  exists. Use mocked admin APIs for deterministic states, but do not describe a
+  mocked API test as end-to-end UI coverage.
+- File-management changes must cover the browser action path for upload,
+  expiry, download, share, delete, folder navigation, and confirmation modals.
+  Share tests must open the generated public URL in a separate browser context
+  or page and verify the response/filename when the test owns a server fixture.
+- Settings changes must cover tab navigation, initial values, validation,
+  successful save, persistence/update feedback, and save failure. Destructive
+  actions must cover cancel, confirmation, and the request sent after confirm.
+- Before a push, run `npm run test:e2e` from `frontend` in addition to the
+  Rust gates. A failing or missing UI scenario blocks release; leave the code
+  unpushed and report the failure so it can be reviewed locally.
+- New features are not complete until their UI scenario matrix is written down
+  in the test file and the relevant happy, boundary, failure, and cancellation
+  paths pass in the browser.
+
 ## Release and Docker Tags
 
 - Docker publishing runs from version tags (`v*`) or manual workflow dispatch,
