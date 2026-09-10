@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.7.15 - 2026-09-11
+
+- Promoted the validated `v0.7.15-rc.7` build to stable.
+- Includes durable expiry and optional `/_public/` sharing, live database-backed
+  chunk-size settings, polished upload/share workflows, guarded admin deletion,
+  and aligned bucket-table actions.
+- Completed Rust, frontend, and 24-test Playwright verification for the release.
+
 ## 0.7.15-rc.7 - 2026-09-11
 
 - Fixed admin object deletion so success is reported only after the local
