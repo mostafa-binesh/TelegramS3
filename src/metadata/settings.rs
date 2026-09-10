@@ -56,10 +56,20 @@ impl MetadataStore {
                     |row| row.get(0),
                 )
                 .optional()?;
-            if connection_id.is_none() {
+            let connection_id = if let Some(connection_id) = connection_id {
+                connection_id
+            } else {
+                let connection_id = Uuid::new_v4().to_string();
                 tx.execute(
                     "INSERT INTO app_settings(key,value,updated_at) VALUES('telegram_active_connection_id',?1,?2)",
-                    params![Uuid::new_v4().to_string(), timestamp_now()?],
+                    params![&connection_id, timestamp_now()?],
+                )?;
+                connection_id
+            };
+            for table in ["buckets", "object_manifests", "multipart_uploads", "transfer_jobs"] {
+                tx.execute(
+                    &format!("UPDATE {table} SET connection_id=?1 WHERE connection_id='legacy'"),
+                    [&connection_id],
                 )?;
             }
             tx.execute(

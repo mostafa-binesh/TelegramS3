@@ -220,6 +220,10 @@ Completed in this increment:
   explicit confirmation; local buckets, objects, and statistics are hidden
   immediately, while optional Telegram payload deletion is a durable,
   restart-safe worker job
+- connection-owned transfer, multipart, manifest, and bucket records now
+  carry immutable generation ownership; removing a connection clears its
+  recovery/attention rows and local operational records without affecting
+  another connection's records
 - Telegram sends now have durable attempt tokens and diagnostics; ambiguous
   acknowledgements are automatically reconciled by token plus exact encrypted
   bytes, and unmatched sends are safely retried after a complete history scan

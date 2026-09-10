@@ -105,6 +105,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
 
         CREATE TABLE IF NOT EXISTS buckets (
             name TEXT PRIMARY KEY,
+            connection_id TEXT NOT NULL DEFAULT 'legacy',
             created_at TEXT NOT NULL,
             deleted_at TEXT,
             versioning_enabled INTEGER NOT NULL DEFAULT 0,
@@ -135,6 +136,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
 
         CREATE TABLE IF NOT EXISTS object_manifests (
             object_id TEXT PRIMARY KEY,
+            connection_id TEXT NOT NULL DEFAULT 'legacy',
             bucket TEXT NOT NULL,
             object_key TEXT NOT NULL,
             version_id TEXT,
@@ -176,6 +178,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
 
         CREATE TABLE IF NOT EXISTS multipart_uploads (
             upload_id TEXT PRIMARY KEY,
+            connection_id TEXT NOT NULL DEFAULT 'legacy',
             bucket TEXT NOT NULL,
             object_key TEXT NOT NULL,
             state TEXT NOT NULL,
@@ -239,6 +242,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             id TEXT NOT NULL UNIQUE,
             object_id TEXT NOT NULL,
+            connection_id TEXT NOT NULL DEFAULT 'legacy',
             operation_id TEXT,
             bucket TEXT NOT NULL,
             object_key TEXT NOT NULL,
@@ -380,6 +384,29 @@ fn ensure_phase10_schema(connection: &mut Connection) -> Result<(), MetadataErro
                 [],
             )?;
         }
+    }
+    for table in [
+        "buckets",
+        "object_manifests",
+        "multipart_uploads",
+        "transfer_jobs",
+    ] {
+        if !column_exists(connection, table, "connection_id")? {
+            connection.execute(
+                &format!(
+                    "ALTER TABLE {table} ADD COLUMN connection_id TEXT NOT NULL DEFAULT 'legacy'"
+                ),
+                [],
+            )?;
+            connection.execute(
+                &format!("UPDATE {table} SET connection_id=COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'),'legacy') WHERE connection_id='legacy'"),
+                [],
+            )?;
+        }
+        connection.execute(
+            &format!("CREATE INDEX IF NOT EXISTS idx_{table}_connection ON {table}(connection_id)"),
+            [],
+        )?;
     }
     connection.execute_batch(
         r#"

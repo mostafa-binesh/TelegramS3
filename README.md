@@ -211,7 +211,10 @@ checkbox queues deletion of the uploaded Telegram documents/messages in the
 durable cleanup worker; while that queue is pending, the owning connection is
 reserved so its cleanup cannot be sent through another account. Leaving it
 clear disconnects locally while intentionally leaving those remote files in
-Telegram. Bucket names are preserved exactly,
+Telegram. Recovery-required files, cancelled transfers, resumable sessions, and
+their local staging records are also removed from the attention views for the
+removed connection; tombstones and cleanup evidence remain until their safe
+retention point. Bucket names are preserved exactly,
 including Unicode, and ordinary bucket deletion remains empty-only and
 tombstone-safe.
 

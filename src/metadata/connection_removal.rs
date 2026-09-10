@@ -1,7 +1,7 @@
 use super::rows::timestamp_now;
 use super::{MetadataError, MetadataStore};
 use crate::durable::now;
-use crate::manifest::CommitState;
+use crate::manifest::{CommitState, TelegramLocation};
 use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 use uuid::Uuid;
@@ -58,9 +58,9 @@ impl MetadataStore {
             let mut manifests = Vec::new();
             {
                 let mut statement = tx.prepare(
-                    "SELECT object_id,manifest_json,commit_state FROM object_manifests WHERE commit_state != 'tombstoned' ORDER BY object_id",
+                    "SELECT object_id,manifest_json,commit_state FROM object_manifests WHERE connection_id=?1 AND commit_state != 'tombstoned' ORDER BY object_id",
                 )?;
-                let rows = statement.query_map([], |row| {
+                let rows = statement.query_map([&connection_id], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -92,14 +92,64 @@ impl MetadataStore {
                     "UPDATE object_manifests SET commit_state='tombstoned',manifest_json=?2,tombstoned_at=?3 WHERE object_id=?1",
                     params![&*object_id, manifest_json, tombstoned_at],
                 )?;
+                tx.execute(
+                    "DELETE FROM recovery_markers WHERE object_id=?1",
+                    [object_id.as_str()],
+                )?;
+            }
+
+            let mut transfer_jobs = Vec::new();
+            {
+                let mut statement = tx.prepare(
+                    "SELECT id,object_id FROM transfer_jobs WHERE connection_id=?1 ORDER BY sequence",
+                )?;
+                let rows = statement.query_map([&connection_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                for row in rows {
+                    transfer_jobs.push(row?);
+                }
+            }
+            for (job_id, object_id) in &transfer_jobs {
+                tx.execute(
+                    "INSERT OR IGNORE INTO connection_removal_objects(job_id,object_id) VALUES (?1,?2)",
+                    params![id, object_id],
+                )?;
+                if delete_uploaded_files {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,0,'evidence',?4)",
+                        params![object_id, connection_id, format!("evidence:{object_id}"), requested_at],
+                    )?;
+                    let mut locations = Vec::new();
+                    for table in ["transfer_chunks", "transfer_send_attempts"] {
+                        let sql = format!(
+                            "SELECT location_json FROM {table} WHERE job_id=?1 AND location_json IS NOT NULL"
+                        );
+                        let mut statement = tx.prepare(&sql)?;
+                        let rows = statement.query_map([job_id], |row| row.get::<_, String>(0))?;
+                        for row in rows {
+                            if let Ok(location) = serde_json::from_str::<TelegramLocation>(&row?) {
+                                locations.push(location);
+                            }
+                        }
+                    }
+                    for location in locations {
+                        if location.message_id > 0 {
+                            tx.execute(
+                                "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,?4,'message',?5)",
+                                params![object_id, connection_id, location.peer_id, location.message_id, requested_at],
+                            )?;
+                        }
+                    }
+                }
             }
 
             let mut multipart_uploads = Vec::new();
             {
                 let mut statement = tx.prepare(
-                    "SELECT upload_id FROM multipart_uploads WHERE state NOT IN ('completed','aborted') ORDER BY upload_id",
+                    "SELECT upload_id FROM multipart_uploads WHERE connection_id=?1 AND state NOT IN ('completed','aborted') ORDER BY upload_id",
                 )?;
-                let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+                let rows = statement.query_map([&connection_id], |row| row.get::<_, String>(0))?;
                 for row in rows {
                     multipart_uploads.push(row?);
                 }
@@ -130,27 +180,38 @@ impl MetadataStore {
                 }
             }
 
-            tx.execute("DELETE FROM active_objects", [])?;
-            tx.execute("DELETE FROM recovery_markers", [])?;
             tx.execute(
-                "UPDATE buckets SET deleted_at=COALESCE(deleted_at,?1) WHERE deleted_at IS NULL",
-                [timestamp_now()?],
+                "DELETE FROM active_objects WHERE object_id IN (SELECT object_id FROM object_manifests WHERE connection_id=?1)",
+                [&connection_id],
             )?;
             tx.execute(
-                "UPDATE transfer_jobs SET state='cancelled',error='connection removed',updated_at=?1 WHERE state NOT IN ('completed','cancelled','cleaned')",
-                [requested_at],
+                "UPDATE buckets SET deleted_at=COALESCE(deleted_at,?2) WHERE connection_id=?1 AND deleted_at IS NULL",
+                params![connection_id, timestamp_now()?],
             )?;
             tx.execute(
-                "UPDATE multipart_uploads SET state='aborted',updated_at=?1 WHERE state NOT IN ('completed','aborted')",
-                [timestamp_now()?],
+                "UPDATE transfer_jobs SET state='cancelled',lease=NULL,lease_until=0,error='connection removed',updated_at=?2 WHERE connection_id=?1 AND state NOT IN ('completed','cancelled','cleaned')",
+                params![connection_id, requested_at],
+            )?;
+            tx.execute(
+                "UPDATE multipart_uploads SET state='aborted',updated_at=?2 WHERE connection_id=?1 AND state NOT IN ('completed','aborted')",
+                params![connection_id, timestamp_now()?],
+            )?;
+            tx.execute(
+                "UPDATE operation_journal SET state='cancelled',error='connection removed',updated_at=?2 WHERE object_id IN (SELECT object_id FROM connection_removal_objects WHERE job_id=?1) AND state='staging'",
+                params![id, requested_at],
+            )?;
+            tx.execute(
+                "DELETE FROM recovery_markers WHERE object_id IN (SELECT object_id FROM connection_removal_objects WHERE job_id=?1)",
+                [&id],
+            )?;
+            let object_count: u64 = tx.query_row(
+                "SELECT COUNT(*) FROM connection_removal_objects WHERE job_id=?1",
+                [&id],
+                |row| row.get(0),
             )?;
             tx.execute(
                 "UPDATE connection_removal_jobs SET object_count=?2,updated_at=?3 WHERE id=?1",
-                params![
-                    id,
-                    (manifests.len() + multipart_uploads.len()) as u64,
-                    requested_at
-                ],
+                params![id, object_count, requested_at],
             )?;
             tx.commit()?;
             Ok(ConnectionRemovalJob {
@@ -158,7 +219,7 @@ impl MetadataStore {
                 connection_id,
                 delete_uploaded_files,
                 state: "pending".to_string(),
-                object_count: (manifests.len() + multipart_uploads.len()) as u64,
+                object_count,
                 requested_at,
                 updated_at: requested_at,
                 completed_at: None,
@@ -333,5 +394,173 @@ mod tests {
                     manifest.commit_state == crate::manifest::CommitState::Tombstoned
                 })
         );
+    }
+
+    #[test]
+    fn removal_scopes_and_purges_attention_transfer_state() {
+        let store = MetadataStore::open_in_memory().expect("open");
+        store
+            .set_telegram_bootstrap_settings(&crate::metadata::TelegramBootstrapSettings {
+                telegram_api_id: Some("123".into()),
+                telegram_api_hash: Some("hash".into()),
+                telegram_storage_chat_id: Some("-1001234567890".into()),
+                ..Default::default()
+            })
+            .expect("settings");
+        store
+            .create_bucket(BucketRecord {
+                name: "bucket".to_string(),
+                created_at: OffsetDateTime::now_utc(),
+                deleted_at: None,
+                versioning_enabled: false,
+                object_locking_enabled: false,
+            })
+            .expect("bucket");
+
+        let removed_job_id = Uuid::new_v4();
+        store
+            .begin_transfer(removed_job_id, "bucket", "removed.bin")
+            .expect("removed transfer");
+        store
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO operation_journal(operation_id,object_id,bucket,object_key,operation_kind,state,created_at,updated_at) VALUES (?1,?2,'bucket','removed.bin','put','staging','1','1')",
+                    rusqlite::params![Uuid::new_v4().to_string(), removed_job_id.to_string()],
+                )?;
+                connection.execute(
+                    "INSERT INTO recovery_markers(marker_key,object_id,bucket,object_key,marker_state,details_json,created_at,updated_at) VALUES (?1,?2,'bucket','removed.bin','staging','{}','1','1')",
+                    rusqlite::params![format!("staging:{}", Uuid::new_v4()), removed_job_id.to_string()],
+                )?;
+                Ok(())
+            })
+            .expect("staging state");
+        let other_job_id = Uuid::new_v4();
+        store
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO transfer_jobs(id,object_id,connection_id,bucket,object_key,created_at,updated_at,lease_until) VALUES (?1,?1,'other-connection','other','other.bin',1,1,0)",
+                    [other_job_id.to_string()],
+                )?;
+                Ok(())
+            })
+            .expect("other transfer");
+
+        let removal = store
+            .begin_connection_removal(false)
+            .expect("begin removal");
+        assert_eq!(removal.object_count, 1);
+        assert!(
+            store
+                .transfers(50, 0)
+                .expect("visible transfers")
+                .is_empty()
+        );
+
+        let removed_state: String = store
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT state FROM transfer_jobs WHERE id=?1",
+                    [removed_job_id.to_string()],
+                    |row| row.get(0),
+                )?)
+            })
+            .expect("removed state");
+        assert_eq!(removed_state, "cancelled");
+        let restart_state: (String, u64) = store
+            .with_connection(|connection| {
+                let journal_state = connection.query_row(
+                    "SELECT state FROM operation_journal WHERE object_id=?1",
+                    [removed_job_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                let marker_count = connection.query_row(
+                    "SELECT COUNT(*) FROM recovery_markers WHERE object_id=?1",
+                    [removed_job_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                Ok((journal_state, marker_count))
+            })
+            .expect("restart state");
+        assert_eq!(restart_state, ("cancelled".to_string(), 0));
+        store.startup_reconcile().expect("restart reconcile");
+        assert_eq!(store.rebuild_index().expect("rebuild").recovery_markers, 0);
+
+        store
+            .purge_connection_operations(&removal.connection_id)
+            .expect("purge removed operations");
+        let remaining_other = store
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM transfer_jobs WHERE id=?1 AND connection_id='other-connection'",
+                    [other_job_id.to_string()],
+                    |row| row.get::<_, u64>(0),
+                )?)
+            })
+            .expect("other state");
+        assert_eq!(remaining_other, 1);
+        assert!(
+            store
+                .transfer(&removed_job_id.to_string())
+                .expect("removed lookup")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn removal_preserves_known_transfer_locations_for_remote_cleanup() {
+        let store = MetadataStore::open_in_memory().expect("open");
+        store
+            .set_telegram_bootstrap_settings(&crate::metadata::TelegramBootstrapSettings {
+                telegram_api_id: Some("123".into()),
+                telegram_api_hash: Some("hash".into()),
+                telegram_storage_chat_id: Some("-1001234567890".into()),
+                ..Default::default()
+            })
+            .expect("settings");
+        store
+            .create_bucket(BucketRecord {
+                name: "bucket".to_string(),
+                created_at: OffsetDateTime::now_utc(),
+                deleted_at: None,
+                versioning_enabled: false,
+                object_locking_enabled: false,
+            })
+            .expect("bucket");
+        let transfer_id = Uuid::new_v4();
+        store
+            .begin_transfer(transfer_id, "bucket", "known.bin")
+            .expect("transfer");
+        let location = serde_json::to_string(&TelegramLocation {
+            peer_id: "peer".into(),
+            message_id: 44,
+            document_id: Some("document".into()),
+        })
+        .expect("location json");
+        store
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO transfer_chunks(job_id,chunk_order,location_json) VALUES (?1,0,?2)",
+                    rusqlite::params![transfer_id.to_string(), location],
+                )?;
+                Ok(())
+            })
+            .expect("location");
+
+        let removal = store.begin_connection_removal(true).expect("begin removal");
+        assert!(
+            store
+                .connection_removal_cleanup_pending(&removal.id)
+                .expect("cleanup pending")
+        );
+        let target_count: u64 = store
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM cleanup_targets WHERE object_id=?1 AND peer_id='peer' AND message_id=44",
+                    [transfer_id.to_string()],
+                    |row| row.get(0),
+                )?)
+            })
+            .expect("target count");
+        assert_eq!(target_count, 1);
     }
 }

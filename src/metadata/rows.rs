@@ -120,6 +120,9 @@ where
     if !include_deleted {
         sql.push_str(" AND deleted_at IS NULL");
     }
+    sql.push_str(
+        " AND connection_id = COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'), 'legacy')",
+    );
     let record = connection
         .query_row(&sql, params![bucket], |row| {
             let created_at = row.get::<_, String>(1)?;

@@ -344,6 +344,8 @@ impl ObjectFormatService {
             if !self.metadata.connection_removal_cleanup_pending(&job.id)? {
                 self.detach_connection_if_owned(&job).await?;
                 self.metadata
+                    .purge_connection_operations(&job.connection_id)?;
+                self.metadata
                     .finish_connection_removal(&job.id, "completed", None)?;
             }
             return Ok(());
@@ -372,6 +374,8 @@ impl ObjectFormatService {
             "remote_cleanup_pending"
         } else {
             self.detach_connection_if_owned(&job).await?;
+            self.metadata
+                .purge_connection_operations(&job.connection_id)?;
             "completed"
         };
         self.metadata

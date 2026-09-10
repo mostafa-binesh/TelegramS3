@@ -150,7 +150,9 @@ not alter manifest, tombstone, or recovery semantics.
 Removing a Telegram connection tombstones every visible local object and marks
 all buckets deleted in one metadata transaction, so the active index and its
 statistics disappear immediately. The removal job records the active
-connection generation. The optional remote-delete choice adds every manifest
+connection generation. Transfer jobs, multipart sessions, manifests, and
+buckets snapshot that generation when created; removal only cancels and purges
+operational records carrying the removed generation. The optional remote-delete choice adds every manifest
 location to the existing evidence-first cleanup outbox, with the same
 generation copied onto each target. When remote deletion is selected, local
 visibility is removed immediately but the owning generation/transport remains
@@ -195,6 +197,10 @@ session and reconciliation handles the stale receiving job as recovery work.
   generation-mismatch/recovery-required target; cleanup is due immediately and
   remains retryable if Telegram is unavailable.
 - Missing chunks make the object corrupt until repaired.
+- Recovery and transfer attention records are local operational state. Removing
+  their owning connection hides them immediately and deletes them after cleanup
+  dependencies are satisfied; it does not claim remote Telegram deletion unless
+  the remote-delete option was selected.
 - An ambiguous send first enters `unknown`. The background worker can resolve
   it to `checkpointed` after an exact remote match, or to `retryable` after a
   complete history scan finds no matching document. An incomplete scan,

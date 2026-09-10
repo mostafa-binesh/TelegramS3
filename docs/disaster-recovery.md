@@ -62,7 +62,10 @@ normal worker/reconciliation path.
 The admin Connection tab requires confirmation before removal. The transaction
 immediately hides buckets, active objects, recovery markers, and related
 statistics, while the durable `connection_removal_jobs` record keeps the scope
-restart-safe. Selecting **Also delete all uploaded Telegram files** enqueues
+restart-safe. Recovery-required manifests, cancelled transfers, multipart
+sessions, and local attention rows owned by that generation disappear from the
+panel immediately; their operational records are purged after safe
+finalization. Selecting **Also delete all uploaded Telegram files** enqueues
 manifest and chunk messages for the evidence-first cleanup worker. The owning
 Telegram generation and transport remain reserved until that queue completes;
 this prevents the worker from deleting through a replacement account. Each

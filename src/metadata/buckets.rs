@@ -56,7 +56,8 @@ impl MetadataStore {
                     tx.execute(
                         r#"
                         UPDATE buckets
-                        SET created_at = ?2,
+                        SET connection_id = COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'), 'legacy'),
+                            created_at = ?2,
                             deleted_at = NULL,
                             versioning_enabled = ?3,
                             object_locking_enabled = ?4
@@ -83,12 +84,13 @@ impl MetadataStore {
                         r#"
                         INSERT INTO buckets (
                             name,
+                            connection_id,
                             created_at,
                             deleted_at,
                             versioning_enabled,
                             object_locking_enabled
                         )
-                        VALUES (?1, ?2, NULL, ?3, ?4)
+                        VALUES (?1, COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'), 'legacy'), ?2, NULL, ?3, ?4)
                         "#,
                         params![
                             name.clone(),
@@ -121,6 +123,7 @@ impl MetadataStore {
                 SELECT name, created_at, deleted_at, versioning_enabled, object_locking_enabled
                 FROM buckets
                 WHERE deleted_at IS NULL
+                  AND connection_id = COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'), 'legacy')
                 ORDER BY name ASC
                 "#,
             )?;
@@ -170,6 +173,7 @@ impl MetadataStore {
                 UPDATE buckets
                 SET deleted_at = ?2
                 WHERE name = ?1 AND deleted_at IS NULL
+                  AND connection_id = COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'), 'legacy')
                 "#,
                 params![bucket, timestamp_now()?],
             )?;
@@ -198,6 +202,7 @@ impl MetadataStore {
                 FROM active_objects a
                 JOIN object_manifests m ON m.object_id = a.object_id
                 WHERE a.bucket = ?1
+                  AND m.connection_id = COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'), 'legacy')
                 "#,
             );
             if prefix.is_some() {

@@ -72,6 +72,7 @@ impl MetadataStore {
                 r#"
                 INSERT INTO object_manifests (
                     object_id,
+                    connection_id,
                     bucket,
                     object_key,
                     version_id,
@@ -81,8 +82,9 @@ impl MetadataStore {
                     committed_at,
                     tombstoned_at
                 )
-                VALUES (?1, ?2, ?3, ?4, 'staging', ?5, ?6, NULL, NULL)
+                VALUES (?1, COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'), 'legacy'), ?2, ?3, ?4, 'staging', ?5, ?6, NULL, NULL)
                 ON CONFLICT(object_id) DO UPDATE SET
+                    connection_id = excluded.connection_id,
                     bucket = excluded.bucket,
                     object_key = excluded.object_key,
                     version_id = excluded.version_id,
@@ -449,9 +451,11 @@ impl MetadataStore {
             let object_id: Option<String> = connection
                 .query_row(
                     r#"
-                    SELECT object_id
-                    FROM active_objects
-                    WHERE bucket = ?1 AND object_key = ?2
+                    SELECT a.object_id
+                    FROM active_objects a
+                    JOIN object_manifests m ON m.object_id = a.object_id
+                    WHERE a.bucket = ?1 AND a.object_key = ?2
+                      AND m.connection_id = COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'), 'legacy')
                     "#,
                     params![bucket, object_key],
                     |row| row.get(0),
@@ -470,6 +474,7 @@ impl MetadataStore {
                 r#"
                 SELECT manifest_json
                 FROM object_manifests
+                WHERE connection_id = COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'), 'legacy')
                 ORDER BY created_at ASC, object_id ASC
                 "#,
             )?;

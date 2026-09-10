@@ -91,7 +91,9 @@ features, so they are documented separately.
   generation/transport until cleanup completes; targets cannot be processed by
   a later login. Without that choice, the connection is detached immediately
   and remote Telegram files are intentionally retained and are no longer
-  managed by this installation. The wizard reports success only when the same
+  managed by this installation. Recovery-required files and cancelled transfer
+  rows owned by the removed generation are removed from the attention views and
+  local operational state. The wizard reports success only when the same
   end-to-end health check used by the overview can resolve the storage peer.
 - The operator UI is not part of the S3 compatibility contract; the `/_admin`
   controller only reflects committed S3 object data through the same store as

@@ -24,6 +24,7 @@ impl MetadataStore {
                 r#"
                 INSERT INTO multipart_uploads (
                     upload_id,
+                    connection_id,
                     bucket,
                     object_key,
                     state,
@@ -31,8 +32,9 @@ impl MetadataStore {
                     created_at,
                     updated_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                VALUES (?1, COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'), 'legacy'), ?2, ?3, ?4, ?5, ?6, ?7)
                 ON CONFLICT(upload_id) DO UPDATE SET
+                    connection_id = excluded.connection_id,
                     bucket = excluded.bucket,
                     object_key = excluded.object_key,
                     state = excluded.state,

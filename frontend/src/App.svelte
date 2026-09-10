@@ -340,6 +340,7 @@
       telegramProxyUsername = '';
       telegramProxyPassword = '';
       telegramProxyMode = 'auto';
+      lastObjectsRouteKey = '';
       await refreshOverview({ silent: true });
       notifySuccess(result.message);
     } finally {

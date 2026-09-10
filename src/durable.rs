@@ -35,6 +35,8 @@ fn active_connection_id(tx: &rusqlite::Transaction<'_>) -> Result<String, Metada
 pub struct TransferJob {
     pub id: String,
     pub object_id: String,
+    #[serde(skip)]
+    pub connection_id: String,
     pub operation_id: Option<String>,
     pub bucket: String,
     pub key: String,
@@ -101,23 +103,24 @@ fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferJob> {
     Ok(TransferJob {
         id: row.get(0)?,
         object_id: row.get(1)?,
-        operation_id: row.get(2)?,
-        bucket: row.get(3)?,
-        key: row.get(4)?,
-        state: row.get(5)?,
-        bytes: row.get(6)?,
-        chunks_done: row.get(7)?,
-        chunks_total: row.get(8)?,
-        attempts: row.get(9)?,
-        next_retry: row.get(10)?,
-        lease: row.get(11)?,
-        write_conditionals_json: row.get(12)?,
-        error: row.get(13)?,
-        created_at: row.get(14)?,
-        updated_at: row.get(15)?,
+        connection_id: row.get(2)?,
+        operation_id: row.get(3)?,
+        bucket: row.get(4)?,
+        key: row.get(5)?,
+        state: row.get(6)?,
+        bytes: row.get(7)?,
+        chunks_done: row.get(8)?,
+        chunks_total: row.get(9)?,
+        attempts: row.get(10)?,
+        next_retry: row.get(11)?,
+        lease: row.get(12)?,
+        write_conditionals_json: row.get(13)?,
+        error: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
     })
 }
-const COLUMNS: &str = "id,object_id,operation_id,bucket,object_key,state,bytes,chunks_done,chunks_total,attempts,next_retry,lease,write_conditionals_json,error,created_at,updated_at";
+const COLUMNS: &str = "id,object_id,connection_id,operation_id,bucket,object_key,state,bytes,chunks_done,chunks_total,attempts,next_retry,lease,write_conditionals_json,error,created_at,updated_at";
 
 pub(crate) fn enqueue_part_cleanup(
     tx: &rusqlite::Transaction<'_>,
@@ -449,7 +452,7 @@ impl MetadataStore {
     ) -> Result<String, MetadataError> {
         let id = object_id.to_string();
         self.with_connection(|c| {
-            c.execute("INSERT INTO transfer_jobs(id,object_id,bucket,object_key,created_at,updated_at,lease_until) SELECT ?1,?1,?2,?3,?4,?4,?4+120 WHERE EXISTS(SELECT 1 FROM buckets WHERE name=?2 AND deleted_at IS NULL)", params![id,bucket,key,now()])?
+            c.execute("INSERT INTO transfer_jobs(id,object_id,connection_id,bucket,object_key,created_at,updated_at,lease_until) SELECT ?1,?1,COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'),'legacy'),?2,?3,?4,?4,?4+120 WHERE EXISTS(SELECT 1 FROM buckets WHERE name=?2 AND deleted_at IS NULL)", params![id,bucket,key,now()])?
                 .eq(&1).then_some(()).ok_or_else(|| MetadataError::BucketNotFound(bucket.into()))
         })?;
         Ok(id)
@@ -514,10 +517,45 @@ impl MetadataStore {
     pub fn transfers(&self, limit: u32, offset: u32) -> Result<Vec<TransferJob>, MetadataError> {
         self.with_connection(|c| {
             Ok(c.prepare(&format!(
-                "SELECT {COLUMNS} FROM transfer_jobs ORDER BY sequence DESC LIMIT ?1 OFFSET ?2"
+                "SELECT {COLUMNS} FROM transfer_jobs WHERE connection_id=COALESCE((SELECT value FROM app_settings WHERE key='telegram_active_connection_id'),'legacy') AND NOT EXISTS (SELECT 1 FROM connection_removal_objects cro JOIN connection_removal_jobs crj ON crj.id=cro.job_id WHERE cro.object_id=transfer_jobs.object_id AND crj.state IN ('pending','running','remote_cleanup_pending')) ORDER BY sequence DESC LIMIT ?1 OFFSET ?2"
             ))?
             .query_map(params![limit.min(100), offset], row_job)?
             .collect::<Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub(crate) fn purge_connection_operations(
+        &self,
+        connection_id: &str,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|c| {
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute(
+                "DELETE FROM transfer_send_attempts WHERE job_id IN (SELECT id FROM transfer_jobs WHERE connection_id=?1)",
+                [connection_id],
+            )?;
+            tx.execute(
+                "DELETE FROM transfer_chunks WHERE job_id IN (SELECT id FROM transfer_jobs WHERE connection_id=?1)",
+                [connection_id],
+            )?;
+            tx.execute(
+                "DELETE FROM multipart_jobs WHERE job_id IN (SELECT id FROM transfer_jobs WHERE connection_id=?1)",
+                [connection_id],
+            )?;
+            tx.execute(
+                "DELETE FROM transfer_jobs WHERE connection_id=?1",
+                [connection_id],
+            )?;
+            tx.execute(
+                "DELETE FROM multipart_parts WHERE upload_id IN (SELECT upload_id FROM multipart_uploads WHERE connection_id=?1)",
+                [connection_id],
+            )?;
+            tx.execute(
+                "DELETE FROM multipart_uploads WHERE connection_id=?1",
+                [connection_id],
+            )?;
+            tx.commit()?;
+            Ok(())
         })
     }
     pub(crate) fn transfers_for_local_cleanup(
