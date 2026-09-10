@@ -75,8 +75,27 @@ Any storage change must include coverage for:
 - Local metadata is authoritative for fast lookup, but Telegram manifests must be sufficient to rebuild the index.
 - Partial uploads must not become visible as committed objects.
 - Deletes must leave recoverable state before physical cleanup.
+- A removal that requests remote deletion retains its owning Telegram transport
+  until evidence and message cleanup complete; cleanup must never be routed
+  through a replacement account. Local visibility is hidden immediately, but
+  the owning connection remains reserved while `remote_cleanup_pending`.
 - Range reads must stay bounded in memory.
 - Compatibility notes must distinguish implemented, designed, and unsupported behavior.
+
+## Multi-user Preparation
+
+- The current release has one active Telegram connection; do not treat that
+  process-wide state as the long-term multi-user model.
+- Future multi-user work must scope operator ownership, Telegram credentials,
+  session paths, storage-chat bindings, connection generations, cleanup jobs,
+  and authorization decisions by an immutable account/connection identifier.
+- Never let a global `active_connection_id`, singleton transport, or shared
+  session path decide ownership once more than one Telegram account is
+  supported. A cleanup worker must use the credential/session snapshot owned by
+  its job and must not fall back to whichever account logged in most recently.
+- Multi-user changes must add isolation tests covering two accounts, account
+  removal while another account is active, restart recovery, and cross-account
+  cleanup rejection before enabling the feature.
 
 ## Documentation Updates
 

@@ -62,19 +62,20 @@ normal worker/reconciliation path.
 The admin Connection tab requires confirmation before removal. The transaction
 immediately hides buckets, active objects, recovery markers, and related
 statistics, while the durable `connection_removal_jobs` record keeps the scope
-restart-safe. The local connection is detached as soon as the worker performs
-that local transition, so a new Telegram login can start without waiting for
-remote cleanup. Selecting **Also delete all uploaded Telegram files** enqueues
-manifest and chunk messages for the evidence-first cleanup worker. Each target
-stores its connection generation; if that generation is no longer active, the
-worker quarantines the target instead of using a newly logged-in account.
+restart-safe. Selecting **Also delete all uploaded Telegram files** enqueues
+manifest and chunk messages for the evidence-first cleanup worker. The owning
+Telegram generation and transport remain reserved until that queue completes;
+this prevents the worker from deleting through a replacement account. Each
+target stores its connection generation; if that generation is no longer
+owned by the removal job, the worker quarantines the target instead of guessing
+which account may authorize it.
 Unknown Telegram acknowledgements remain `recovery_required` and keep evidence
 material. If the checkbox is not selected, local data is still removed from the
 active installation but remote Telegram files are intentionally left in place.
 Do not describe those retained files as deleted or recoverable through the
 removed connection.
 
-After reconnecting, verify that the overview reports `connected`, not merely
+After cleanup completes, reconnect and verify that the overview reports `connected`, not merely
 `authorized` or `reused`. A `needs_reauth` state with
 `AUTH_KEY_UNREGISTERED` means the Telegram session is no longer valid and must
 be logged in again; it is not a storage-peer lookup problem that a new delete

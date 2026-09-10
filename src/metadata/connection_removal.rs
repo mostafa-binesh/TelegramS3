@@ -39,7 +39,7 @@ impl MetadataStore {
                 .unwrap_or_else(|| "legacy".to_string());
             let active: Option<String> = tx
                 .query_row(
-                    "SELECT id FROM connection_removal_jobs WHERE state IN ('pending','running') ORDER BY requested_at LIMIT 1",
+                    "SELECT id FROM connection_removal_jobs WHERE state IN ('pending','running','remote_cleanup_pending') ORDER BY requested_at LIMIT 1",
                     [],
                     |row| row.get(0),
                 )
@@ -183,7 +183,7 @@ impl MetadataStore {
     pub(crate) fn connection_removal_in_progress(&self) -> Result<bool, MetadataError> {
         self.with_connection(|connection| {
             Ok(connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM connection_removal_jobs WHERE state IN ('pending','running'))",
+                "SELECT EXISTS(SELECT 1 FROM connection_removal_jobs WHERE state IN ('pending','running','remote_cleanup_pending'))",
                 [],
                 |row| row.get(0),
             )?)
@@ -303,6 +303,9 @@ mod tests {
                 .connection_removal_cleanup_pending(&job.id)
                 .expect("pending")
         );
+        store
+            .finish_connection_removal(&job.id, "remote_cleanup_pending", None)
+            .expect("remote pending");
         assert!(matches!(
             store.begin_connection_removal(false),
             Err(MetadataError::ConnectionRemovalInProgress)

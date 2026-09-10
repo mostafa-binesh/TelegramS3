@@ -117,9 +117,10 @@ argon2id. There is no per-user `.env` entry.
   save path rejects malformed numeric identifiers before writing them to
   `metadata.sqlite`; connection refresh failures are surfaced as JSON API
   warnings for operator correction after persistence succeeds.
-- A Telegram connection removal detaches the local generation immediately. A
-  later login receives a new connection generation; cleanup targets from the
-  detached generation are never sent through the new account's transport.
+- A Telegram connection removal hides the local namespace immediately. When
+  remote deletion is selected, the owning generation remains reserved until
+  cleanup completes; cleanup targets are never sent through a replacement
+  account. Without remote deletion, the generation detaches immediately.
 - rotate S3 credentials independently of Telegram session material
 - rotate encryption keys via versioned envelopes
 

@@ -4,8 +4,8 @@ Updated: 2026-09-08. Workspace: `D:\Programming\TelegramS3`. Branch: `main`.
 
 Implementation note (2026-09-10): the lifecycle slice described in ADR-0008 is
 now implemented locally. The metadata schema is v8, `TELEGRAM_SESSION_PATH`
-is honored, removal detaches connection generations before remote cleanup, and
-the wizard requires end-to-end Telegram health. This handoff remains useful
+is honored, removal reserves the owning connection generation through remote
+cleanup, and the wizard requires end-to-end Telegram health. This handoff remains useful
 for the broader Phase 10 acceptance gaps; do not treat its older schema/version
 references as the current runtime contract.
 

@@ -335,6 +335,7 @@ impl ObjectFormatService {
         };
         if job.state == "remote_cleanup_pending" {
             if !self.metadata.connection_removal_cleanup_pending(&job.id)? {
+                self.detach_connection_if_owned(&job).await?;
                 self.metadata
                     .finish_connection_removal(&job.id, "completed", None)?;
             }
@@ -358,6 +359,23 @@ impl ObjectFormatService {
                 }
             }
         }
+        let next_state = if job.delete_uploaded_files
+            && self.metadata.connection_removal_cleanup_pending(&job.id)?
+        {
+            "remote_cleanup_pending"
+        } else {
+            self.detach_connection_if_owned(&job).await?;
+            "completed"
+        };
+        self.metadata
+            .finish_connection_removal(&job.id, next_state, None)?;
+        Ok(())
+    }
+
+    async fn detach_connection_if_owned(
+        &self,
+        job: &crate::metadata::ConnectionRemovalJob,
+    ) -> Result<(), ObjectFormatError> {
         let active_connection_matches = match self.metadata.active_connection_id()? {
             Some(active) => active == job.connection_id,
             None => {
@@ -371,15 +389,6 @@ impl ObjectFormatService {
             self.set_storage_chat_id(String::new());
             self.transport_manager.disconnect().await;
         }
-        let next_state = if job.delete_uploaded_files
-            && self.metadata.connection_removal_cleanup_pending(&job.id)?
-        {
-            "remote_cleanup_pending"
-        } else {
-            "completed"
-        };
-        self.metadata
-            .finish_connection_removal(&job.id, next_state, None)?;
         Ok(())
     }
 

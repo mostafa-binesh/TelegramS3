@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed connection-removal cleanup so the owning Telegram transport remains
+  available until evidence-first remote deletion completes; added a regression
+  test and documented the single-connection multi-user boundary.
+
 ## 0.7.1-rc.6 - 2026-09-10
 
 - Isolated Telegram connection-removal cleanup by durable connection

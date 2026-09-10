@@ -142,12 +142,12 @@ all buckets deleted in one metadata transaction, so the active index and its
 statistics disappear immediately. The removal job records the active
 connection generation. The optional remote-delete choice adds every manifest
 location to the existing evidence-first cleanup outbox, with the same
-generation copied onto each target. Local detachment does not wait for remote
-cleanup: after detachment, a new login may create a new generation. Cleanup
-workers refuse to use that new generation for old targets and quarantine them
-for recovery instead. If remote deletion is not selected, Telegram payloads
-remain by design and cannot be treated as a managed backup after the
-connection is removed.
+generation copied onto each target. When remote deletion is selected, local
+visibility is removed immediately but the owning generation/transport remains
+reserved until the evidence-first queue completes. Cleanup workers refuse to
+use a different generation for old targets and quarantine them for recovery
+instead. If remote deletion is not selected, Telegram payloads remain by design
+and cannot be treated as a managed backup after the connection is removed.
 
 ## Commit State
 

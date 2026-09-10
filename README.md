@@ -51,8 +51,9 @@ staging, and recovery artifacts, not committed payloads.
   SOCKS5 / bridged proxy support, explicit retry and flood-wait policy, and an
   in-browser onboarding wizard behind the operator UI. Login is considered
   ready only after the storage peer health probe succeeds; connection removal
-  detaches a generation before asynchronous cleanup and never routes old
-  cleanup through a new account.
+  hides local data immediately but retains the owning generation and transport
+  until requested remote cleanup completes, never routing old cleanup through a
+  new account.
 - **Bounded memory everywhere** — uploads and downloads stream chunk-by-chunk;
   no whole-object RAM buffering (an explicit project invariant).
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
@@ -202,8 +203,10 @@ connected once the session is authorized and the storage chat is reachable.
 The Connection tab also provides **Remove current connection**. Confirmation
 always hides the local buckets, objects, and statistics immediately. An optional
 checkbox queues deletion of the uploaded Telegram documents/messages in the
-durable cleanup worker; leaving it clear disconnects locally while intentionally
-leaving those remote files in Telegram. Bucket names are preserved exactly,
+durable cleanup worker; while that queue is pending, the owning connection is
+reserved so its cleanup cannot be sent through another account. Leaving it
+clear disconnects locally while intentionally leaving those remote files in
+Telegram. Bucket names are preserved exactly,
 including Unicode, and ordinary bucket deletion remains empty-only and
 tombstone-safe.
 

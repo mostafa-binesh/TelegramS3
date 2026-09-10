@@ -2770,4 +2770,53 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn connection_removal_keeps_owner_until_remote_cleanup_finishes() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        let manifest = service
+            .put_bytes("bucket", "removed.txt", "text/plain", b"remove me")
+            .await
+            .expect("put");
+        let job = service
+            .metadata
+            .begin_connection_removal(true)
+            .expect("begin removal");
+
+        service.ensure_workers();
+        for _ in 0..100 {
+            if service
+                .metadata
+                .connection_removal_job()
+                .expect("job")
+                .is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        service.shutdown_workers().await;
+
+        assert!(
+            service
+                .metadata
+                .connection_removal_job()
+                .expect("job")
+                .is_none(),
+            "removal job {} did not finish",
+            job.id
+        );
+        assert!(
+            service
+                .metadata
+                .active_connection_id()
+                .expect("active connection")
+                .is_none()
+        );
+        assert!(!service.manifest_file_path(manifest.object_id).exists());
+        assert!(!service.chunk_path(manifest.object_id, 0).exists());
+        assert!(!tempdir.path().join("data/mock-telegram/1.bin").exists());
+        assert!(!tempdir.path().join("data/mock-telegram/2.bin").exists());
+    }
 }

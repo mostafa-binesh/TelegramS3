@@ -201,10 +201,11 @@ Completed in this increment:
   unsupported
 - committed-object deletes now make cleanup due immediately; the existing
   evidence-first cleanup worker removes Telegram messages asynchronously
-- connection removal now detaches the local Telegram generation before remote
-  cleanup completes; generation-tagged targets cannot be deleted through a
-  newly logged-in account, and ambiguous targets remain recoverable instead of
-  blocking re-login
+- connection removal hides the local namespace immediately but retains the
+  owning Telegram generation and transport until evidence-first remote cleanup
+  completes; generation-tagged targets cannot be deleted through a newly
+  logged-in account, and the owning connection is explicitly reserved during
+  `remote_cleanup_pending`
 - Telegram health and the login wizard now share the end-to-end readiness
   contract: `authorized` is not shown as connected when storage-peer lookup
   fails, including `AUTH_KEY_UNREGISTERED`; `TELEGRAM_SESSION_PATH` is honored
@@ -219,6 +220,17 @@ Completed in this increment:
   explicit confirmation; local buckets, objects, and statistics are hidden
   immediately, while optional Telegram payload deletion is a durable,
   restart-safe worker job
+
+Multi-user boundary for the next increment:
+
+- the current process still supports one active Telegram connection, but all
+  new lifecycle work must preserve immutable connection/account ownership
+  boundaries
+- split bootstrap settings, session paths, storage-chat bindings, transport
+  handles, and cleanup credentials by account/connection before allowing a
+  second Telegram account to log in concurrently
+- add two-account isolation, restart, and cross-account cleanup tests before
+  changing the single-connection reservation into concurrent cleanup
 
 Planned work:
 

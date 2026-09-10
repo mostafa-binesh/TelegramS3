@@ -86,13 +86,13 @@ features, so they are documented separately.
   bypass tombstone/recovery rules.
 - Removing the current Telegram connection from the admin UI is an explicit,
   CSRF-protected action. It hides local buckets, objects, and statistics
-  immediately and detaches the connection generation. The optional "delete
-  uploaded files" choice queues Telegram message/document cleanup in the
-  durable worker; targets from a detached generation cannot be processed by a
-  later login. Without that choice, remote Telegram files are intentionally
-  retained and are no longer managed by this installation. The wizard reports
-  success only when the same end-to-end health check used by the overview can
-  resolve the storage peer.
+  immediately. The optional "delete uploaded files" choice queues Telegram
+  message/document cleanup in the durable worker and reserves the owning
+  generation/transport until cleanup completes; targets cannot be processed by
+  a later login. Without that choice, the connection is detached immediately
+  and remote Telegram files are intentionally retained and are no longer
+  managed by this installation. The wizard reports success only when the same
+  end-to-end health check used by the overview can resolve the storage peer.
 - The operator UI is not part of the S3 compatibility contract; the `/_admin`
   controller only reflects committed S3 object data through the same store as
   the S3 server. Its Vite-built hashed chunks are served from the UI dist
