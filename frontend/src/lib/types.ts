@@ -113,6 +113,7 @@ export interface TelegramSettings {
   telegram_proxy_username: string;
   telegram_proxy_password: string;
   telegram_proxy_mode: string;
+  telegram_account_phone?: string | null;
 }
 
 export interface TelegramSettingsState {

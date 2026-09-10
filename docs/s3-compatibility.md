@@ -90,8 +90,9 @@ features, so they are documented separately.
   browser uploads, and creates opaque `/_public/` share URLs with an optional expiry.
   Share URLs are public bearer capabilities bounded by object expiry.
 - Removing the current Telegram connection from the admin UI is an explicit,
-  CSRF-protected action that requires the linked Telegram phone number. Only a
-  SHA-256 hash is stored for that confirmation. It hides local buckets, objects, and statistics
+  CSRF-protected action that displays the linked Telegram account phone number
+  and requires typing that exact value as confirmation. The phone number is
+  stored in local metadata for this account-identity prompt. It hides local buckets, objects, and statistics
   immediately. The optional "delete uploaded files" choice queues Telegram
   message/document cleanup in the durable worker and reserves the owning
   generation/transport until cleanup completes; targets cannot be processed by

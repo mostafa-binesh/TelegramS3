@@ -10,6 +10,7 @@
   export let telegramProxyUsername = '';
   export let telegramProxyPassword = '';
   export let telegramProxyMode = 'auto';
+  export let telegramAccountPhone = '';
   export let settingsBusy = false;
   export let settingsError = '';
   export let settingsMessage = '';
@@ -58,6 +59,8 @@
   $: draftChunkSizeValid = Number.isFinite(draftChunkSizeBytes)
     && draftChunkSizeBytes >= storageChunkSizeMin
     && draftChunkSizeBytes <= storageChunkSizeMax;
+  $: phoneConfirmationMatches = Boolean(telegramAccountPhone)
+    && phoneConfirmation.trim() === telegramAccountPhone.trim();
 
   function formatBytes(bytes: number) {
     if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(2)} GiB`;
@@ -178,10 +181,11 @@
         <div class="summary-list">
           <div class="summary-row"><span class="summary-icon-small">⌁</span><span><small>API application</small><strong>{maskedApiId}</strong></span></div>
           <div class="summary-row"><span class="summary-icon-small">⌂</span><span><small>Storage chat</small><strong>{maskedChatId}</strong></span></div>
+          <div class="summary-row"><span class="summary-icon-small">◎</span><span><small>Telegram account</small><strong>{telegramAccountPhone || 'Reauthorize to load account'}</strong></span></div>
           <div class="summary-row"><span class="summary-icon-small">↗</span><span><small>Network route</small><strong>{networkLabel}</strong></span></div>
           <div class="summary-row"><span class:summary-ok={connected} class="summary-icon-small">✓</span><span><small>Health status</small><strong>{connected ? 'Storage chat reachable' : statusLabel}</strong></span></div>
         </div>
-        <div class="privacy-note"><span aria-hidden="true">●</span><span>Secrets stay protected and are never shown in this summary.</span></div>
+        <div class="privacy-note"><span aria-hidden="true">●</span><span>Credentials stay protected; the account number is shown for removal confirmation.</span></div>
       </article>
     </div>
 
@@ -203,17 +207,22 @@
     <form class="modal-card compact-modal" on:submit|preventDefault={removeConnection}>
       <div class="section-head"><div><p class="card-label">Telegram connection</p><h2>Remove current connection?</h2></div><button class="icon-button" type="button" aria-label="Close" on:click={() => showRemoveConnection = false} disabled={removeBusy}>×</button></div>
       <p class="fine-print">The dashboard will remove its buckets, files, and statistics immediately. This cannot be undone from this installation.</p>
-      <label><span>Confirm the linked phone number</span><input type="tel" bind:value={phoneConfirmation} autocomplete="tel" placeholder="e.g. +1 555 123 4567" /></label>
-      <p class="fine-print">Enter the phone number used for this Telegram connection. Formatting spaces, dashes, and parentheses are ignored.</p>
+      {#if telegramAccountPhone}
+        <div class="account-confirmation"><span class="eyebrow">Account selected for removal</span><strong>{telegramAccountPhone}</strong><span>Type this exact number below to confirm.</span></div>
+        <label><span>Type the displayed account number</span><input type="text" bind:value={phoneConfirmation} autocomplete="off" placeholder={telegramAccountPhone} /></label>
+      {:else}
+        <p class="error-hint" role="alert">The Telegram account number is unavailable. Reauthorize the connection before removing it.</p>
+      {/if}
       <label class="checkbox-row"><input type="checkbox" bind:checked={deleteUploadedFiles} /><span>Also delete all uploaded Telegram files</span></label>
       <p class="fine-print">If unchecked, uploaded Telegram files remain in Telegram but this connection will no longer manage them. If checked, deletion runs in the background and may take time.</p>
       {#if removeError}<p class="error-hint" role="alert">{removeError}</p>{/if}
-      <div class="settings-actions"><button class="ghost" type="button" on:click={() => showRemoveConnection = false} disabled={removeBusy}>Cancel</button><button class="danger-button" type="submit" disabled={removeBusy || !phoneConfirmation.trim()}>{removeBusy ? 'Removing…' : 'Remove connection'}</button></div>
+      <div class="settings-actions"><button class="ghost" type="button" on:click={() => showRemoveConnection = false} disabled={removeBusy}>Cancel</button><button class="danger-button" type="submit" disabled={removeBusy || !phoneConfirmationMatches}>{removeBusy ? 'Removing…' : 'Remove connection'}</button></div>
     </form>
   </div>
 {/if}
 
 <style>
+  .account-confirmation{display:grid;gap:4px;padding:14px 16px;border:1px solid #f0cccc;border-radius:14px;background:#fff7f7}.account-confirmation strong{font-size:1.1rem;letter-spacing:.02em;color:#7d2020}.account-confirmation>span:last-child{font-size:.8rem;color:var(--muted)}
   .settings-tabs{display:flex;gap:10px;margin-bottom:18px;padding:6px;border:1px solid #d7e2ee;border-radius:18px;background:#f5f8fc;box-shadow:0 8px 24px rgba(23,43,77,.05)}
   .settings-tabs button{display:flex;align-items:center;gap:11px;flex:0 1 250px;padding:11px 14px;border:1px solid transparent;border-radius:13px;background:transparent;color:#5d718b;text-align:left}
   .settings-tabs button.active{border-color:#cbdced;background:#fff;color:#17345a;box-shadow:0 5px 14px rgba(23,58,96,.08)}

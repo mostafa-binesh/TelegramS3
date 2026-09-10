@@ -87,7 +87,7 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
     }
 
     if (path === '/telegram/settings' && request.method() === 'GET') {
-      return route.fulfill({ json: { settings: { telegram_api_id: '12345', telegram_api_hash: 'hash', telegram_storage_chat_id: '-1001234567890', telegram_proxy_url: '', telegram_proxy_username: '', telegram_proxy_password: '', telegram_proxy_mode: 'auto' } } });
+      return route.fulfill({ json: { settings: { telegram_api_id: '12345', telegram_api_hash: 'hash', telegram_storage_chat_id: '-1001234567890', telegram_proxy_url: '', telegram_proxy_username: '', telegram_proxy_password: '', telegram_proxy_mode: 'auto', telegram_account_phone: '+15551234567' } } });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'GET') {
       return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, source: 'database' } });
@@ -389,20 +389,23 @@ test('storage policy success is reflected after leaving and returning to the tab
   await expect(page.getByText('8.00 MiB now')).toBeVisible();
 });
 
-test('connection removal stays disabled until the linked phone is entered and sends the confirmation', async ({ page }) => {
+test('connection removal shows the account and stays disabled until its exact number is entered', async ({ page }) => {
   await mockAdminApi(page);
   await signIn(page);
   await page.getByRole('button', { name: 'Telegram settings' }).click();
   await page.getByRole('button', { name: 'Remove connection' }).first().click();
   const removeButton = page.locator('.compact-modal').getByRole('button', { name: 'Remove connection' });
   await expect(removeButton).toBeDisabled();
-  await page.getByLabel('Confirm the linked phone number').fill('+1 (555) 123-4567');
+  await expect(page.locator('.account-confirmation')).toContainText('+15551234567');
+  await page.getByLabel('Type the displayed account number').fill('+1 (555) 123-4567');
+  await expect(removeButton).toBeDisabled();
+  await page.getByLabel('Type the displayed account number').fill('+15551234567');
   await expect(removeButton).toBeEnabled();
   const [removeRequest] = await Promise.all([
     page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/telegram/disconnect') && candidate.method() === 'POST'),
     removeButton.click()
   ]);
-  expect(removeRequest.postDataJSON()).toMatchObject({ delete_uploaded_files: false, phone_confirmation: '+1 (555) 123-4567' });
+  expect(removeRequest.postDataJSON()).toMatchObject({ delete_uploaded_files: false, phone_confirmation: '+15551234567' });
   await expect(page.getByText('Connection removed.')).toBeVisible();
 });
 

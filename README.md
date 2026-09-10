@@ -206,9 +206,10 @@ accounts in the "Operators" tab are separate from that Telegram login. The
 overview now shows the Telegram storage connection state directly and flips to
 connected once the session is authorized and the storage chat is reachable.
 
-The account view also provides **Remove connection**. It requires re-entering
-the linked Telegram phone number; only a SHA-256 hash of that number is stored
-in local metadata for this safety check. Confirmation then hides the local
+The account view also provides **Remove connection**. It shows the linked
+Telegram account phone number and requires typing that exact number again as a
+deliberate confirmation. The phone number is stored in local metadata so the
+account identity can be shown back to the operator. Confirmation then hides the local
 buckets, objects, and statistics immediately. An optional
 checkbox queues deletion of the uploaded Telegram documents/messages in the
 durable cleanup worker; while that queue is pending, the owning connection is

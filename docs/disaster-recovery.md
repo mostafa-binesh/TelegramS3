@@ -173,10 +173,10 @@ and login state; it does not change object manifests, chunks, or recovery marker
    returning the endpoint to backup tooling.
 
 The admin connection-removal action is intentionally guarded by the linked
-Telegram phone number. If the number is unavailable, do not bypass the check;
-recover the account details or use the normal Telegram reauthorization flow
-first. The stored confirmation value is only a SHA-256 hash, so it cannot be
-displayed back by the admin UI.
+Telegram account identity. The admin UI displays the stored phone number and
+requires the operator to type that exact number before removal. If the number
+is unavailable, do not bypass the check; use the normal Telegram
+reauthorization flow first so the account identity can be stored again.
 
 ## Orphan Cleanup
 

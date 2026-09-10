@@ -1180,7 +1180,7 @@ impl AdminUiState {
                 if let Some(phone) = phone_for_confirmation.as_deref()
                     && let Err(error) = self.store().set_telegram_account_phone(phone)
                 {
-                    eprintln!("failed to store Telegram phone confirmation hash: {error}");
+                    eprintln!("failed to store Telegram account phone: {error}");
                 }
                 if driver.is_authorized() {
                     self.finalize_wizard_success().await;
@@ -1527,6 +1527,7 @@ impl AdminUiState {
             .ok()
             .flatten()
             .unwrap_or_default();
+        let telegram_account_phone = self.store().telegram_account_phone().ok().flatten();
         let resolved = self.config.resolve_telegram_bootstrap(self.store()).ok();
         TelegramSettingsWire {
             telegram_api_id: resolved
@@ -1564,6 +1565,7 @@ impl AdminUiState {
                 .map(|settings| settings.telegram_proxy_mode.clone())
                 .or_else(|| stored.telegram_proxy_mode.clone())
                 .unwrap_or_else(|| "auto".to_string()),
+            telegram_account_phone,
         }
     }
 
@@ -2391,6 +2393,7 @@ struct TelegramSettingsWire {
     telegram_proxy_username: String,
     telegram_proxy_password: String,
     telegram_proxy_mode: String,
+    telegram_account_phone: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -105,7 +105,8 @@ async function mockAdminApi(
             telegram_proxy_url: body.telegram_proxy_url ?? '',
             telegram_proxy_username: body.telegram_proxy_username ?? '',
             telegram_proxy_password: body.telegram_proxy_password ?? '',
-            telegram_proxy_mode: body.telegram_proxy_mode ?? 'auto'
+            telegram_proxy_mode: body.telegram_proxy_mode ?? 'auto',
+            telegram_account_phone: '+15551234567'
           }
         }
       });
@@ -120,7 +121,8 @@ async function mockAdminApi(
             telegram_proxy_url: '',
             telegram_proxy_username: '',
             telegram_proxy_password: '',
-            telegram_proxy_mode: 'auto'
+            telegram_proxy_mode: 'auto',
+            telegram_account_phone: '+15551234567'
           }
         }
       });
@@ -458,7 +460,7 @@ test('connection removal clears recovery attention items from the panel', async 
   await page.getByRole('button', { name: 'Sign in' }).click();
   await page.getByRole('button', { name: 'Telegram settings' }).click();
   await page.getByRole('button', { name: 'Remove connection' }).first().click();
-  await page.getByLabel('Confirm the linked phone number').fill('+15551234567');
+  await page.getByLabel('Type the displayed account number').fill('+15551234567');
   await page.locator('.compact-modal').getByRole('button', { name: 'Remove connection' }).click();
 
   await page.getByRole('button', { name: 'Transfers' }).click();

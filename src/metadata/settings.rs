@@ -2,11 +2,11 @@ use super::rows::timestamp_now;
 use super::{MetadataError, MetadataStore};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
 const CHUNK_SIZE_SETTING: &str = "telegram_chunk_size";
+const TELEGRAM_ACCOUNT_PHONE_SETTING: &str = "telegram_account_phone";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelegramBootstrapSettings {
@@ -51,29 +51,54 @@ impl MetadataStore {
     }
 
     pub fn set_telegram_account_phone(&self, phone: &str) -> Result<(), MetadataError> {
-        let normalized = normalize_phone(phone);
-        let hash = hex::encode(Sha256::digest(normalized.as_bytes()));
+        let phone = phone.trim();
+        if phone.is_empty() {
+            return Err(MetadataError::InvalidManifest(
+                "telegram account phone is required".to_string(),
+            ));
+        }
         self.with_connection(|connection| {
-            connection.execute(
-                "INSERT INTO app_settings(key,value,updated_at) VALUES('telegram_account_phone_hash',?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                params![hash, timestamp_now()?],
+            let tx = connection.transaction()?;
+            tx.execute(
+                "INSERT INTO app_settings(key,value,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                params![TELEGRAM_ACCOUNT_PHONE_SETTING, phone, timestamp_now()?],
             )?;
+            // The previous implementation stored only this irreversible value.
+            // It cannot be converted back into the phone number, so remove it
+            // whenever the account is re-authorized and the normal value is
+            // available.
+            tx.execute(
+                "DELETE FROM app_settings WHERE key='telegram_account_phone_hash'",
+                [],
+            )?;
+            tx.commit()?;
             Ok(())
+        })
+    }
+
+    pub fn telegram_account_phone(&self) -> Result<Option<String>, MetadataError> {
+        self.with_connection(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key=?1",
+                    [TELEGRAM_ACCOUNT_PHONE_SETTING],
+                    |row| row.get(0),
+                )
+                .optional()?)
         })
     }
 
     pub fn telegram_account_phone_matches(&self, phone: &str) -> Result<bool, MetadataError> {
         let normalized = normalize_phone(phone);
-        let expected = hex::encode(Sha256::digest(normalized.as_bytes()));
         self.with_connection(|connection| {
             let stored: Option<String> = connection
                 .query_row(
-                    "SELECT value FROM app_settings WHERE key='telegram_account_phone_hash'",
-                    [],
+                    "SELECT value FROM app_settings WHERE key=?1",
+                    [TELEGRAM_ACCOUNT_PHONE_SETTING],
                     |row| row.get(0),
                 )
                 .optional()?;
-            Ok(stored.as_deref() == Some(expected.as_str()))
+            Ok(stored.is_some_and(|value| normalize_phone(&value) == normalized))
         })
     }
 
@@ -226,6 +251,8 @@ impl MetadataStore {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::OptionalExtension;
+
     use super::MetadataStore;
 
     #[test]
@@ -240,6 +267,47 @@ mod tests {
             Some(8 * 1024 * 1024)
         );
         assert_eq!(store.schema_version().expect("schema"), 11);
+    }
+
+    #[test]
+    fn account_phone_round_trips_as_plain_text_and_cleans_legacy_hash() {
+        let store = MetadataStore::open_in_memory().expect("metadata");
+        store
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO app_settings(key,value,updated_at) VALUES('telegram_account_phone_hash','legacy-hash','now')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("legacy hash");
+
+        store
+            .set_telegram_account_phone(" +1 (555) 123-4567 ")
+            .expect("write phone");
+        assert_eq!(
+            store.telegram_account_phone().expect("read phone"),
+            Some("+1 (555) 123-4567".to_string())
+        );
+        assert!(
+            store
+                .telegram_account_phone_matches("+15551234567")
+                .expect("match phone")
+        );
+        assert!(
+            store
+                .with_connection(|connection| {
+                    Ok(connection
+                    .query_row(
+                        "SELECT value FROM app_settings WHERE key='telegram_account_phone_hash'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .is_none())
+                })
+                .expect("legacy hash removed")
+        );
     }
 }
 

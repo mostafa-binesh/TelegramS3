@@ -183,6 +183,23 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     let csrf = json_field(&login.body, "csrf_token").expect("csrf token");
     let cookie_header = cookie_value(&cookie);
 
+    let telegram_settings = http_request(
+        &client,
+        &bind_addr,
+        "GET",
+        "/_admin/api/telegram/settings",
+        &[("Cookie", cookie_header.as_str())],
+        b"",
+    )
+    .await;
+    assert_eq!(telegram_settings.status, 200);
+    assert!(telegram_settings.body.contains("+15551234567"));
+    assert!(
+        !telegram_settings
+            .body
+            .contains("telegram_account_phone_hash")
+    );
+
     let post_success_failed_login = http_request(
         &client,
         &bind_addr,
