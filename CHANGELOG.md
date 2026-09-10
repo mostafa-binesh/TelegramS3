@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.7.1 - 2026-09-10
+
+- Promoted the Telegram account wizard and responsive admin console from the
+  release-candidate series to the stable `v0.7.1` release.
+- Verified the release with Rust and frontend checks, workspace tests, and
+  responsive browser coverage from 320px through 1440px.
+
 ## 0.7.1-rc.12 - 2026-09-10
 
 - Made the authenticated admin console responsive across phone, tablet, and
