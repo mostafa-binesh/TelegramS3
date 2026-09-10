@@ -347,12 +347,15 @@ test('upload modal sends the selected object expiry through the resumable upload
   await openBucket(page);
   await page.getByRole('button', { name: 'Upload' }).click();
   await page.locator('input[type="file"]').setInputFiles({ name: 'upload.txt', mimeType: 'text/plain', buffer: Buffer.from('x') });
-  await page.getByLabel('Object expiry in seconds').fill('3600');
+  const expiryInput = page.getByLabel('Object expiry in seconds');
+  await page.getByRole('button', { name: '1 hour', exact: true }).click();
+  await expect(expiryInput).toHaveValue('3600');
+  await expiryInput.fill('30');
   const [beginRequest] = await Promise.all([
     page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/uploads/resumable') && candidate.method() === 'POST'),
     page.getByRole('button', { name: 'Upload 1' }).click()
   ]);
-  expect(beginRequest.postDataJSON()).toMatchObject({ bucket: 'release-test', key: 'upload.txt', expires_in_seconds: 3600 });
+  expect(beginRequest.postDataJSON()).toMatchObject({ bucket: 'release-test', key: 'upload.txt', expires_in_seconds: 30 });
   await expect(page.getByText('completed')).toBeVisible();
 });
 
