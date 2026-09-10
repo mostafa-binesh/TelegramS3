@@ -45,11 +45,19 @@ const overview = {
 
 async function mockAdminApi(
   page: import('@playwright/test').Page,
-  options: { telegramSettingsFailure?: boolean } = {}
+  options: {
+    telegramSettingsFailure?: boolean;
+    storageSettingsFailure?: boolean;
+    recoveryIssues?: Array<Record<string, unknown>>;
+  } = {}
 ) {
   let loggedIn = false;
   let recoveryJobVisible = true;
   let connectionRemoved = false;
+  let chunkSize = 1_048_576;
+  const deletedKeys = new Set<string>();
+  const buckets = [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }];
+  const users = [user];
   await page.route('**/_admin/api/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace('/_admin/api', '');
@@ -69,13 +77,14 @@ async function mockAdminApi(
     }
     if (!loggedIn) return route.fulfill({ status: 401, json: { error: 'unauthorized' } });
     if (path === '/overview') {
+      const recoveryIssues = options.recoveryIssues ?? [];
       const clearedOverview = {
         ...overview,
-        storage: { ...overview.storage, recovery_required_objects: 0 },
-        recovery: { ...overview.recovery, issue_count: 0, unacknowledged_count: 0, issues: [] },
+        storage: { ...overview.storage, chunk_size: chunkSize, recovery_required_objects: 0 },
+        recovery: { ...overview.recovery, issue_count: recoveryIssues.length, unacknowledged_count: recoveryIssues.length, issues: recoveryIssues },
         telegram: { ...overview.telegram, connection_state: 'needs_reauth', detail: 'Telegram storage is not connected' }
       };
-      return route.fulfill({ json: connectionRemoved ? clearedOverview : overview });
+      return route.fulfill({ json: connectionRemoved ? clearedOverview : { ...overview, storage: { ...overview.storage, chunk_size: chunkSize }, recovery: { ...overview.recovery, issue_count: recoveryIssues.length, unacknowledged_count: recoveryIssues.length, issues: recoveryIssues } } });
     }
     if (path === '/telegram/disconnect' && request.method() === 'POST') {
       connectionRemoved = true;
@@ -116,6 +125,15 @@ async function mockAdminApi(
         }
       });
     }
+    if (path === '/telegram/storage-settings' && request.method() === 'GET') {
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, source: 'database' } });
+    }
+    if (path === '/telegram/storage-settings' && request.method() === 'POST') {
+      if (options.storageSettingsFailure) return route.fulfill({ status: 400, json: { error: 'storage settings rejected for this test' } });
+      const body = request.postDataJSON() as { chunk_size: number };
+      chunkSize = body.chunk_size;
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, source: 'database' } });
+    }
     if (path === '/telegram/wizard/begin' && request.method() === 'POST') {
       return route.fulfill({ json: { phase: 'code', message: null } });
     }
@@ -128,9 +146,36 @@ async function mockAdminApi(
     if (path === '/telegram/wizard/cancel' && request.method() === 'POST') {
       return route.fulfill({ json: { ok: true } });
     }
-    if (path === '/buckets') return route.fulfill({ json: { buckets: [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }] } });
-    if (path === '/objects') return route.fulfill({ json: { prefix: '', folders: [], objects: [{ key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z' }] } });
-    if (path === '/users') return route.fulfill({ json: { users: [user] } });
+    if (path === '/buckets' && request.method() === 'GET') return route.fulfill({ json: { buckets } });
+    if (path === '/buckets' && request.method() === 'POST') {
+      const body = request.postDataJSON() as { name: string };
+      buckets.push({ name: body.name, created_at: '2026-01-01T00:00:00Z' });
+      return route.fulfill({ json: buckets.at(-1) });
+    }
+    if (path.startsWith('/buckets/') && request.method() === 'DELETE') {
+      const name = decodeURIComponent(path.slice('/buckets/'.length));
+      const index = buckets.findIndex((bucket) => bucket.name === name);
+      if (index >= 0) buckets.splice(index, 1);
+      return route.fulfill({ json: { ok: true } });
+    }
+    if (path === '/objects' && request.method() === 'GET') {
+      const prefix = new URL(request.url()).searchParams.get('prefix') ?? '';
+      const rootObjects = [{ key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z' }];
+      const nestedObjects = [{ key: 'docs/report.txt', name: 'report.txt', size: 24, last_modified: '2026-01-01T00:00:00Z' }];
+      return route.fulfill({ json: { prefix, folders: prefix ? [] : ['docs'], objects: (prefix ? nestedObjects : rootObjects).filter((object) => !deletedKeys.has(object.key)) } });
+    }
+    if (path === '/objects/share' && request.method() === 'POST') {
+      return route.fulfill({ status: 201, json: { url: '/_public/mock-share-token', expires_at: '2026-01-01T01:00:00Z' } });
+    }
+    if (path === '/objects/delete' && request.method() === 'POST') {
+      const body = request.postDataJSON() as { key: string };
+      deletedKeys.add(body.key);
+      return route.fulfill({ json: { ok: true } });
+    }
+    if (path === '/objects/folder' && request.method() === 'POST') return route.fulfill({ json: { ok: true } });
+    if (path === '/users' && request.method() === 'GET') return route.fulfill({ json: { users } });
+    if (path.startsWith('/users/') && request.method() === 'DELETE') return route.fulfill({ json: { ok: true } });
+    if (path === '/recovery/acknowledge' || path === '/recovery/unacknowledge') return route.fulfill({ json: { ok: true, acknowledged_count: 1, unacknowledged_count: 0 } });
     if (path.startsWith('/jobs/') && path.endsWith('/retry')) {
       recoveryJobVisible = false;
       return route.fulfill({ json: { ok: true } });
@@ -246,13 +291,13 @@ test('re-entering a bucket reloads its objects', async ({ page }) => {
   await page.getByLabel('Password').fill('correct-password');
   await page.getByRole('button', { name: 'Sign in' }).click();
   await page.getByRole('button', { name: 'Buckets' }).click();
-  await page.getByRole('button', { name: 'release-test' }).click();
+  await page.getByRole('button', { name: /^release-test created/ }).click();
 
   await expect(page.getByText('readme.txt')).toBeVisible();
   expect(objectListRequests).toBe(1);
 
   await page.getByRole('button', { name: 'All buckets' }).click();
-  await page.getByRole('button', { name: 'release-test' }).click();
+  await page.getByRole('button', { name: /^release-test created/ }).click();
 
   await expect(page.getByText('readme.txt')).toBeVisible();
   expect(objectListRequests).toBe(2);
@@ -387,7 +432,7 @@ test('upload dialog confirms cancellation while the file is still uploading to t
   await page.getByLabel('Password').fill('correct-password');
   await page.getByRole('button', { name: 'Sign in' }).click();
   await page.getByRole('button', { name: 'Buckets' }).click();
-  await page.getByRole('button', { name: 'release-test' }).click();
+  await page.getByRole('button', { name: /^release-test created/ }).click();
   await page.getByRole('button', { name: 'Upload' }).click();
   await page.locator('input[type="file"]').setInputFiles({ name: 'server-upload.txt', mimeType: 'text/plain', buffer: Buffer.from('x') });
   await page.getByRole('button', { name: 'Upload 1' }).click();
@@ -413,6 +458,7 @@ test('connection removal clears recovery attention items from the panel', async 
   await page.getByRole('button', { name: 'Sign in' }).click();
   await page.getByRole('button', { name: 'Telegram settings' }).click();
   await page.getByRole('button', { name: 'Remove connection' }).first().click();
+  await page.getByLabel('Confirm the linked phone number').fill('+15551234567');
   await page.locator('.compact-modal').getByRole('button', { name: 'Remove connection' }).click();
 
   await page.getByRole('button', { name: 'Transfers' }).click();
