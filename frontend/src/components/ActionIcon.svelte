@@ -8,7 +8,7 @@
 
 {#if href}<a class:danger={tone === 'danger'} class="action-icon" {href} download aria-label={label} title={label}>
   <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" /></svg>
-</a>{:else}<button class:danger={tone === 'danger'} class="action-icon" type="button" {disabled} aria-label={label} title={label}>
+</a>{:else}<button class:danger={tone === 'danger'} class="action-icon" type="button" {disabled} aria-label={label} title={label} on:click>
   <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
     {#if name === 'download'}<path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" />
     {:else if name === 'share'}<circle cx="18" cy="5" r="2.5" /><circle cx="6" cy="12" r="2.5" /><circle cx="18" cy="19" r="2.5" /><path d="m8.2 10.8 7.6-4.5m-7.6 6.9 7.6 4.5" />

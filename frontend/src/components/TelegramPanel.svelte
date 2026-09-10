@@ -125,7 +125,7 @@
       <form class="policy-card policy-editor" on:submit|preventDefault={onSaveStorageSettings}>
         <div class="policy-card-heading"><div><span class="eyebrow">Upload shaping</span><h3>Chunk size</h3></div><span class="policy-badge">{formatBytes(storageChunkSizeBytes)} now</span></div>
         <p class="policy-description">Larger chunks mean fewer Telegram documents and less metadata. Smaller chunks make retries lighter and keep memory use lower.</p>
-        <label class="chunk-input-label"><span>New upload chunk size</span><div class="chunk-input-wrap"><input bind:value={storageChunkSizeMiB} type="number" min={storageChunkSizeMin / 1048576} max={storageChunkSizeMax / 1048576} step="0.25" inputmode="decimal" aria-describedby="chunk-size-help" /><span>MiB</span></div></label>
+        <label class="chunk-input-label"><span>New upload chunk size</span><div class="chunk-input-wrap"><input bind:value={storageChunkSizeMiB} type="number" min={storageChunkSizeMin / 1048576} max={storageChunkSizeMax / 1048576} step="any" inputmode="decimal" aria-describedby="chunk-size-help" /><span>MiB</span></div></label>
         <div class="preset-grid" aria-label="Chunk size presets">
           {#each [1, 4, 8, 16, 32] as preset}<button class:chosen={Number(storageChunkSizeMiB) === preset} type="button" on:click={() => storageChunkSizeMiB = String(preset)}>{preset} MiB</button>{/each}
         </div>

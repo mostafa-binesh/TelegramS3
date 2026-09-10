@@ -577,8 +577,8 @@
     }
   }
 
-  async function removeKey(obj: ObjectEntry | string) {
-    const key = typeof obj === 'string' ? `${currentPrefix}${obj}/` : obj.key;
+  async function removeKey(obj: ObjectEntry | string, folder = false) {
+    const key = typeof obj === 'string' ? `${currentPrefix}${obj}${folder ? '/' : ''}` : obj.key;
     busy = true;
     try {
       await removeObject(session?.csrf_token, selectedBucket, key);
@@ -591,7 +591,8 @@
     }
   }
 
-  function requestDelete(target: { type: 'bucket' | 'object' | 'folder' | 'operator'; name: string; key?: string }) {
+  async function requestDelete(target: { type: 'bucket' | 'object' | 'folder' | 'operator'; name: string; key?: string }) {
+    await loadAdminModals();
     deleteTarget = target;
     showDeleteModal = true;
   }
@@ -604,7 +605,7 @@
     if (target.type === 'bucket') await dropBucket(target.name);
     else if (target.type === 'selection') await deleteSelected();
     else if (target.type === 'operator') await dropUser(target.key ?? target.name);
-    else await removeKey(target.key ?? target.name);
+    else await removeKey(target.key ?? target.name, target.type === 'folder');
   }
 
   async function openShareModal(obj: ObjectEntry) {
@@ -677,6 +678,7 @@
 
   async function removeSelected() {
     if (!selectedKeys.length) return;
+    await loadAdminModals();
     deleteTarget = { type: 'selection', name: `${selectedKeys.length} selected item(s)` };
     showDeleteModal = true;
   }

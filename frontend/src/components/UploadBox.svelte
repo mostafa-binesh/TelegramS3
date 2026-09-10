@@ -106,12 +106,13 @@
 
   async function startQueued() {
     if (uploadStarted) return;
+    const trimmedExpiry = String(expiresInSeconds ?? '').trim();
     expiryError = '';
-    if (expiresInSeconds.trim() && (!/^\d+$/.test(expiresInSeconds.trim()) || Number(expiresInSeconds) < 1)) {
+    if (trimmedExpiry && (!/^\d+$/.test(trimmedExpiry) || Number(trimmedExpiry) < 1)) {
       expiryError = 'Expiry must be a positive number of seconds.';
       return;
     }
-    selectedExpiry = expiresInSeconds.trim() ? Number(expiresInSeconds) : null;
+    selectedExpiry = trimmedExpiry ? Number(trimmedExpiry) : null;
     uploadStarted = true;
     try {
       for (let index = 0; index < items.length; index += 1) await doUpload(index);
