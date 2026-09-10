@@ -58,7 +58,6 @@
   let routeLoadKey = '';
   let loadedRouteKey = '';
   let routeLoadError = '';
-  let lastObjectsRouteKey = '';
 
   async function loadSetupWizard() { SetupWizardComponent ??= (await import('./components/SetupWizard.svelte')).default; }
   async function loadTransfers() { TransfersComponent ??= (await import('./components/Transfers.svelte')).default; }
@@ -317,11 +316,7 @@
     if (next.view === 'overview' || next.view === 'recovery') await refreshOverview();
     if (next.view === 'buckets') {
       await refreshBuckets();
-      const objectsKey = `${next.bucket}|${next.prefix}`;
-      if (next.bucket && objectsKey !== lastObjectsRouteKey) {
-        lastObjectsRouteKey = objectsKey;
-        await refreshObjects(next.bucket, next.prefix);
-      }
+      if (next.bucket) await refreshObjects(next.bucket, next.prefix);
     }
   }
 
@@ -340,7 +335,6 @@
       telegramProxyUsername = '';
       telegramProxyPassword = '';
       telegramProxyMode = 'auto';
-      lastObjectsRouteKey = '';
       await refreshOverview({ silent: true });
       notifySuccess(result.message);
     } finally {

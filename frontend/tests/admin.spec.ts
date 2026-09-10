@@ -104,7 +104,7 @@ async function mockAdminApi(page: import('@playwright/test').Page) {
       return route.fulfill({ json: { ok: true } });
     }
     if (path === '/buckets') return route.fulfill({ json: { buckets: [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }] } });
-    if (path === '/objects') return route.fulfill({ json: { prefix: '', folders: [], objects: [] } });
+    if (path === '/objects') return route.fulfill({ json: { prefix: '', folders: [], objects: [{ key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z' }] } });
     if (path === '/users') return route.fulfill({ json: { users: [user] } });
     if (path.startsWith('/jobs/') && path.endsWith('/retry')) {
       recoveryJobVisible = false;
@@ -166,6 +166,30 @@ test('responsive navigation remains usable on a narrow viewport', async ({ page 
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Transfers' })).toBeVisible();
+});
+
+test('re-entering a bucket reloads its objects', async ({ page }) => {
+  await mockAdminApi(page);
+  let objectListRequests = 0;
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/_admin/api/objects') objectListRequests += 1;
+  });
+
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Buckets' }).click();
+  await page.getByRole('button', { name: 'release-test' }).click();
+
+  await expect(page.getByText('readme.txt')).toBeVisible();
+  expect(objectListRequests).toBe(1);
+
+  await page.getByRole('button', { name: 'All buckets' }).click();
+  await page.getByRole('button', { name: 'release-test' }).click();
+
+  await expect(page.getByText('readme.txt')).toBeVisible();
+  expect(objectListRequests).toBe(2);
 });
 
 test('recovery transfer is visible and retry removes it after reconciliation', async ({ page }) => {
