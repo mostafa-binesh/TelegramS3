@@ -176,6 +176,18 @@ export function removeObject(csrf?: string | null, bucket = '', key = '') {
   });
 }
 
+export function createShareLink(
+  csrf: string | null | undefined,
+  bucket: string,
+  key: string,
+  expiresInSeconds?: number | null
+) {
+  return requestJson<{ url: string; expires_at?: string | null }>('/objects/share', csrf, {
+    method: 'POST',
+    body: { bucket, key, expires_in_seconds: expiresInSeconds || undefined }
+  });
+}
+
 /** Write an already-read object body and wait for it to become committed. */
 export async function putObjectContent(
   bucket: string,
@@ -291,17 +303,19 @@ export interface ResumableUploadOptions {
   receptionId?: string;
   waitUntilResumed?: () => Promise<void>;
   onReception?: (id: string) => void;
+  expiresInSeconds?: number | null;
 }
 
 export function beginResumableUpload(
   bucket: string,
   key: string,
   contentType: string,
-  csrf?: string | null
+  csrf?: string | null,
+  expiresInSeconds?: number | null
 ) {
   return requestJson<ResumableUploadSession>('/uploads/resumable', csrf, {
     method: 'POST',
-    body: { bucket, key, content_type: contentType }
+    body: { bucket, key, content_type: contentType, expires_in_seconds: expiresInSeconds || undefined }
   });
 }
 
@@ -385,10 +399,10 @@ export async function uploadResumable(
       // reception. Re-selecting the same file starts a fresh reception rather
       // than retrying an ID that can never become active again.
       if (!(cause instanceof ApiError) || cause.status !== 404) throw cause;
-      session = await beginResumableUpload(bucket, key, file.type || 'application/octet-stream', csrf);
+      session = await beginResumableUpload(bucket, key, file.type || 'application/octet-stream', csrf, options.expiresInSeconds);
     }
   } else {
-    session = await beginResumableUpload(bucket, key, file.type || 'application/octet-stream', csrf);
+    session = await beginResumableUpload(bucket, key, file.type || 'application/octet-stream', csrf, options.expiresInSeconds);
   }
   options.onReception?.(session.id);
   let offset = session.received;

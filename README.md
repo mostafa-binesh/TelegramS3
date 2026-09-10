@@ -238,6 +238,16 @@ aws --endpoint-url "$ENDPOINT" s3 ls s3://demo
 Multipart, range requests, conditional requests, and version-aware listings
 work through the same endpoint.
 
+Per-object expiry is available as a Telegram S3 extension. Send either
+`x-amz-meta-telegram-s3-expires-at: <RFC3339 timestamp>` or
+`x-amz-meta-telegram-s3-expires-in: <positive seconds>` on a PUT (and on
+multipart initiation). Expired objects disappear from S3/admin listings and
+return as missing on reads; their Telegram cleanup remains subject to the
+normal conservative GC policy. The admin browser exposes the same seconds-
+based expiry control. Operators can create bearer share links from the object
+browser at `/share/<token>`, with an optional link expiry capped by the object
+expiry.
+
 ### 5. Build from source
 
 ```bash
@@ -274,7 +284,9 @@ put/get/head/delete/list-v1/list-v2/copy, byte-range GET, multipart
 initiate/upload/complete/abort/list, conditional requests, versioning with
 delete markers, and checksum enforcement. Presigned URLs, batch delete, bucket
 policies, object tags, retention/object lock, event notifications, and quotas
-are documented **gaps** — they are not silently emulated. The authoritative,
+are documented **gaps** — they are not silently emulated. Capability share
+links are available through the admin panel, but AWS SigV4 presigned URLs
+remain unsupported. The authoritative,
 per-operation matrix is [docs/s3-compatibility.md](docs/s3-compatibility.md).
 
 ## Security and durability

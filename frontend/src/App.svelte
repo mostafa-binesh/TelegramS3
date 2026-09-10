@@ -25,6 +25,7 @@
     putObjectContent,
     contentUrl,
     saveTelegramSettings,
+    createShareLink,
   } from './lib/api';
   import {normalizeError} from './lib/format';
   import type {
@@ -547,6 +548,24 @@
     }
   }
 
+  async function shareObject(obj: ObjectEntry) {
+    const raw = window.prompt('Share link expiry in seconds (leave blank for no link expiry):', '');
+    if (raw === null) return;
+    const trimmed = raw.trim();
+    if (trimmed && (!/^\d+$/.test(trimmed) || Number(trimmed) < 1)) {
+      notifyError('Share expiry must be a positive number of seconds.');
+      return;
+    }
+    busy = true;
+    try {
+      const result = await createShareLink(session?.csrf_token, selectedBucket, obj.key, trimmed ? Number(trimmed) : null);
+      const url = new URL(result.url, window.location.origin).toString();
+      try { await navigator.clipboard.writeText(url); } catch { window.prompt('Copy this share link:', url); }
+      notifySuccess(result.expires_at ? 'Share link copied with an expiry.' : 'Share link copied.');
+    } catch (cause) { notifyError(normalizeError(cause)); }
+    finally { busy = false; }
+  }
+
   function selectRecoveryTab(tab: 'issues' | 'transfers') {
     navigate({ view: 'recovery', recoveryTab: tab });
   }
@@ -685,7 +704,7 @@
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])} onRemoveKey={removeKey} onRemoveSelected={removeSelected} onRemoveBucket={dropBucket} onOpenMove={openMoveModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])} onRemoveKey={removeKey} onRemoveSelected={removeSelected} onRemoveBucket={dropBucket} onOpenMove={openMoveModal} onShare={shareObject}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'users'}
       {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} error={usersError} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={dropUser} onAdd={openOperatorModal}/>{:else if routeLoadError}<LoadError title="Could not load operator accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
     {/if}

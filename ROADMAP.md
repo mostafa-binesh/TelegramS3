@@ -169,6 +169,12 @@ Completed work (content streaming + wizard increment):
 - successful Telegram reauthorization refreshes the live transport immediately, and the overview card now reports connected / disconnected / needs reauth from the same runtime snapshot
 - the Svelte UI gains per-file upload + progress, per-row Download, in-app bucket creation, and a three-step Telegram set-up flow; readiness panel now reflects the storage connection state directly
 - Telegram settings saves validate numeric API/storage identifiers before persistence and report refresh failures as JSON warnings instead of surfacing as proxy 502s
+- object expiry is persisted in rebuildable manifests, configurable from the
+  admin upload UI or S3 extension headers, and enforced on S3/admin reads and
+  listings
+- the admin object browser can issue opaque `/share/<token>` download links
+  with optional expiry capped by the object's expiry; public links use the
+  bounded shared reader
 
 Remaining Phase-9 follow-ups (explicitly out of this increment, see ADR-0006 / ROADMAP): bulk/folder download or server-side ZIP (no whole-RAM buffering), drag-in of nested directory trees, and browser resumable-multipart upload negotiation.
 

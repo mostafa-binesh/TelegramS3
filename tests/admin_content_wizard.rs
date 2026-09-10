@@ -309,6 +309,40 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
     let guest = raw_request(&client, &bind_addr, "GET", &upload_path, &[], b"").await;
     assert_eq!(guest.status, 401, "guest content GET must be 401");
 
+    // Admin-created capability links are readable without an authenticated session.
+    let share_payload = format!(
+        r#"{{"bucket":"{}","key":"{}","expires_in_seconds":60}}"#,
+        bucket, key
+    );
+    let share = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/objects/share",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        share_payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(share.status_code, 201, "share link creation");
+    let share_url = share.bytes_json["url"]
+        .as_str()
+        .expect("share URL")
+        .to_string();
+    assert!(share.bytes_json["expires_at"].is_string());
+    let shared = raw_request(&client, &bind_addr, "GET", &share_url, &[], b"").await;
+    assert_eq!(shared.status, 200, "public share GET");
+    assert_eq!(shared.body, raw, "public share body must equal raw bytes");
+    let shared_head = raw_request(&client, &bind_addr, "HEAD", &share_url, &[], b"").await;
+    assert_eq!(shared_head.status, 200, "public share HEAD");
+    assert!(
+        shared_head.body.is_empty(),
+        "share HEAD body should be empty"
+    );
+
     // ---- Telegram login wizard phases ----------------------------------------
     // Start: idle, with an authorized flag on the wire.
     let state = json_request(

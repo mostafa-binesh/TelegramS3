@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 10;
+const SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Error)]
 pub enum MetadataError {
@@ -122,6 +122,7 @@ mod recovery;
 mod rows;
 mod schema;
 mod settings;
+mod shares;
 
 pub use self::auth::{DbSession, DbUser};
 pub use self::buckets::BucketRecord;
@@ -129,3 +130,4 @@ pub use self::connection_removal::ConnectionRemovalJob;
 pub use self::manifests::{JournalEntry, TombstonedManifestRecord};
 pub use self::recovery::{RebuildReport, VerifyReport};
 pub use self::settings::{RecoveryAck, RecoveryAcknowledgements, TelegramBootstrapSettings};
+pub use self::shares::ShareLinkRecord;

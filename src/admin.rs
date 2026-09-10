@@ -179,6 +179,17 @@ struct BeginResumableRequest {
     key: String,
     #[serde(default = "default_content_type")]
     content_type: String,
+    #[serde(default)]
+    expires_in_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CreateShareRequest {
+    bucket: String,
+    key: String,
+    #[serde(default)]
+    expires_in_seconds: Option<u64>,
 }
 
 fn default_content_type() -> String {
@@ -217,6 +228,7 @@ struct ObjectEntryWire {
     size: u64,
     last_modified: String,
     etag: String,
+    expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +254,28 @@ fn rfc3339_unix(unix: i64) -> String {
                 .unwrap_or_else(|_| unix.to_string())
         })
         .unwrap_or_else(|_| unix.to_string())
+}
+
+fn rfc3339_unix_opt(unix: i64) -> Option<String> {
+    OffsetDateTime::from_unix_timestamp(unix)
+        .ok()
+        .and_then(|value| {
+            value
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+}
+
+fn expiry_from_seconds(value: Option<u64>) -> Result<Option<OffsetDateTime>, String> {
+    let Some(seconds) = value else {
+        return Ok(None);
+    };
+    if seconds == 0 || seconds > i64::MAX as u64 {
+        return Err("expiry seconds must be between 1 and 9223372036854775807".to_string());
+    }
+    Ok(Some(
+        OffsetDateTime::now_utc() + time::Duration::seconds(seconds as i64),
+    ))
 }
 
 fn rfc3339(value: OffsetDateTime) -> String {
@@ -408,6 +442,7 @@ impl AdminUiState {
             (Method::POST, "objects/delete") => {
                 self.handle_delete_object(request, &principal).await
             }
+            (Method::POST, "objects/share") => self.handle_create_share(request).await,
             (Method::POST, "objects/content") => {
                 self.handle_upload_content(request, &principal).await
             }
@@ -908,6 +943,56 @@ impl AdminUiState {
             Ok(_) => json_response(StatusCode::OK, serde_json::json!({ "ok": true })),
             Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         }
+    }
+
+    async fn handle_create_share(&self, request: Request<Incoming>) -> Response<Body> {
+        let body = match read_json::<CreateShareRequest>(request).await {
+            Ok(body) => body,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid share payload"),
+        };
+        if body.bucket.is_empty() || !is_safe_object_key(&body.key) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "bucket and valid object key required",
+            );
+        }
+        let manifest = match self
+            .object_format
+            .get_active_manifest(&body.bucket, &body.key)
+        {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => return json_error(StatusCode::NOT_FOUND, "object not found"),
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        };
+        let requested_expiry = match expiry_from_seconds(body.expires_in_seconds) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
+        let object_expiry = manifest.expires_at;
+        let expires_at = match (requested_expiry, object_expiry) {
+            (Some(requested), Some(object)) => Some(requested.min(object)),
+            (Some(requested), None) => Some(requested),
+            (None, object) => object,
+        };
+        if expires_at.is_some_and(|value| value <= OffsetDateTime::now_utc()) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "share expiry must be before object expiry",
+            );
+        }
+        let expires_at = expires_at.map(|value| value.unix_timestamp());
+        let (token, record) = match self.store().create_share_link(&manifest, expires_at) {
+            Ok(value) => value,
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        };
+        json_response(
+            StatusCode::CREATED,
+            serde_json::json!({
+                "url": format!("/share/{token}"),
+                "object": {"bucket": record.bucket, "key": record.key},
+                "expires_at": record.expires_at.and_then(rfc3339_unix_opt),
+            }),
+        )
     }
 
     /// Stream a file's bytes back to the browser, full or ranged (bounded RAM).
@@ -1425,6 +1510,11 @@ impl AdminUiState {
         request: Request<Incoming>,
         _principal: &ResolvedPrincipal,
     ) -> Response<Body> {
+        let mut params = request
+            .uri()
+            .query()
+            .map(parse_list_params)
+            .unwrap_or_default();
         let bucket = request
             .uri()
             .query()
@@ -1456,10 +1546,22 @@ impl AdminUiState {
             .filter(|value| !value.is_empty())
             .unwrap_or("application/octet-stream")
             .to_string();
+        let expires_in_seconds = params
+            .remove("expires_in_seconds")
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .map_err(|_| "invalid expiry seconds".to_string());
+        let expires_at = match expires_in_seconds {
+            Ok(value) => match expiry_from_seconds(value) {
+                Ok(value) => value,
+                Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+            },
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
         let body = body_to_streaming_blob(request.into_body());
         let manifest = match self
             .object_format
-            .put_stream(&bucket, &key, &content_type, Some(body), None)
+            .put_stream_with_expiry(&bucket, &key, &content_type, Some(body), None, expires_at)
             .await
         {
             Ok(manifest) => manifest,
@@ -1933,6 +2035,11 @@ fn object_to_wire(manifest: &ObjectManifest, key: &str) -> ObjectEntryWire {
         size: manifest.content_length,
         last_modified: rfc3339(manifest.created_at),
         etag: manifest.checksum.whole_object.clone(),
+        expires_at: manifest.expires_at.and_then(|value| {
+            value
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        }),
     }
 }
 

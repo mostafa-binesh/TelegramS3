@@ -16,6 +16,7 @@ features, so they are documented separately.
 | List buckets | implemented | cargo test | Local index is authoritative for bucket visibility | Remote reconstruction is slower | 4 |
 | Head bucket | implemented | cargo test | Reflects bucket metadata from the local store | Telegram metadata is indirect | 4 |
 | Put object | implemented | cargo test / release-test.ps1 | Chunk upload plus manifest commit through the Telegram-backed object-format service; ambiguous sends are token-reconciled before safe retry, including restart recovery for stale sending attempts | 2 GiB Telegram file limit and bounded recovery scan | 4 |
+| Per-object expiry (extension) | implemented | cargo test | PUT and multipart initiation accept `x-amz-meta-telegram-s3-expires-at` (RFC3339) or `x-amz-meta-telegram-s3-expires-in` (seconds); expired objects are hidden from reads and listings | Expired Telegram data is cleaned by the normal tombstone/GC policy | 11 |
 | Get object | implemented | cargo test | Streams from Telegram-backed manifest and chunk references with checksum verification | Requires chunk fetch and verification | 4 |
 | Head object | implemented | cargo test | Returns committed metadata only | Manifest rebuild may be needed | 4 |
 | Delete object | implemented | cargo test | Tombstones before evidence-first cleanup | Telegram removal is asynchronous but due immediately | 4 |
@@ -33,7 +34,7 @@ features, so they are documented separately.
 | Delete markers | implemented | cargo check | Tombstones are listed as delete markers and remain recoverable until cleanup | Must be modeled locally | 5 |
 | Object tags | compatibility gap | none yet | Must persist in manifest/index | Captions are not enough | 5 |
 | Checksums | implemented | cargo test | Chunk and whole-object checksums are enforced during upload, read, and reconciliation | Telegram alone is not enough | 5 |
-| Presigned URLs | compatibility gap | none yet | Likely local capability URLs only | Telegram is not a URL signer | 5 |
+| Presigned URLs | compatibility gap | none yet | AWS SigV4 presigning is not implemented; the admin surface provides separate opaque `/share/<token>` capability links | Share links are local metadata capabilities, not Telegram URLs | 5 |
 | Server-side copy | implemented | cargo check | Copy uses the local object-format backend and manifest reuse | Telegram copy may not preserve metadata exactly | 5 |
 | Lifecycle cleanup | implemented | cargo test | Garbage collection now removes only aged, tombstoned data after dry-run review | Cleanup is conservative and retention-based | 6 |
 | Batch delete | compatibility gap | none yet | Can be translated to per-object tombstones | Telegram does not batch object deletes | 6 |
@@ -85,6 +86,9 @@ features, so they are documented separately.
 - The bucket browser preserves bucket names exactly, including Unicode names;
   its delete action maps to the existing empty-bucket-only API and does not
   bypass tombstone/recovery rules.
+- The object browser shows object expiry, accepts seconds-based expiry for
+  browser uploads, and creates opaque share URLs with an optional expiry.
+  Share URLs are public bearer capabilities bounded by object expiry.
 - Removing the current Telegram connection from the admin UI is an explicit,
   CSRF-protected action. It hides local buckets, objects, and statistics
   immediately. The optional "delete uploaded files" choice queues Telegram

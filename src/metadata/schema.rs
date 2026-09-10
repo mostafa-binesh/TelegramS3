@@ -91,6 +91,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     if current_version >= SCHEMA_VERSION {
         ensure_phase10_schema(connection)?;
         ensure_connection_removal_schema(connection)?;
+        ensure_share_schema(connection)?;
         return Ok(());
     }
 
@@ -325,6 +326,29 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     tx.commit()?;
     ensure_phase10_schema(connection)?;
     ensure_connection_removal_schema(connection)?;
+    ensure_share_schema(connection)?;
+    Ok(())
+}
+
+fn ensure_share_schema(connection: &mut Connection) -> Result<(), MetadataError> {
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS share_links (
+            id TEXT PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            object_id TEXT NOT NULL,
+            bucket TEXT NOT NULL,
+            object_key TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER,
+            revoked_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_share_links_object
+            ON share_links(object_id);
+        CREATE INDEX IF NOT EXISTS idx_share_links_expiry
+            ON share_links(expires_at);
+        "#,
+    )?;
     Ok(())
 }
 

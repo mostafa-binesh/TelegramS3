@@ -8,7 +8,7 @@ use crate::telegram::TelegramTransportManager;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use http::{Method, StatusCode, header};
+use http::{HeaderValue, Method, StatusCode, header};
 use http_body_util::StreamBody;
 use hyper::body::{Frame, Incoming};
 use hyper::server::conn::http1;
@@ -341,6 +341,7 @@ impl S3Server {
         let transfer_timeout = self.transfer_timeout;
         let service = self.service.clone();
         let admin_ui_state = Arc::clone(&self.admin_ui_state);
+        let object_format = Arc::clone(&self.object_format);
         let admin_state = AdminState {
             object_format: Arc::clone(&self.object_format),
             transport_manager: Arc::clone(&self.transport_manager),
@@ -354,9 +355,10 @@ impl S3Server {
                     let Ok((stream, _)) = accepted else { break };
                     let service = service.clone();
                     let admin_ui_state = Arc::clone(&admin_ui_state);
+                    let object_format = Arc::clone(&object_format);
                     connections.spawn(async move {
                         let handler = service_fn(move |request| {
-                            handle_request(request, service.clone(), Arc::clone(&admin_ui_state), request_timeout, transfer_timeout)
+                            handle_request(request, service.clone(), Arc::clone(&admin_ui_state), Arc::clone(&object_format), request_timeout, transfer_timeout)
                         });
                         let mut connection = http1::Builder::new();
                         connection.keep_alive(false).timer(TokioTimer::new());
@@ -389,6 +391,7 @@ async fn handle_request(
     request: hyper::Request<Incoming>,
     service: S3Service,
     admin_ui_state: Arc<AdminUiState>,
+    object_format: Arc<ObjectFormatService>,
     request_timeout: u64,
     transfer_timeout: u64,
 ) -> Result<hyper::Response<Body>, Box<dyn Error + Send + Sync>> {
@@ -396,6 +399,9 @@ async fn handle_request(
         let mut response = hyper::Response::new(Body::from(Bytes::new()));
         *response.status_mut() = StatusCode::NO_CONTENT;
         return Ok(response);
+    }
+    if request.uri().path().starts_with("/share/") {
+        return Ok(handle_share_request(request, object_format).await);
     }
     if AdminUiState::is_admin_route(request.uri().path()) {
         return Ok(admin_ui_state.handle_request(request).await);
@@ -432,6 +438,150 @@ async fn handle_request(
             ))
         }
     }
+}
+
+async fn handle_share_request(
+    request: hyper::Request<Incoming>,
+    object_format: Arc<ObjectFormatService>,
+) -> hyper::Response<Body> {
+    if !matches!(request.method(), &Method::GET | &Method::HEAD) {
+        return text_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method not allowed\n".to_string(),
+            "text/plain; charset=utf-8",
+        );
+    }
+    let token = request
+        .uri()
+        .path()
+        .strip_prefix("/share/")
+        .filter(|value| !value.is_empty() && !value.contains('/'));
+    let Some(token) = token else {
+        return text_response(
+            StatusCode::NOT_FOUND,
+            "not found\n".to_string(),
+            "text/plain",
+        );
+    };
+    let link = match object_format.metadata_store().get_share_link(token) {
+        Ok(Some(link)) => link,
+        Ok(None) => {
+            return text_response(
+                StatusCode::NOT_FOUND,
+                "not found\n".to_string(),
+                "text/plain",
+            );
+        }
+        Err(error) => {
+            eprintln!("share lookup failed: {error}");
+            return text_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error\n".to_string(),
+                "text/plain",
+            );
+        }
+    };
+    let now = OffsetDateTime::now_utc();
+    if link.revoked_at.is_some()
+        || link
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= now.unix_timestamp())
+    {
+        return text_response(
+            StatusCode::NOT_FOUND,
+            "not found\n".to_string(),
+            "text/plain",
+        );
+    }
+    let manifest = match object_format.get_manifest(link.object_id) {
+        Ok(Some(manifest))
+            if manifest.commit_state == crate::manifest::CommitState::Committed
+                && manifest.bucket == link.bucket
+                && manifest.key == link.key
+                && !manifest.is_expired(now) =>
+        {
+            manifest
+        }
+        Ok(_) => {
+            return text_response(
+                StatusCode::NOT_FOUND,
+                "not found\n".to_string(),
+                "text/plain",
+            );
+        }
+        Err(error) => {
+            eprintln!("shared object lookup failed: {error}");
+            return text_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error\n".to_string(),
+                "text/plain",
+            );
+        }
+    };
+    let (range, content_range) = match object_range(request.headers(), manifest.content_length) {
+        Ok(value) => value,
+        Err(_) => {
+            return text_response(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "range not satisfiable\n".to_string(),
+                "text/plain",
+            );
+        }
+    };
+    let is_head = request.method() == Method::HEAD;
+    let spans = match ObjectFormatService::plan_read(&manifest, range.clone()) {
+        Ok(plan) => plan.chunks,
+        Err(_) => {
+            return text_response(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "range not satisfiable\n".to_string(),
+                "text/plain",
+            );
+        }
+    };
+    let status = if content_range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    let mut response = if is_head || spans.is_empty() {
+        hyper::Response::new(Body::empty())
+    } else {
+        let stream =
+            ObjectFormatService::read_spans_to_stream(Arc::clone(&object_format), &manifest, spans);
+        hyper::Response::new(Body::http_body_unsync(StreamBody::new(
+            stream.map(|chunk| chunk.map(Frame::data)),
+        )))
+    };
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&(range.end - range.start).to_string())
+            .unwrap_or(HeaderValue::from_static("0")),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&manifest.content_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&manifest.checksum.whole_object)
+            .unwrap_or(HeaderValue::from_static("")),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Some(content_range) = content_range
+        && let Ok(value) = HeaderValue::from_str(&content_range)
+    {
+        response.headers_mut().insert(header::CONTENT_RANGE, value);
+    }
+    response
 }
 
 async fn handle_admin_request(
@@ -652,6 +802,7 @@ impl S3 for TelegramS3Backend {
         &self,
         req: S3Request<s3s::dto::PutObjectInput>,
     ) -> S3Result<S3Response<s3s::dto::PutObjectOutput>> {
+        let expires_at = parse_expiry_headers(&req.headers)?;
         let input = req.input;
         if !self
             .object_format
@@ -676,12 +827,13 @@ impl S3 for TelegramS3Backend {
             .unwrap_or_else(|| "application/octet-stream".to_string());
         let manifest = self
             .object_format
-            .put_stream(
+            .put_stream_with_expiry(
                 &input.bucket,
                 &input.key,
                 &content_type,
                 input.body,
                 conditionals,
+                expires_at,
             )
             .await
             .map_err(map_object_error)?;
@@ -696,6 +848,7 @@ impl S3 for TelegramS3Backend {
         &self,
         req: S3Request<CreateMultipartUploadInput>,
     ) -> S3Result<S3Response<CreateMultipartUploadOutput>> {
+        let expires_at = parse_expiry_headers(&req.headers)?;
         let input = req.input;
         if !self
             .object_format
@@ -706,7 +859,7 @@ impl S3 for TelegramS3Backend {
         }
         let session = self
             .object_format
-            .initiate_multipart_upload(
+            .initiate_multipart_upload_with_expiry(
                 &input.bucket,
                 &input.key,
                 input
@@ -717,6 +870,7 @@ impl S3 for TelegramS3Backend {
                     .checksum_algorithm
                     .as_ref()
                     .map(|algorithm| algorithm.as_str()),
+                expires_at,
             )
             .map_err(map_object_error)?;
         Ok(S3Response::new(CreateMultipartUploadOutput {
@@ -1033,6 +1187,7 @@ impl S3 for TelegramS3Backend {
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
+        let metadata = add_expiry_metadata(metadata, &manifest);
         Ok(S3Response::new(HeadObjectOutput {
             content_length: Some(manifest.content_length as i64),
             content_type: Some(manifest.content_type),
@@ -1074,6 +1229,7 @@ impl S3 for TelegramS3Backend {
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
+        let metadata = add_expiry_metadata(metadata, &manifest);
         // Shared streaming reader: decrypts + verifies chunk-by-chunk, bounded.
         let body_stream = ObjectFormatService::read_spans_to_stream(
             Arc::clone(&self.object_format),
@@ -1269,6 +1425,7 @@ impl S3 for TelegramS3Backend {
             .into_iter()
             .filter(|manifest| manifest.bucket == input.bucket)
             .filter(|manifest| prefix.is_empty() || manifest.key.starts_with(&prefix))
+            .filter(|manifest| !manifest.is_expired(OffsetDateTime::now_utc()))
             .collect::<Vec<_>>();
         manifests.sort_by_key(|left| std::cmp::Reverse(left.created_at));
 
@@ -1341,6 +1498,61 @@ fn map_object_error(error: crate::object_format::ObjectFormatError) -> s3s::S3Er
         ) => s3s::S3Error::with_message(S3ErrorCode::PreconditionFailed, message),
         other => s3s::S3Error::with_message(S3ErrorCode::InternalError, other.to_string()),
     }
+}
+
+const EXPIRY_AT_HEADER: &str = "x-amz-meta-telegram-s3-expires-at";
+const EXPIRY_IN_HEADER: &str = "x-amz-meta-telegram-s3-expires-in";
+
+fn add_expiry_metadata(
+    mut metadata: HashMap<String, String>,
+    manifest: &crate::manifest::ObjectManifest,
+) -> HashMap<String, String> {
+    if let Some(expires_at) = manifest.expires_at
+        && let Ok(value) = expires_at.format(&time::format_description::well_known::Rfc3339)
+    {
+        metadata.insert("telegram-s3-expires-at".to_string(), value);
+    }
+    metadata
+}
+
+fn parse_expiry_headers(headers: &http::HeaderMap) -> Result<Option<OffsetDateTime>, s3s::S3Error> {
+    let at = headers
+        .get(EXPIRY_AT_HEADER)
+        .and_then(|value| value.to_str().ok());
+    let in_seconds = headers
+        .get(EXPIRY_IN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if at.is_some() && in_seconds.is_some() {
+        return Err(s3s::s3_error!(
+            InvalidArgument,
+            "set only one of x-amz-meta-telegram-s3-expires-at and x-amz-meta-telegram-s3-expires-in"
+        ));
+    }
+    let now = OffsetDateTime::now_utc();
+    let expires_at = if let Some(value) = at {
+        OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+            .map_err(|_| s3s::s3_error!(InvalidArgument, "invalid object expiry timestamp"))?
+    } else if let Some(value) = in_seconds {
+        let seconds = value
+            .parse::<i64>()
+            .map_err(|_| s3s::s3_error!(InvalidArgument, "invalid object expiry seconds"))?;
+        if seconds <= 0 {
+            return Err(s3s::s3_error!(
+                InvalidArgument,
+                "object expiry seconds must be positive"
+            ));
+        }
+        now + time::Duration::seconds(seconds)
+    } else {
+        return Ok(None);
+    };
+    if expires_at <= now {
+        return Err(s3s::s3_error!(
+            InvalidArgument,
+            "object expiry must be in the future"
+        ));
+    }
+    Ok(Some(expires_at))
 }
 
 fn object_range(

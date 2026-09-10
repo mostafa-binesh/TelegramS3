@@ -26,6 +26,7 @@
   export let onRemoveSelected: () => void = () => {};
   export let onRemoveBucket: (name: string) => void = () => {};
   export let onOpenMove: () => void = () => {};
+  export let onShare: (object: ObjectEntry) => void = () => {};
 
   $: allVisibleSelected = selectedKeys.length > 0 && selectedKeys.length === (listing?.objects.length ?? 0);
 </script>
@@ -51,7 +52,7 @@
     {:else if listing && listing.folders.length === 0 && listing.objects.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">↑</span>This folder is empty. Drop files above to upload the first one.</p>
     {:else}<div class="table-scroll"><table class="kv-table"><thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={allVisibleSelected} on:change={onToggleAll}/></th><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead><tbody>
       {#each listing?.folders ?? [] as folder (folder)}<tr><td></td><td><button class="btn-link" on:click={() => onEnterFolder(folder)}>{folder}/</button></td><td class="muted">folder</td><td class="muted">—</td><td class="row-actions"><button class="ghost" on:click={() => onRemoveKey(folder)}>Delete</button></td></tr>{/each}
-      {#each listing?.objects ?? [] as obj (obj.key)}<tr><td><input class="select-all" type="checkbox" checked={selectedKeys.includes(obj.key)} on:change={() => onToggleKey(obj.key)} aria-label={`Select ${obj.name}`}/></td><td>{obj.name}</td><td>{formatBytes(obj.size)}</td><td>{formatTimestamp(obj.last_modified)}</td><td class="row-actions"><a class="row-download" href={contentUrl(selectedBucket, obj.key)} download>Download</a><button class="ghost" on:click={() => onRemoveKey(obj)}>Delete</button></td></tr>{/each}
+      {#each listing?.objects ?? [] as obj (obj.key)}<tr><td><input class="select-all" type="checkbox" checked={selectedKeys.includes(obj.key)} on:change={() => onToggleKey(obj.key)} aria-label={`Select ${obj.name}`}/></td><td>{obj.name}{#if obj.expires_at}<small class="expiry-note">expires {formatTimestamp(obj.expires_at)}</small>{/if}</td><td>{formatBytes(obj.size)}</td><td>{formatTimestamp(obj.last_modified)}</td><td class="row-actions"><a class="row-download" href={contentUrl(selectedBucket, obj.key)} download>Download</a><button class="ghost" on:click={() => onShare(obj)}>Share</button><button class="ghost" on:click={() => onRemoveKey(obj)}>Delete</button></td></tr>{/each}
     </tbody></table></div>{/if}
     {#if selectedKeys.length}<div class="selection-bar"><strong>{selectedKeys.length} selected</strong><button class="ghost" on:click={onRemoveSelected}>Delete</button><button class="ghost" on:click={onOpenMove}>→ Move</button></div>{/if}
   {/if}
@@ -61,4 +62,5 @@
   .back-button { flex: 0 0 auto; }
   .bucket-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .compact-action { padding: .5rem .75rem; }
+  .expiry-note { display:block; color:var(--muted); font-size:.75rem; }
 </style>
