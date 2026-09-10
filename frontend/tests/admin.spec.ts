@@ -193,6 +193,47 @@ test('responsive navigation remains usable on a narrow viewport', async ({ page 
   await expect(page.getByRole('button', { name: 'Transfers' })).toBeVisible();
 });
 
+test('the console stays within the viewport across phone, tablet, and desktop widths', async ({ page }) => {
+  await mockAdminApi(page);
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+
+  async function expectNoHorizontalOverflow() {
+    const dimensions = await page.evaluate(() => ({
+      viewport: document.documentElement.clientWidth,
+      documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)
+    }));
+    expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewport + 1);
+  }
+
+  for (const width of [320, 390, 768, 1024, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.getByRole('button', { name: 'Overview' }).click();
+    await expect(page.getByRole('heading', { name: 'Storage at a glance' })).toBeVisible();
+    await expectNoHorizontalOverflow();
+
+    await page.getByRole('button', { name: 'Buckets' }).click();
+    await expect(page.getByRole('heading', { name: 'Your buckets' })).toBeVisible();
+    await expectNoHorizontalOverflow();
+
+    await page.getByRole('button', { name: 'Transfers' }).click();
+    await expect(page.getByRole('heading', { name: 'Transfer activity' })).toBeVisible();
+    await expectNoHorizontalOverflow();
+
+    await page.getByRole('button', { name: 'Telegram settings' }).click();
+    await expect(page.getByRole('heading', { name: 'Your storage connection, beautifully in sync.' })).toBeVisible();
+    await expectNoHorizontalOverflow();
+  }
+
+  await page.setViewportSize({ width: 320, height: 900 });
+  await page.getByRole('button', { name: 'Edit account setup' }).click();
+  await expect(page.getByRole('heading', { name: 'Start with your Telegram app' })).toBeVisible();
+  await expectNoHorizontalOverflow();
+});
+
 test('re-entering a bucket reloads its objects', async ({ page }) => {
   await mockAdminApi(page);
   let objectListRequests = 0;
