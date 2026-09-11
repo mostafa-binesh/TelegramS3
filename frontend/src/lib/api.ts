@@ -5,6 +5,7 @@ import type {
   OverviewState,
   SessionState,
   StorageSettingsState,
+  SharedLinksState,
   TelegramSettingsState,
   UsersState,
   WizardState
@@ -196,11 +197,34 @@ export function createShareLink(
   csrf: string | null | undefined,
   bucket: string,
   key: string,
-  expiresInSeconds?: number | null
+  expiresInSeconds?: number | null,
+  description = ''
 ) {
   return requestJson<{ url: string; expires_at?: string | null }>('/objects/share', csrf, {
     method: 'POST',
-    body: { bucket, key, expires_in_seconds: expiresInSeconds || undefined }
+    body: { bucket, key, expires_in_seconds: expiresInSeconds || undefined, description }
+  });
+}
+
+export function listShareLinks(csrf: string | null | undefined, bucket: string, key: string) {
+  const qp = new URLSearchParams({ bucket, key });
+  return requestJson<SharedLinksState>(`/objects/shares?${qp.toString()}`, csrf);
+}
+
+export function updateShareLinkExpiry(
+  csrf: string | null | undefined,
+  id: string,
+  expiresInSeconds?: number | null
+) {
+  return requestJson<import('./types').SharedLink>(`/objects/shares/${encodeURIComponent(id)}`, csrf, {
+    method: 'PATCH',
+    body: { expires_in_seconds: expiresInSeconds || undefined }
+  });
+}
+
+export function revokeShareLink(csrf: string | null | undefined, id: string) {
+  return requestJson<{ ok?: boolean }>(`/objects/shares/${encodeURIComponent(id)}`, csrf, {
+    method: 'DELETE'
   });
 }
 

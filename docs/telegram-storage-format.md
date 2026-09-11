@@ -108,8 +108,14 @@ is an RFC3339 UTC timestamp. The local index and all S3/admin read and list
 paths treat the object as missing at or after that instant, while the manifest
 and Telegram chunks remain recoverable until normal tombstone retention and
 garbage collection complete. The default local tombstone retention is 24 hours.
-Share-link expiry is stored separately in local
-metadata and can never extend beyond this manifest deadline.
+Share-link expiry is stored separately in local metadata and can never extend
+beyond this manifest deadline. Each share link stores a hash of its opaque
+bearer token for lookup, plus ciphertext encrypted under a key derived from
+`TELEGRAM_S3_MASTER_KEY` so the authenticated admin panel can list and manage
+the link after creation. Descriptions are operator metadata and are limited to
+240 characters. Schema v12 adds the ciphertext and description columns.
+Legacy hash-only rows remain usable by their existing public URL and can be
+revoked, but the admin panel cannot reconstruct their URL.
 
 ## Encryption Envelope
 

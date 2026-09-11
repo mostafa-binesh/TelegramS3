@@ -192,6 +192,15 @@ struct CreateShareRequest {
     key: String,
     #[serde(default)]
     expires_in_seconds: Option<u64>,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct UpdateShareRequest {
+    #[serde(default)]
+    expires_in_seconds: Option<u64>,
 }
 
 fn default_content_type() -> String {
@@ -231,6 +240,7 @@ struct ObjectEntryWire {
     last_modified: String,
     etag: String,
     expires_at: Option<String>,
+    shared_links: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,6 +249,26 @@ struct ListObjectsResponse {
     prefix: String,
     folders: Vec<String>,
     objects: Vec<ObjectEntryWire>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct ShareLinkWire {
+    id: String,
+    url: Option<String>,
+    description: String,
+    created_at: String,
+    expires_at: Option<String>,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct ShareLinksResponse {
+    bucket: String,
+    key: String,
+    links: Vec<ShareLinkWire>,
+    count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -445,6 +475,13 @@ impl AdminUiState {
                 self.handle_delete_object(request, &principal).await
             }
             (Method::POST, "objects/share") => self.handle_create_share(request).await,
+            (Method::GET, "objects/shares") => self.handle_list_share_links(request),
+            (Method::PATCH, p) if p.starts_with("objects/shares/") => {
+                self.handle_update_share_link(request, p).await
+            }
+            (Method::DELETE, p) if p.starts_with("objects/shares/") => {
+                self.handle_revoke_share_link(p)
+            }
             (Method::POST, "objects/content") => {
                 self.handle_upload_content(request, &principal).await
             }
@@ -869,7 +906,13 @@ impl AdminUiState {
             if relative.is_empty() {
                 continue;
             }
-            objects.push(object_to_wire(&manifest, key));
+            let shared_links = match self.store().share_link_count(&bucket, key) {
+                Ok(count) => count,
+                Err(error) => {
+                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                }
+            };
+            objects.push(object_to_wire(&manifest, key, shared_links));
         }
         folders.sort();
         objects.sort_by(|a, b| a.name.cmp(&b.name));
@@ -997,18 +1040,150 @@ impl AdminUiState {
             );
         }
         let expires_at = expires_at.map(|value| value.unix_timestamp());
-        let (token, record) = match self.store().create_share_link(&manifest, expires_at) {
-            Ok(value) => value,
-            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
-        };
+        let (token, record) =
+            match self
+                .object_format
+                .create_share_link(&manifest, expires_at, &body.description)
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                }
+            };
         json_response(
             StatusCode::CREATED,
             serde_json::json!({
+                "id": record.id,
                 "url": format!("/_public/{token}"),
                 "object": {"bucket": record.bucket, "key": record.key},
+                "description": record.description,
                 "expires_at": record.expires_at.and_then(rfc3339_unix_opt),
             }),
         )
+    }
+
+    fn handle_list_share_links(&self, request: Request<Incoming>) -> Response<Body> {
+        let query = parse_list_params(request.uri().query().unwrap_or(""));
+        let bucket = match query.get("bucket") {
+            Some(value) if !value.is_empty() => value.clone(),
+            _ => return json_error(StatusCode::BAD_REQUEST, "bucket is required"),
+        };
+        let key = match query.get("key") {
+            Some(value) if is_safe_object_key(value) => value.clone(),
+            _ => return json_error(StatusCode::BAD_REQUEST, "valid object key is required"),
+        };
+        match self.object_format.get_active_manifest(&bucket, &key) {
+            Ok(Some(_)) => {}
+            Ok(None) => return json_error(StatusCode::NOT_FOUND, "object not found"),
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        }
+        let records = match self.object_format.list_share_links(&bucket, &key) {
+            Ok(records) => records,
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        };
+        let links = records
+            .iter()
+            .map(|record| self.share_link_to_wire(record))
+            .collect::<Vec<_>>();
+        json_response(
+            StatusCode::OK,
+            ShareLinksResponse {
+                bucket,
+                key,
+                count: links.len(),
+                links,
+            },
+        )
+    }
+
+    async fn handle_update_share_link(
+        &self,
+        request: Request<Incoming>,
+        path: &str,
+    ) -> Response<Body> {
+        let id = path.trim_start_matches("objects/shares/");
+        if id.is_empty() || id.contains('/') {
+            return json_error(StatusCode::BAD_REQUEST, "share link id is required");
+        }
+        let body = match read_json::<UpdateShareRequest>(request).await {
+            Ok(body) => body,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid share update payload"),
+        };
+        let existing = match self.store().get_share_link_by_id(id) {
+            Ok(Some(record)) => record,
+            Ok(None) => return json_error(StatusCode::NOT_FOUND, "share link not found"),
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        };
+        let manifest = match self
+            .object_format
+            .get_active_manifest(&existing.bucket, &existing.key)
+        {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => return json_error(StatusCode::NOT_FOUND, "object not found"),
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        };
+        let requested_expiry = match expiry_from_seconds(body.expires_in_seconds) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
+        let expires_at = match (requested_expiry, manifest.expires_at) {
+            (Some(requested), Some(object)) => Some(requested.min(object)),
+            (Some(requested), None) => Some(requested),
+            (None, object) => object,
+        };
+        if expires_at.is_some_and(|value| value <= OffsetDateTime::now_utc()) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "share expiry must be before object expiry",
+            );
+        }
+        let updated = match self
+            .object_format
+            .update_share_link_expiry(id, expires_at.map(|value| value.unix_timestamp()))
+        {
+            Ok(Some(record)) => record,
+            Ok(None) => return json_error(StatusCode::NOT_FOUND, "share link not found"),
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        };
+        json_response(StatusCode::OK, self.share_link_to_wire(&updated))
+    }
+
+    fn handle_revoke_share_link(&self, path: &str) -> Response<Body> {
+        let id = path.trim_start_matches("objects/shares/");
+        if id.is_empty() || id.contains('/') {
+            return json_error(StatusCode::BAD_REQUEST, "share link id is required");
+        }
+        match self.object_format.revoke_share_link(id) {
+            Ok(true) => json_response(StatusCode::OK, serde_json::json!({ "ok": true })),
+            Ok(false) => json_error(StatusCode::NOT_FOUND, "share link not found"),
+            Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        }
+    }
+
+    fn share_link_to_wire(&self, record: &crate::metadata::ShareLinkRecord) -> ShareLinkWire {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let expired = record.expires_at.is_some_and(|value| value <= now);
+        let url = record
+            .token_ciphertext
+            .as_deref()
+            .and_then(|ciphertext| self.object_format.reveal_share_token(ciphertext).ok())
+            .map(|token| format!("/_public/{token}"));
+        ShareLinkWire {
+            id: record.id.clone(),
+            url,
+            description: if record.description.is_empty() {
+                "No description provided".to_string()
+            } else {
+                record.description.clone()
+            },
+            created_at: rfc3339_unix(record.created_at),
+            expires_at: record.expires_at.and_then(rfc3339_unix_opt),
+            status: if expired {
+                "expired".to_string()
+            } else {
+                "active".to_string()
+            },
+        }
     }
 
     /// Stream a file's bytes back to the browser, full or ranged (bounded RAM).
@@ -2107,7 +2282,7 @@ async fn read_wizard_cancel_request(request: Request<Incoming>) -> Option<Wizard
     read_json_body_opt(request).await
 }
 
-fn object_to_wire(manifest: &ObjectManifest, key: &str) -> ObjectEntryWire {
+fn object_to_wire(manifest: &ObjectManifest, key: &str, shared_links: u64) -> ObjectEntryWire {
     ObjectEntryWire {
         name: basename_key(key),
         key: key.to_string(),
@@ -2119,6 +2294,7 @@ fn object_to_wire(manifest: &ObjectManifest, key: &str) -> ObjectEntryWire {
                 .format(&time::format_description::well_known::Rfc3339)
                 .ok()
         }),
+        shared_links,
     }
 }
 

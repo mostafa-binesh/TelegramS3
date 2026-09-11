@@ -7,11 +7,13 @@ use crate::metadata::{
 };
 use crate::multipart::{MultipartCompletionPlan, MultipartPart, MultipartSession, MultipartState};
 use crate::telegram::{TelegramConnectionState, TelegramTransportManager};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use futures::StreamExt;
 use grammers_client::media::Media;
 use grammers_client::message::InputMessage;
 use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
+use ring::rand::{SecureRandom, SystemRandom};
 use s3s::{Body, dto::StreamingBlob};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -236,6 +238,72 @@ impl ObjectEncryption {
                 actual: "decryption failed".to_string(),
             })?;
         Ok(plaintext.to_vec())
+    }
+
+    fn share_key(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(self.key);
+        hasher.update(b"telegram-s3-share-token-v1");
+        let digest = hasher.finalize();
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(&digest);
+        key
+    }
+
+    fn encrypt_share_token(&self, token: &str) -> Result<String, ObjectFormatError> {
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, &self.share_key())
+            .map_err(|_| ObjectFormatError::InvalidChecksum("invalid share key".to_string()))?;
+        let cipher = LessSafeKey::new(unbound);
+        let mut nonce_bytes = [0_u8; 12];
+        SystemRandom::new()
+            .fill(&mut nonce_bytes)
+            .map_err(|_| ObjectFormatError::InvalidChecksum("random nonce failed".to_string()))?;
+        let nonce = Nonce::try_assume_unique_for_key(&nonce_bytes)
+            .map_err(|_| ObjectFormatError::InvalidChecksum("invalid share nonce".to_string()))?;
+        let mut encrypted = token.as_bytes().to_vec();
+        cipher
+            .seal_in_place_append_tag(
+                nonce,
+                Aad::from(b"telegram-s3-share-token-v1"),
+                &mut encrypted,
+            )
+            .map_err(|_| {
+                ObjectFormatError::InvalidChecksum("share token encryption failed".to_string())
+            })?;
+        let mut payload = nonce_bytes.to_vec();
+        payload.extend_from_slice(&encrypted);
+        Ok(URL_SAFE_NO_PAD.encode(payload))
+    }
+
+    fn decrypt_share_token(&self, encoded: &str) -> Result<String, ObjectFormatError> {
+        let payload = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
+            ObjectFormatError::InvalidChecksum("invalid share token encoding".to_string())
+        })?;
+        if payload.len() < 12 + CHACHA20_POLY1305.tag_len() {
+            return Err(ObjectFormatError::InvalidChecksum(
+                "invalid share token payload".to_string(),
+            ));
+        }
+        let nonce =
+            Nonce::try_assume_unique_for_key(payload[..12].try_into().map_err(|_| {
+                ObjectFormatError::InvalidChecksum("invalid share nonce".to_string())
+            })?)
+            .map_err(|_| ObjectFormatError::InvalidChecksum("invalid share nonce".to_string()))?;
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, &self.share_key())
+            .map_err(|_| ObjectFormatError::InvalidChecksum("invalid share key".to_string()))?;
+        let cipher = LessSafeKey::new(unbound);
+        let mut encrypted = payload[12..].to_vec();
+        let plaintext = cipher
+            .open_in_place(
+                nonce,
+                Aad::from(b"telegram-s3-share-token-v1"),
+                &mut encrypted,
+            )
+            .map_err(|_| {
+                ObjectFormatError::InvalidChecksum("share token decryption failed".to_string())
+            })?;
+        String::from_utf8(plaintext.to_vec())
+            .map_err(|_| ObjectFormatError::InvalidChecksum("share token is not utf-8".to_string()))
     }
 }
 
@@ -463,6 +531,47 @@ impl ObjectFormatService {
     /// Reach the shared SQLite store (single writer) for operator/auth tables.
     pub fn metadata_store(&self) -> &MetadataStore {
         &self.metadata
+    }
+
+    pub fn create_share_link(
+        &self,
+        manifest: &ObjectManifest,
+        expires_at: Option<i64>,
+        description: &str,
+    ) -> Result<(String, crate::metadata::ShareLinkRecord), ObjectFormatError> {
+        let token = Uuid::new_v4().to_string();
+        let token_ciphertext = self.encryption.encrypt_share_token(&token)?;
+        Ok(self.metadata.create_share_link_with_token(
+            manifest,
+            expires_at,
+            description,
+            &token,
+            Some(&token_ciphertext),
+        )?)
+    }
+
+    pub fn list_share_links(
+        &self,
+        bucket: &str,
+        object_key: &str,
+    ) -> Result<Vec<crate::metadata::ShareLinkRecord>, ObjectFormatError> {
+        Ok(self.metadata.list_share_links(bucket, object_key)?)
+    }
+
+    pub fn reveal_share_token(&self, token_ciphertext: &str) -> Result<String, ObjectFormatError> {
+        self.encryption.decrypt_share_token(token_ciphertext)
+    }
+
+    pub fn update_share_link_expiry(
+        &self,
+        id: &str,
+        expires_at: Option<i64>,
+    ) -> Result<Option<crate::metadata::ShareLinkRecord>, ObjectFormatError> {
+        Ok(self.metadata.update_share_link_expiry(id, expires_at)?)
+    }
+
+    pub fn revoke_share_link(&self, id: &str) -> Result<bool, ObjectFormatError> {
+        Ok(self.metadata.revoke_share_link_by_id(id)?)
     }
 
     pub fn set_storage_chat_id(&self, storage_chat_id: String) {

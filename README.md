@@ -252,7 +252,11 @@ removes their Telegram data. Local tombstones and orphaned cleanup material
 are retained for 24 hours by default before `gc` can remove them. The admin browser exposes the same seconds-
 based expiry control. Operators can create bearer share links from the object
 browser at `/_public/<token>`, with an optional link expiry capped by the object
-expiry.
+expiry. Each file row shows how many active or expired-but-manageable links it
+has; the link manager lists descriptions and URLs, copies a URL, changes its
+expiry, and revokes it without leaving the bucket browser. Share-token hashes
+are used for lookup and token ciphertext is encrypted in local metadata for
+authenticated management; plaintext bearer tokens are not stored.
 
 ### 5. Build from source
 
@@ -326,8 +330,10 @@ details, Telegram readiness, operator account management (superadmin-only),
 in-app bucket creation and deletion (deletion remains empty-bucket-only), a routed
 bucket/object browser with Unicode-preserving names, per-file upload, move, and full/range download -
 streamed through the same bounded, checksum-verified chunk paths as the S3 data
-plane. Guests see only the sign-in screen; every management and content API is
-gated behind a user-bound session with CSRF protection.
+plane. Each object row also includes a shared-link count and a polished link
+manager for description, copy, expiry, and revoke actions. Guests see only the
+sign-in screen; every management and content API is gated behind a user-bound
+session with CSRF protection.
 
 Browser uploads use reception-only resumable sessions. A dropped connection can
 continue from the server-reported chunk offset while the 120-second reception

@@ -29,6 +29,7 @@
   export let onRemoveBucket: (name: string) => void = () => {};
   export let onOpenMove: () => void = () => {};
   export let onShare: (object: ObjectEntry) => void = () => {};
+  export let onOpenShareLinks: (object: ObjectEntry) => void = () => {};
 
   $: allVisibleSelected = selectedKeys.length > 0 && selectedKeys.length === (listing?.objects.length ?? 0);
 </script>
@@ -53,7 +54,7 @@
     {:else if listing && listing.folders.length === 0 && listing.objects.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">↑</span>This folder is empty. Drop files above to upload the first one.</p>
     {:else}<div class="table-scroll"><table class="kv-table"><colgroup><col class="selection-column"/><col class="name-column"/><col class="size-column"/><col class="modified-column"/><col class="actions-column"/></colgroup><thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={allVisibleSelected} on:change={onToggleAll}/></th><th>Name</th><th>Size</th><th>Modified</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
       {#each listing?.folders ?? [] as folder (folder)}<tr><td></td><td><button class="btn-link" on:click={() => onEnterFolder(folder)}>{folder}/</button></td><td class="muted">folder</td><td class="muted">—</td><td class="row-actions"><ActionIcon name="trash" label={`Delete folder ${folder}`} tone="danger" on:click={() => onRemoveKey(folder)} disabled={busy}/></td></tr>{/each}
-      {#each listing?.objects ?? [] as obj (obj.key)}<tr><td><input class="select-all" type="checkbox" checked={selectedKeys.includes(obj.key)} on:change={() => onToggleKey(obj.key)} aria-label={`Select ${obj.name}`}/></td><td>{obj.name}{#if obj.expires_at}<small class="expiry-note">expires {formatTimestamp(obj.expires_at)}</small>{/if}</td><td>{formatBytes(obj.size)}</td><td>{formatTimestamp(obj.last_modified)}</td><td class="row-actions"><ActionIcon name="download" label={`Download ${obj.name}`} href={contentUrl(selectedBucket, obj.key)}/><ActionIcon name="share" label={`Share ${obj.name}`} on:click={() => onShare(obj)} disabled={busy}/><ActionIcon name="trash" label={`Delete ${obj.name}`} tone="danger" on:click={() => onRemoveKey(obj)} disabled={busy}/></td></tr>{/each}
+      {#each listing?.objects ?? [] as obj (obj.key)}<tr><td><input class="select-all" type="checkbox" checked={selectedKeys.includes(obj.key)} on:change={() => onToggleKey(obj.key)} aria-label={`Select ${obj.name}`}/></td><td>{obj.name}{#if obj.expires_at}<small class="expiry-note">expires {formatTimestamp(obj.expires_at)}</small>{/if}</td><td>{formatBytes(obj.size)}</td><td>{formatTimestamp(obj.last_modified)}</td><td class="row-actions"><ActionIcon name="download" label={`Download ${obj.name}`} href={contentUrl(selectedBucket, obj.key)}/><ActionIcon name="share" label={`Share ${obj.name}`} on:click={() => onShare(obj)} disabled={busy}/><ActionIcon name="links" badge={obj.shared_links} label={`Manage shared links for ${obj.name}`} on:click={() => onOpenShareLinks(obj)} disabled={busy}/><ActionIcon name="trash" label={`Delete ${obj.name}`} tone="danger" on:click={() => onRemoveKey(obj)} disabled={busy}/></td></tr>{/each}
     </tbody></table></div>{/if}
     {#if selectedKeys.length}<div class="selection-bar"><strong>{selectedKeys.length} selected</strong><button class="ghost" on:click={onRemoveSelected}>Delete</button><button class="ghost" on:click={onOpenMove}>→ Move</button></div>{/if}
   {/if}
@@ -63,11 +64,11 @@
   .back-button { flex: 0 0 auto; }
   .bucket-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .expiry-note { display:block; color:var(--muted); font-size:.75rem; }
-  .kv-table { table-layout: fixed; min-width: 760px; }
+  .kv-table { table-layout: fixed; min-width: 800px; }
   .selection-column { width: 44px; }
   .size-column { width: 120px; }
   .modified-column { width: 180px; }
-  .actions-column { width: 156px; }
+  .actions-column { width: 194px; }
   .kv-table th, .kv-table td { vertical-align: middle; }
   .kv-table th:nth-child(2), .kv-table td:nth-child(2) { overflow-wrap: anywhere; }
   .row-actions { justify-content: flex-end; }

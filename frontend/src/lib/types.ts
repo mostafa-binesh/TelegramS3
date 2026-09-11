@@ -30,6 +30,23 @@ export interface ObjectEntry {
   last_modified: string;
   etag: string;
   expires_at?: string | null;
+  shared_links: number;
+}
+
+export interface SharedLink {
+  id: string;
+  url?: string | null;
+  description: string;
+  created_at: string;
+  expires_at?: string | null;
+  status: 'active' | 'expired' | string;
+}
+
+export interface SharedLinksState {
+  bucket: string;
+  key: string;
+  links: SharedLink[];
+  count: number;
 }
 
 export interface ObjectsState {

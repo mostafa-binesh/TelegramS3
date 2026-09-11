@@ -52,6 +52,13 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
   const deletedKeys = new Set<string>();
   const buckets = [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }];
   const users = [user];
+  const shareLinksByKey = new Map([
+    ['readme.txt', [
+      { id: 'share-1', url: '/_public/mock-share-token-1', description: 'Team handoff', created_at: '2026-01-01T00:00:00Z', expires_at: '2026-02-01T00:00:00Z', status: 'active' },
+      { id: 'share-2', url: '/_public/mock-share-token-2', description: 'External reviewer', created_at: '2026-01-02T00:00:00Z', expires_at: null, status: 'active' }
+    ]],
+    ['archive.bin', []]
+  ]);
   let recoveryIssue = options.recoveryIssue ? { ...options.recoveryIssue, acknowledged_at: null, acknowledged_by: null } : null;
 
   await page.route('**/_admin/api/**', async (route) => {
@@ -117,17 +124,49 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
     if (path === '/objects' && request.method() === 'GET') {
       const prefix = new URL(request.url()).searchParams.get('prefix') ?? '';
       const objects = prefix
-        ? [{ key: 'docs/report.txt', name: 'report.txt', size: 24, last_modified: '2026-01-01T00:00:00Z' }]
+        ? [{ key: 'docs/report.txt', name: 'report.txt', size: 24, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }]
         : [
-            { key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z' },
-            { key: 'archive.bin', name: 'archive.bin', size: 28, last_modified: '2026-01-01T00:00:00Z' }
+            { key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z', shared_links: shareLinksByKey.get('readme.txt')?.length ?? 0 },
+            { key: 'archive.bin', name: 'archive.bin', size: 28, last_modified: '2026-01-01T00:00:00Z', shared_links: shareLinksByKey.get('archive.bin')?.length ?? 0 }
           ];
       return route.fulfill({ json: { prefix, folders: prefix ? [] : [...createdFolders].filter((folder) => !deletedKeys.has(`${folder}/`)), objects: objects.filter((object) => !deletedKeys.has(object.key)) } });
     }
     if (path === '/objects/share' && request.method() === 'POST') {
       if (options.shareFailure) return route.fulfill({ status: 400, json: { error: 'share creation failed for this test' } });
+      const body = request.postDataJSON() as { bucket: string; key: string; expires_in_seconds?: number; description?: string };
+      const links = shareLinksByKey.get(body.key) ?? [];
+      links.push({ id: `share-${links.length + 1}`, url: '/_public/mock-share-token', description: body.description || 'No description provided', created_at: '2026-01-01T00:00:00Z', expires_at: body.expires_in_seconds ? '2026-01-01T01:00:00Z' : null, status: 'active' });
+      shareLinksByKey.set(body.key, links);
+      return route.fulfill({ status: 201, json: { id: links.at(-1)?.id, url: '/_public/mock-share-token', description: body.description || 'No description provided', expires_at: body.expires_in_seconds ? '2026-01-01T01:00:00Z' : null } });
+    }
+    if (path === '/objects/shares' && request.method() === 'GET') {
+      const key = new URL(request.url()).searchParams.get('key') ?? '';
+      const links = shareLinksByKey.get(key) ?? [];
+      return route.fulfill({ json: { bucket: 'release-test', key, links, count: links.length } });
+    }
+    if (path.startsWith('/objects/shares/') && request.method() === 'PATCH') {
+      const id = path.slice('/objects/shares/'.length);
       const body = request.postDataJSON() as { expires_in_seconds?: number };
-      return route.fulfill({ status: 201, json: { url: '/_public/mock-share-token', expires_at: body.expires_in_seconds ? '2026-01-01T01:00:00Z' : null } });
+      for (const links of shareLinksByKey.values()) {
+        const link = links.find((candidate) => candidate.id === id);
+        if (link) {
+          link.expires_at = body.expires_in_seconds ? '2026-03-01T00:00:00Z' : null;
+          return route.fulfill({ json: link });
+        }
+      }
+      return route.fulfill({ status: 404, json: { error: 'share link not found' } });
+    }
+    if (path.startsWith('/objects/shares/') && request.method() === 'DELETE') {
+      const id = path.slice('/objects/shares/'.length);
+      for (const [key, links] of shareLinksByKey) {
+        const index = links.findIndex((candidate) => candidate.id === id);
+        if (index >= 0) {
+          links.splice(index, 1);
+          shareLinksByKey.set(key, links);
+          return route.fulfill({ json: { ok: true } });
+        }
+      }
+      return route.fulfill({ status: 404, json: { error: 'share link not found' } });
     }
     if (path === '/objects/delete' && request.method() === 'POST') {
       const key = (request.postDataJSON() as { key: string }).key;
@@ -190,11 +229,12 @@ test('share modal uses an expiry preset, sends the correct payload, displays, an
   await expect(page.getByRole('heading', { name: 'Share readme.txt' })).toBeVisible();
   await page.getByRole('button', { name: '1 day', exact: true }).click();
   await expect(page.getByLabel('Link lifetime')).toHaveValue('86400');
+  await page.getByLabel('Link description').fill('Release handoff');
 
   const request = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/share') && candidate.method() === 'POST');
   await page.getByRole('button', { name: 'Create share link' }).click();
   const shareRequest = await request;
-  expect(shareRequest.postDataJSON()).toMatchObject({ bucket: 'release-test', key: 'readme.txt', expires_in_seconds: 86400 });
+  expect(shareRequest.postDataJSON()).toMatchObject({ bucket: 'release-test', key: 'readme.txt', expires_in_seconds: 86400, description: 'Release handoff' });
   await expect(page.getByLabel('Public share URL')).toHaveValue(/\/_public\/mock-share-token$/);
   await expect(page.getByText('Link ready')).toBeVisible();
 
@@ -241,6 +281,39 @@ test('share modal supports a never-expire link and surfaces creation errors', as
   expect((await request).postDataJSON()).not.toHaveProperty('expires_in_seconds');
   await expect(page.getByRole('alert')).toContainText('share creation failed for this test');
   await expect(page.getByRole('heading', { name: 'Share archive.bin' })).toBeVisible();
+});
+
+test('shared-link manager lists links, updates expiry, copies, and revokes', async ({ page }) => {
+  await mockAdminApi(page);
+  await signIn(page);
+  await openBucket(page);
+
+  const manageButton = page.getByRole('button', { name: 'Manage shared links for readme.txt' });
+  await expect(manageButton.locator('.action-badge')).toHaveText('2');
+  await manageButton.click();
+  await expect(page.getByRole('heading', { name: 'Shared links' })).toBeVisible();
+  await expect(page.getByText('Team handoff')).toBeVisible();
+  await expect(page.getByText('External reviewer')).toBeVisible();
+  await expect(page.getByLabel('Shared URL Team handoff')).toHaveValue(/mock-share-token-1$/);
+
+  const firstExpiry = page.getByLabel('Change expiry for Team handoff');
+  const updateRequest = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/shares/share-1') && candidate.method() === 'PATCH');
+  await firstExpiry.selectOption('custom');
+  await page.getByLabel('Custom expiry seconds for Team handoff').fill('30');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  expect((await updateRequest).postDataJSON()).toMatchObject({ expires_in_seconds: 30 });
+  await expect(page.getByText('Link expiry updated.')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Copy', exact: true }).first().click();
+  await expect(page.getByRole('button', { name: /Copied|Selected/, exact: true })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Revoke link', exact: true }).first().click();
+  await expect(page.getByText('Revoke this link?')).toBeVisible();
+  const revokeRequest = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/shares/share-1') && candidate.method() === 'DELETE');
+  await page.getByRole('button', { name: 'Revoke', exact: true }).click();
+  await revokeRequest;
+  await expect(page.getByText('Team handoff')).toBeHidden();
+  await expect(manageButton.locator('.action-badge')).toHaveText('1');
 });
 
 test('object deletion hides the item, while non-empty folder deletion is rejected', async ({ page }) => {

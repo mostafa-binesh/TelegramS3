@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 12;
 
 #[derive(Debug, Error)]
 pub enum MetadataError {

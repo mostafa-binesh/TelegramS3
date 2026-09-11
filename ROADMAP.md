@@ -175,6 +175,9 @@ Completed work (content streaming + wizard increment):
 - the admin object browser can issue opaque `/_public/<token>` download links
   with optional expiry capped by the object's expiry; public links use the
   bounded shared reader
+- the bucket browser now shows a shared-link count badge and a link manager
+  modal with descriptions, URL copy, expiry editing, expired-link visibility,
+  and revocation; token ciphertext is encrypted for post-creation management
 - bucket and operator lists use icon actions with hover labels, destructive
   actions use in-app confirmation modals, share expiry is collected in-app,
   and Telegram connection removal requires linked-phone confirmation

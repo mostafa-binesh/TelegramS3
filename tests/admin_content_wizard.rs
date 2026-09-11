@@ -338,7 +338,7 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
 
     // Admin-created capability links are readable without an authenticated session.
     let share_payload = format!(
-        r#"{{"bucket":"{}","key":"{}","expires_in_seconds":60}}"#,
+        r#"{{"bucket":"{}","key":"{}","expires_in_seconds":60,"description":"Team handoff"}}"#,
         bucket, key
     );
     let share = json_request(
@@ -360,6 +360,7 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
         .expect("share URL")
         .to_string();
     assert!(share.bytes_json["expires_at"].is_string());
+    assert_eq!(share.bytes_json["description"], "Team handoff");
     let shared = raw_request(&client, &bind_addr, "GET", &share_url, &[], b"").await;
     assert_eq!(shared.status, 200, "public share GET");
     assert_eq!(shared.body, raw, "public share body must equal raw bytes");
@@ -373,6 +374,59 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
     assert!(
         shared_head.body.is_empty(),
         "share HEAD body should be empty"
+    );
+
+    let shares_query = encode_query(&[("bucket", bucket.as_str()), ("key", key)]);
+    let shares = json_request(
+        &client,
+        &bind_addr,
+        "GET",
+        &format!("/_admin/api/objects/shares?{shares_query}"),
+        &[("Cookie", &cookie)],
+        b"",
+    )
+    .await;
+    assert_eq!(shares.status_code, 200, "list shared links");
+    assert_eq!(shares.bytes_json["count"], 1);
+    assert_eq!(shares.bytes_json["links"][0]["url"], share_url);
+    assert_eq!(shares.bytes_json["links"][0]["description"], "Team handoff");
+    let share_id = shares.bytes_json["links"][0]["id"]
+        .as_str()
+        .expect("share id")
+        .to_string();
+
+    let update_share_payload = br#"{"expires_in_seconds":30}"#;
+    let updated_share = json_request(
+        &client,
+        &bind_addr,
+        "PATCH",
+        &format!("/_admin/api/objects/shares/{share_id}"),
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        update_share_payload,
+    )
+    .await;
+    assert_eq!(updated_share.status_code, 200, "update share expiry");
+    assert!(updated_share.bytes_json["expires_at"].is_string());
+    assert_eq!(updated_share.bytes_json["url"], share_url);
+
+    let revoked_share = json_request(
+        &client,
+        &bind_addr,
+        "DELETE",
+        &format!("/_admin/api/objects/shares/{share_id}"),
+        &[("Cookie", &cookie), ("X-CSRF-Token", &csrf)],
+        b"",
+    )
+    .await;
+    assert_eq!(revoked_share.status_code, 200, "revoke share link");
+    let revoked_public = raw_request(&client, &bind_addr, "GET", &share_url, &[], b"").await;
+    assert_eq!(
+        revoked_public.status, 404,
+        "revoked public share must be unavailable"
     );
 
     // Folder deletion must not silently remove only the directory marker while

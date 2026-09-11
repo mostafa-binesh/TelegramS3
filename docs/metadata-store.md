@@ -9,7 +9,7 @@ Telegram alone to answer read/write consistency questions.
 
 ## Schema Version
 
-- Current schema version: `5`
+- Current schema version: `12`
 - Version contract: migrations are applied on startup and are also available
   through the `telegram-s3 db migrate` command.
 - Startup behavior: the store opens the configured SQLite file, creates the
@@ -52,6 +52,11 @@ Telegram alone to answer read/write consistency questions.
     schema v8. The Telegram session file path is resolved from
     `TELEGRAM_SESSION_PATH`, with the metadata-path-derived default as
     fallback.
+- `share_links`
+  - non-revoked capability links for committed objects
+  - stores the token hash for lookup, encrypted token ciphertext for
+    authenticated link management, optional description, and expiry/revocation
+    state; migrated in schema v12
 
 The phase 3 object-format service also persists chunk and manifest documents
 under the configured data directory, using the metadata store as the

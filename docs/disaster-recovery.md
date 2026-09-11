@@ -16,6 +16,13 @@ and cleanup/GC removes them;
 do not treat an expired object as proof that its remote bytes were already
 deleted.
 
+Share-link records are local metadata. The token hash is sufficient to validate
+an already-issued public URL, while the encrypted token ciphertext lets the
+authenticated admin panel display and manage current links after restart. Back
+up `metadata.sqlite` together with `TELEGRAM_S3_MASTER_KEY`; without the same
+master key, link URLs cannot be revealed in the manager. Older hash-only links
+remain revocable but cannot have their URL reconstructed.
+
 > The same `metadata.sqlite` now also stores operator accounts, Telegram
 > bootstrap settings, connection-generation state, and session tombstones
 > (schema v8). A backup/restore of

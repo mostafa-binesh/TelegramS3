@@ -336,12 +336,14 @@ fn ensure_share_schema(connection: &mut Connection) -> Result<(), MetadataError>
         CREATE TABLE IF NOT EXISTS share_links (
             id TEXT PRIMARY KEY,
             token_hash TEXT NOT NULL UNIQUE,
+            token_ciphertext TEXT,
             object_id TEXT NOT NULL,
             bucket TEXT NOT NULL,
             object_key TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             expires_at INTEGER,
-            revoked_at INTEGER
+            revoked_at INTEGER,
+            description TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_share_links_object
             ON share_links(object_id);
@@ -349,6 +351,18 @@ fn ensure_share_schema(connection: &mut Connection) -> Result<(), MetadataError>
             ON share_links(expires_at);
         "#,
     )?;
+    if !table_has_column(connection, "share_links", "token_ciphertext")? {
+        connection.execute(
+            "ALTER TABLE share_links ADD COLUMN token_ciphertext TEXT",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "share_links", "description")? {
+        connection.execute(
+            "ALTER TABLE share_links ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -532,6 +546,21 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool, MetadataErr
         .optional()?
         .is_some();
     Ok(exists)
+}
+
+fn table_has_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, MetadataError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn column_exists(

@@ -266,7 +266,7 @@ mod tests {
             store.telegram_chunk_size().expect("read"),
             Some(8 * 1024 * 1024)
         );
-        assert_eq!(store.schema_version().expect("schema"), 11);
+        assert_eq!(store.schema_version().expect("schema"), 12);
     }
 
     #[test]

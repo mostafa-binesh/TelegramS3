@@ -162,8 +162,8 @@ async function mockAdminApi(
     }
     if (path === '/objects' && request.method() === 'GET') {
       const prefix = new URL(request.url()).searchParams.get('prefix') ?? '';
-      const rootObjects = [{ key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z' }];
-      const nestedObjects = [{ key: 'docs/report.txt', name: 'report.txt', size: 24, last_modified: '2026-01-01T00:00:00Z' }];
+      const rootObjects = [{ key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }];
+      const nestedObjects = [{ key: 'docs/report.txt', name: 'report.txt', size: 24, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }];
       return route.fulfill({ json: { prefix, folders: prefix ? [] : ['docs'], objects: (prefix ? nestedObjects : rootObjects).filter((object) => !deletedKeys.has(object.key)) } });
     }
     if (path === '/objects/share' && request.method() === 'POST') {

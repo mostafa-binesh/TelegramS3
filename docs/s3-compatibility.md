@@ -90,7 +90,10 @@ features, so they are documented separately.
   with active descendants return `409` instead of a false success.
 - The object browser shows object expiry, accepts seconds-based expiry for
   browser uploads, and creates opaque `/_public/` share URLs with an optional expiry.
-  Share URLs are public bearer capabilities bounded by object expiry.
+  Share URLs are public bearer capabilities bounded by object expiry. Each row
+  shows a shared-link count, and the authenticated link manager can list
+  descriptions, copy URLs, update expiry, and revoke links. This is an admin
+  control-plane feature, not an AWS presigned URL implementation.
 - Removing the current Telegram connection from the admin UI is an explicit,
   CSRF-protected action that displays the linked Telegram account phone number
   and requires typing that exact value as confirmation. The phone number is

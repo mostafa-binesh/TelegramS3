@@ -28,6 +28,9 @@
     saveTelegramSettings,
     saveStorageSettings,
     createShareLink,
+    listShareLinks,
+    updateShareLinkExpiry,
+    revokeShareLink,
   } from './lib/api';
   import {normalizeError} from './lib/format';
   import type {
@@ -36,11 +39,13 @@
     ObjectsState,
     OverviewState,
     SessionState,
+    SharedLink,
     TelegramSettings,
     UserInfo
   } from './lib/types';
   import TopProgress from './components/TopProgress.svelte';
   import Toasts from './components/Toasts.svelte';
+  import SharedLinksModal from './components/SharedLinksModal.svelte';
 
   let session: SessionState | null = null;
   let overview: OverviewState | null = null;
@@ -102,9 +107,15 @@
   let showDeleteModal = false;
   let shareTarget: ObjectEntry | null = null;
   let shareExpiry = '';
+  let shareDescription = '';
   let shareUrl = '';
   let shareError = '';
   let shareBusy = false;
+  let showSharedLinksModal = false;
+  let sharedLinksTarget: ObjectEntry | null = null;
+  let sharedLinks: SharedLink[] = [];
+  let sharedLinksBusy = false;
+  let sharedLinksError = '';
   let deleteTarget: { type: 'bucket' | 'object' | 'folder' | 'selection' | 'operator'; name: string; key?: string } | null = null;
   let selectedKeys: string[] = [];
   let showMoveModal = false;
@@ -615,6 +626,7 @@
     await loadAdminModals();
     shareTarget = obj;
     shareExpiry = '';
+    shareDescription = '';
     shareUrl = '';
     shareError = '';
     showShareModal = true;
@@ -630,12 +642,73 @@
     shareBusy = true;
     shareError = '';
     try {
-      const result = await createShareLink(session?.csrf_token, selectedBucket, shareTarget.key, trimmed ? Number(trimmed) : null);
+      const result = await createShareLink(session?.csrf_token, selectedBucket, shareTarget.key, trimmed ? Number(trimmed) : null, shareDescription.trim());
       shareUrl = new URL(result.url, window.location.origin).toString();
+      await refreshObjects();
       try { await navigator.clipboard.writeText(shareUrl); notifySuccess('Share link copied.'); }
       catch { notifySuccess('Share link created. Copy it from the dialog.'); }
     } catch (cause) { shareError = normalizeError(cause); }
     finally { shareBusy = false; }
+  }
+
+  async function openSharedLinksModal(obj: ObjectEntry) {
+    await loadAdminModals();
+    sharedLinksTarget = obj;
+    sharedLinks = [];
+    sharedLinksError = '';
+    showSharedLinksModal = true;
+    await refreshSharedLinks();
+  }
+
+  async function refreshSharedLinks() {
+    if (!sharedLinksTarget) return;
+    sharedLinksBusy = true;
+    sharedLinksError = '';
+    try {
+      const result = await listShareLinks(session?.csrf_token, selectedBucket, sharedLinksTarget.key);
+      sharedLinks = result.links;
+    } catch (cause) {
+      sharedLinksError = normalizeError(cause);
+    } finally {
+      sharedLinksBusy = false;
+    }
+  }
+
+  async function changeSharedLinkExpiry(id: string, seconds: number | null) {
+    sharedLinksBusy = true;
+    sharedLinksError = '';
+    try {
+      await updateShareLinkExpiry(session?.csrf_token, id, seconds);
+      notifySuccess(seconds === null ? 'Link set to follow the file expiry.' : 'Link expiry updated.');
+      await refreshSharedLinks();
+    } catch (cause) {
+      sharedLinksError = normalizeError(cause);
+    } finally {
+      sharedLinksBusy = false;
+    }
+  }
+
+  async function revokeSharedLink(id: string) {
+    sharedLinksBusy = true;
+    sharedLinksError = '';
+    try {
+      await revokeShareLink(session?.csrf_token, id);
+      notifySuccess('Shared link revoked.');
+      await refreshSharedLinks();
+      await refreshObjects();
+    } catch (cause) {
+      sharedLinksError = normalizeError(cause);
+    } finally {
+      sharedLinksBusy = false;
+    }
+  }
+
+  function closeSharedLinksModal() {
+    if (sharedLinksBusy) return;
+    showSharedLinksModal = false;
+    sharedLinksTarget = null;
+    sharedLinks = [];
+    sharedLinksError = '';
   }
 
   function selectRecoveryTab(tab: 'issues' | 'transfers') {
@@ -784,13 +857,14 @@
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onShare={openShareModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'users'}
       {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} error={usersError} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={(id: string) => requestDelete({ type: 'operator', name: users.find((user) => user.id === id)?.username ?? id, key: id })} onAdd={openOperatorModal}/>{:else if routeLoadError}<LoadError title="Could not load operator accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
     {/if}
   {/if}
 
-  {#if AdminModalsComponent}<svelte:component this={AdminModalsComponent} bind:showBucket={showBucketModal} bind:showFolder={showFolderModal} bind:showUpload={showUploadModal} bind:showOperator={showOperatorModal} bind:showMove={showMoveModal} bind:showShare={showShareModal} bind:showDelete={showDeleteModal} bind:newBucket bind:newFolder bind:newUsername bind:newDisplay bind:newPassword bind:newRole bind:moveBucket bind:movePrefix bind:shareExpiry bind:shareUrl selectedBucket={selectedBucket} currentPrefix={currentPrefix} shareTarget={shareTarget} shareError={shareError} shareBusy={shareBusy} deleteTarget={deleteTarget} {busy} uploadComponent={UploadBoxComponent} csrf={session?.csrf_token} onCreateBucket={makeBucket} onCreateFolder={makeFolder} onCreateOperator={makeUser} onCreateShare={createShareFromModal} onConfirmDelete={confirmDelete} onMove={moveSelected} onUploaded={refreshObjects}/>{/if}
+  {#if AdminModalsComponent}<svelte:component this={AdminModalsComponent} bind:showBucket={showBucketModal} bind:showFolder={showFolderModal} bind:showUpload={showUploadModal} bind:showOperator={showOperatorModal} bind:showMove={showMoveModal} bind:showShare={showShareModal} bind:showDelete={showDeleteModal} bind:newBucket bind:newFolder bind:newUsername bind:newDisplay bind:newPassword bind:newRole bind:moveBucket bind:movePrefix bind:shareExpiry bind:shareDescription bind:shareUrl selectedBucket={selectedBucket} currentPrefix={currentPrefix} shareTarget={shareTarget} shareError={shareError} shareBusy={shareBusy} deleteTarget={deleteTarget} {busy} uploadComponent={UploadBoxComponent} csrf={session?.csrf_token} onCreateBucket={makeBucket} onCreateFolder={makeFolder} onCreateOperator={makeUser} onCreateShare={createShareFromModal} onConfirmDelete={confirmDelete} onMove={moveSelected} onUploaded={refreshObjects}/>{/if}
+  <SharedLinksModal open={showSharedLinksModal} target={sharedLinksTarget} links={sharedLinks} busy={sharedLinksBusy} error={sharedLinksError} onClose={closeSharedLinksModal} onUpdateExpiry={changeSharedLinkExpiry} onRevoke={revokeSharedLink}/>
 
   <Toasts />
 </main>
