@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.7.2-rc.1 - 2026-09-11
+
+Done jobs:
+
+- Added a shared-link count badge and link-manager action to every file row in
+  the admin bucket browser.
+- Added a polished shared-links modal with descriptions, public URL display and
+  copy, expiry editing, expired-link visibility, and revoke confirmation.
+- Added authenticated list/update/revoke APIs and schema v12 migration for
+  encrypted share-token ciphertext and descriptions while preserving hash-based
+  public lookup.
+- Added Rust metadata, admin API, frontend, and Playwright coverage for the
+  complete share-link lifecycle.
+- Updated operator, storage-format, migration, compatibility, and recovery
+  documentation.
+
 ## 0.7.15 - 2026-09-11
 
 - Promoted the validated `v0.7.15-rc.7` build to stable.
