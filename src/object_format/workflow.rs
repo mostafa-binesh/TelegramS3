@@ -9,7 +9,34 @@ pub(crate) enum RemoteReconciliation {
     Absent,
 }
 
+// Telegram can reject `messages.sendMedia` with FLOOD_WAIT before it accepts a
+// document. When the server does not include a wait value, pause
+// conservatively instead of immediately putting pressure back on the account.
+const FALLBACK_FLOOD_WAIT_SECONDS: u64 = 60;
+
+fn is_explicit_flood_wait(error: &ObjectFormatError) -> bool {
+    matches!(
+        error,
+        ObjectFormatError::Telegram(crate::telegram::TelegramTransportError::Rpc(detail))
+            if crate::telegram::retry::is_flood_wait_error(detail)
+    )
+}
+
 impl ObjectFormatService {
+    /// Drain a duplicate S3 request without staging it. The already-durable
+    /// multipart job remains the source of truth, so a broken retry body must
+    /// not discard or poison that earlier job.
+    pub(super) async fn discard_duplicate_body(mut body: Option<StreamingBlob>) {
+        let Some(body) = body.as_mut() else {
+            return;
+        };
+        while let Some(frame) = body.next().await {
+            if frame.is_err() {
+                break;
+            }
+        }
+    }
+
     /// Accept the complete request on durable local storage; remote work is independent.
     pub async fn enqueue_stream(
         &self,
@@ -252,6 +279,9 @@ impl ObjectFormatService {
                 if *transfer_shutdown.borrow() {
                     break;
                 }
+                let _ = service
+                    .metadata
+                    .reclassify_flood_wait_attempts(FALLBACK_FLOOD_WAIT_SECONDS);
                 let _ = service.reconcile_unknown_transfers().await;
                 match service.metadata.claim_transfer() {
                     Ok(Some(job)) => {
@@ -270,14 +300,22 @@ impl ObjectFormatService {
                         };
                         if let Err(error) = result {
                             let (delay, reason) = match &error {
+                                ObjectFormatError::Telegram(_)
+                                    if is_explicit_flood_wait(&error) =>
+                                {
+                                    (
+                                        Some(
+                                            crate::telegram::retry::parse_flood_wait_seconds(
+                                                error.to_string(),
+                                            )
+                                            .unwrap_or(FALLBACK_FLOOD_WAIT_SECONDS)
+                                            .max(1),
+                                        ),
+                                        "Telegram requested a rate-limit pause; the transfer will resume automatically.",
+                                    )
+                                }
                                 ObjectFormatError::Telegram(_) => (
-                                    Some(
-                                        crate::telegram::retry::parse_flood_wait_seconds(
-                                            error.to_string(),
-                                        )
-                                        .unwrap_or(2u64.saturating_pow(job.attempts.min(8)))
-                                        .max(1),
-                                    ),
+                                    Some(2u64.saturating_pow(job.attempts.min(8)).max(1)),
                                     "Telegram transfer failed; retry scheduled. Staged data retained.",
                                 ),
                                 _ => (
@@ -492,7 +530,27 @@ impl ObjectFormatService {
                             ObjectFormatError::InvalidPlan("completed manifest missing".into())
                         });
                 }
-                "cancelled" | "recovery_required" => {
+                "superseded" => {
+                    // A duplicate multipart request may be waiting while the
+                    // canonical job finishes. Return that published part if
+                    // it exists instead of leaving the caller to retry again.
+                    if let Some((upload, number)) = self.metadata.multipart_job(&job.id)?
+                        && number > 0
+                        && let Some(part) = self.metadata.get_multipart_part(
+                            Uuid::parse_str(&upload)
+                                .map_err(|e| ObjectFormatError::InvalidPlan(e.to_string()))?,
+                            number,
+                        )?
+                        && let Some(manifest) = part.manifest
+                    {
+                        return Ok(manifest);
+                    }
+                    return Err(ObjectFormatError::InvalidPlan(
+                        job.error
+                            .unwrap_or_else(|| "transfer was superseded".into()),
+                    ));
+                }
+                "cancelled" | "recovery_required" | "reception_failed" => {
                     return Err(ObjectFormatError::InvalidPlan(
                         job.error
                             .unwrap_or_else(|| "transfer needs recovery".into()),
@@ -554,14 +612,25 @@ impl ObjectFormatService {
                             {
                                 Ok(location) => location,
                                 Err(error) => {
-                                    let _ = self.metadata.mark_send_attempt_unknown(
-                                        &job.id,
-                                        lease,
-                                        chunk.order,
-                                        &attempt.id,
-                                        "telegram_send",
-                                        &error.to_string(),
-                                    );
+                                    let _ = if is_explicit_flood_wait(&error) {
+                                        self.metadata.mark_send_attempt_retryable(
+                                            &job.id,
+                                            lease,
+                                            chunk.order,
+                                            &attempt.id,
+                                            "telegram_flood_wait",
+                                            &error.to_string(),
+                                        )
+                                    } else {
+                                        self.metadata.mark_send_attempt_unknown(
+                                            &job.id,
+                                            lease,
+                                            chunk.order,
+                                            &attempt.id,
+                                            "telegram_send",
+                                            &error.to_string(),
+                                        )
+                                    };
                                     return Err(error);
                                 }
                             };
@@ -581,7 +650,10 @@ impl ObjectFormatService {
                     Ok::<_, ObjectFormatError>(chunk)
                 }
             }))
-            .buffer_unordered(2);
+            // `try_collect` cancels sibling futures on the first error. A
+            // cancelled Telegram send has an indeterminate acknowledgement, so
+            // publish chunks one at a time and keep every attempt recoverable.
+            .buffered(1);
         let mut results: Vec<ChunkRef> = futures::TryStreamExt::try_collect(pending).await?;
         results.sort_by_key(|c| c.order);
         manifest.chunks = results;
@@ -604,14 +676,25 @@ impl ObjectFormatService {
                 {
                     Ok(location) => location,
                     Err(error) => {
-                        let _ = self.metadata.mark_send_attempt_unknown(
-                            &job.id,
-                            lease,
-                            u32::MAX,
-                            &attempt.id,
-                            "telegram_send",
-                            &error.to_string(),
-                        );
+                        let _ = if is_explicit_flood_wait(&error) {
+                            self.metadata.mark_send_attempt_retryable(
+                                &job.id,
+                                lease,
+                                u32::MAX,
+                                &attempt.id,
+                                "telegram_flood_wait",
+                                &error.to_string(),
+                            )
+                        } else {
+                            self.metadata.mark_send_attempt_unknown(
+                                &job.id,
+                                lease,
+                                u32::MAX,
+                                &attempt.id,
+                                "telegram_send",
+                                &error.to_string(),
+                            )
+                        };
                         return Err(error);
                     }
                 };

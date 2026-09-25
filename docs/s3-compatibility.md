@@ -25,7 +25,7 @@ features, so they are documented separately.
 | Copy object | implemented | cargo check | Reuses the bounded object-format backend for source-to-destination copies | Copy is still local-first rather than remote-atomic | 5 |
 | Byte-range GET | implemented | cargo test | Maps ranges to chunk spans and fetches only the required Telegram documents | Requires chunk-aware verification | 4 |
 | Multipart initiation | implemented | cargo check | Persists durable upload state in the local metadata store | Multipart state is local | 5 |
-| Multipart part upload | implemented | cargo check | Stages part data, uploads it to Telegram, and stores the returned identifiers | Each part must stay under Telegram limits | 5 |
+| Multipart part upload | implemented | cargo test / Playwright | Stages part data, uploads it to Telegram, and stores the returned identifiers; a repeated in-flight `UploadPart` joins the original durable part job, while explicit Telegram `FLOOD_WAIT` replies pause and retry automatically | Each part must stay under Telegram limits; an intentional replacement waits until the active part job reaches a safe terminal state | 5 |
 | Multipart completion | implemented | cargo test | Composes verified part chunk references, publishes only the final schema v2 manifest, and commits the object/session atomically | A pre-composition job with an ambiguous Telegram acknowledgement must still reconcile before replacement | 5 |
 | Multipart abort | implemented | cargo check | Marks upload aborted and cleans up local state | Abort is local cleanup | 5 |
 | Multipart listing | implemented | cargo check | Lists live multipart sessions from the local journal/metadata | Telegram does not expose upload sessions natively | 5 |

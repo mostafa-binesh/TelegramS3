@@ -324,6 +324,22 @@ impl MetadataStore {
             if receiving_part {
                 return Ok(Some("receiving".to_string()));
             }
+            let retrying_part: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM multipart_jobs m JOIN transfer_jobs j ON j.id=m.job_id LEFT JOIN multipart_parts p ON p.upload_id=m.upload_id AND p.part_number=m.part_number WHERE m.upload_id=?1 AND m.part_number>0 AND p.part_number IS NULL AND j.state='retry_wait')",
+                [&upload_id],
+                |row| row.get(0),
+            )?;
+            if retrying_part {
+                return Ok(Some("retry_wait".to_string()));
+            }
+            let publishing_part: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM multipart_jobs m JOIN transfer_jobs j ON j.id=m.job_id LEFT JOIN multipart_parts p ON p.upload_id=m.upload_id AND p.part_number=m.part_number WHERE m.upload_id=?1 AND m.part_number>0 AND p.part_number IS NULL AND j.state IN ('queued','uploading','committing'))",
+                [&upload_id],
+                |row| row.get(0),
+            )?;
+            if publishing_part {
+                return Ok(Some("uploading".to_string()));
+            }
             Ok(None)
         })
     }

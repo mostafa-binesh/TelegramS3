@@ -69,6 +69,22 @@ metadata until reconciliation determines whether the acknowledgement can be
 matched exactly; do not delete the visible Telegram files just because the browser
 request was interrupted.
 
+### Telegram Rate Limit (`FLOOD_WAIT`)
+
+An explicit Telegram `FLOOD_WAIT` is safe to retry because Telegram rejected
+the send before it published a document. The worker records it as `retry_wait`,
+keeps the staging data, and resumes after Telegram's requested delay. The bucket
+browser shows **Waiting for Telegram**, not **Needs attention**, while this is
+in progress. Do not click retry repeatedly or start another copy of the same
+part: a repeated in-flight S3 `UploadPart` joins the canonical durable job.
+
+Timeouts, disconnects, and stale `sending` attempts are different: their remote
+acknowledgement is unknown and they remain subject to exact-byte reconciliation.
+When upgrading an older build, a historical flood-wait row is only moved to the
+automatic retry path after every separate ambiguous attempt for that job has
+been reconciled. This preserves both the pacing delay and the no-guessing
+recovery boundary.
+
 ## Repair and Garbage Collection
 
 1. Run `telegram-s3 repair --dry-run` first to see which staged, recovery-
@@ -134,9 +150,12 @@ request will fix.
 3. A row at `N/N` parts may be in `completing`: all payload chunks are already
    durable and the server is publishing the small final manifest. Current
    completion does not download or re-upload the concatenated object.
-4. If a multipart session is marked `recovery_required`, abort or repair it
+4. A **Waiting for Telegram** row is automatically pacing an explicit
+   `FLOOD_WAIT`; leave its canonical job in place rather than uploading the
+   same part again.
+5. If a multipart session is marked `recovery_required`, abort or repair it
    before trying to complete the upload.
-5. If the session files are gone but the local session row remains, clean up
+6. If the session files are gone but the local session row remains, clean up
    the multipart metadata and retry the upload from a fresh initiate call.
 
 After upgrading from a release that reassembled multipart data during

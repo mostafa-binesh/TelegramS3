@@ -46,6 +46,7 @@ type MockOptions = {
   activeUploadState?: string;
   activeUploadPartsDone?: number;
   activeUploadPartsTotal?: number;
+  multipartFailureAfterInitial?: boolean;
 };
 
 async function mockAdminApi(page: Page, options: MockOptions = {}) {
@@ -64,6 +65,7 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
     ['archive.bin', []]
   ]);
   let recoveryIssue = options.recoveryIssue ? { ...options.recoveryIssue, acknowledged_at: null, acknowledged_by: null } : null;
+  let multipartRequests = 0;
 
   await page.route('**/_admin/api/**', async (route) => {
     const request = route.request();
@@ -198,19 +200,25 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
       if (recoveryIssue) recoveryIssue = { ...recoveryIssue, acknowledged_at: null, acknowledged_by: null };
       return route.fulfill({ json: { ok: true, acknowledged_count: 0, unacknowledged_count: 1 } });
     }
-    if (path === '/multipart' && request.method() === 'GET') return route.fulfill({
-      json: {
-        uploads: options.activeUpload ? [{
-          upload_id: 'upload-active-upload',
-          bucket: 'release-test',
-          key: 'large-backup.iso',
-          state: options.activeUploadState ?? 'uploading',
-          parts_done: options.activeUploadPartsDone ?? 236,
-          parts_total: options.activeUploadPartsTotal ?? 282,
-          updated_at: 1_767_000_100
-        }] : []
+    if (path === '/multipart' && request.method() === 'GET') {
+      multipartRequests += 1;
+      if (options.multipartFailureAfterInitial && multipartRequests > 1) {
+        return route.fulfill({ status: 503, json: { error: 'multipart activity is temporarily unavailable' } });
       }
-    });
+      return route.fulfill({
+        json: {
+          uploads: options.activeUpload ? [{
+            upload_id: 'upload-active-upload',
+            bucket: 'release-test',
+            key: 'large-backup.iso',
+            state: options.activeUploadState ?? 'uploading',
+            parts_done: options.activeUploadPartsDone ?? 236,
+            parts_total: options.activeUploadPartsTotal ?? 282,
+            updated_at: 1_767_000_100
+          }] : []
+        }
+      });
+    }
     if (path === '/jobs' && request.method() === 'GET') return route.fulfill({ json: { jobs: [], next_offset: null } });
     if (path === '/jobs/job-upload' && request.method() === 'GET') return route.fulfill({ json: { id: 'job-upload', object_id: 'object-upload', operation_id: 'operation-upload', bucket: 'release-test', key: 'upload.txt', state: 'completed', bytes: 1, chunks_done: 1, chunks_total: 1, attempts: 1, next_retry: 0, created_at: 1_767_000_000, updated_at: 1_767_000_001 } });
     if (path === '/uploads/resumable' && request.method() === 'POST') return route.fulfill({ json: { id: 'reception-1', chunk_size: 1, received: 0 } });
@@ -252,6 +260,25 @@ test('bucket browser shows S3 uploads with part progress while they are in fligh
   await expect(page.getByRole('button', { name: 'Download large-backup.iso' })).toHaveCount(0);
 });
 
+test('bucket browser keeps an in-flight file mounted through a transient activity refresh failure', async ({ page }) => {
+  await mockAdminApi(page, { activeUpload: true, multipartFailureAfterInitial: true });
+  await signIn(page);
+  await openBucket(page);
+
+  const row = page.locator('tr.uploading-row', { hasText: 'large-backup.iso' });
+  await expect(row).toBeVisible();
+
+  // The first bucket poll runs after ten seconds; its multipart activity
+  // response intentionally fails while the object listing still succeeds.
+  await page.waitForTimeout(10_500);
+
+  await expect(row).toBeVisible();
+  await expect(row).toHaveCount(1);
+  await expect(page.getByLabel('Loading files')).toHaveCount(0);
+  await expect(page.getByText('Could not load this folder')).toHaveCount(0);
+  await expect(page.getByText('236 of 282 parts')).toBeVisible();
+});
+
 test('bucket browser distinguishes final manifest publication from part upload', async ({ page }) => {
   await mockAdminApi(page, { activeUpload: true, activeUploadState: 'completing', activeUploadPartsDone: 269, activeUploadPartsTotal: 269 });
   await signIn(page);
@@ -274,6 +301,18 @@ test('bucket browser presents interrupted multipart uploads as actionable', asyn
   await expect(page.getByText('Open Transfers to review')).toBeVisible();
   await expect(page.locator('.uploading-actions', { hasText: 'Needs action' })).toBeVisible();
   await expect(page.getByRole('img', { name: 'Upload needs attention; open Transfers to reconcile it — 269 of 269 parts completed' })).toBeVisible();
+});
+
+test('bucket browser shows an automatic Telegram rate-limit retry without marking the file broken', async ({ page }) => {
+  await mockAdminApi(page, { activeUpload: true, activeUploadState: 'retry_wait', activeUploadPartsDone: 223, activeUploadPartsTotal: 240 });
+  await signIn(page);
+  await openBucket(page);
+
+  await expect(page.getByText('Waiting for Telegram').first()).toBeVisible();
+  await expect(page.getByText('Retrying automatically after Telegram pacing')).toBeVisible();
+  await expect(page.locator('.uploading-actions', { hasText: 'Working' })).toBeVisible();
+  await expect(page.getByText('Needs attention')).toHaveCount(0);
+  await expect(page.getByRole('img', { name: 'Telegram requested a short pause; retry is scheduled automatically — 223 of 240 parts completed' })).toBeVisible();
 });
 
 test('share modal uses an expiry preset, sends the correct payload, displays, and opens the public URL', async ({ page }) => {

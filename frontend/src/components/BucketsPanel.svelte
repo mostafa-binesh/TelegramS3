@@ -39,6 +39,8 @@
     const total = object.upload_parts_total ?? 0;
     const state = uploadKind(object) === 'attention'
       ? 'Upload needs attention; open Transfers to reconcile it'
+      : uploadKind(object) === 'waiting'
+        ? 'Telegram requested a short pause; retry is scheduled automatically'
       : uploadKind(object) === 'receiving'
         ? 'Receiving upload from S3'
         : uploadKind(object) === 'finalizing'
@@ -51,6 +53,7 @@
 
   function uploadKind(object: ObjectEntry) {
     if (object.upload_state === 'recovery_required') return 'attention';
+    if (object.upload_state === 'retry_wait') return 'waiting';
     if (object.upload_state === 'receiving') return 'receiving';
     const done = object.upload_parts_done ?? 0;
     const total = object.upload_parts_total ?? 0;
@@ -62,6 +65,7 @@
   function uploadLabel(object: ObjectEntry) {
     const kind = uploadKind(object);
     if (kind === 'attention') return 'Needs attention';
+    if (kind === 'waiting') return 'Waiting for Telegram';
     if (kind === 'receiving') return 'Receiving from S3';
     if (kind === 'finalizing') return 'Finalizing backup';
     if (kind === 'preparing') return 'Preparing upload';
@@ -71,6 +75,7 @@
   function uploadDetail(object: ObjectEntry) {
     const kind = uploadKind(object);
     if (kind === 'attention') return 'Open Transfers to review';
+    if (kind === 'waiting') return 'Retrying automatically after Telegram pacing';
     if (kind === 'receiving') return 'Parts appear as they arrive';
     if (kind === 'finalizing') return 'Publishing the final manifest';
     if (kind === 'preparing') return 'Waiting for the first part';

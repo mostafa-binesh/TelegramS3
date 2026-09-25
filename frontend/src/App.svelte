@@ -100,6 +100,10 @@
   $: routeLoadKey = `${$route.view}|${$route.bucket}|${$route.prefix}|${$route.recoveryTab}|${$route.telegramTab}`;
   let listing: ObjectsState | null = null;
   let objectsRequestSerial = 0;
+  // Keep the last successful multipart activity snapshot per folder. A short
+  // activity-endpoint outage must not remove and recreate an in-flight file
+  // row during background polling.
+  const activeUploadsByRoute = new Map<string, MultipartUpload[]>();
   let newFolder = '';
   let showBucketModal = false;
   let showFolderModal = false;
@@ -506,7 +510,7 @@
   ): ObjectsState {
     const objects = new Map(nextListing.objects.map((object) => [object.key, object]));
     const folders = new Set(nextListing.folders);
-    const activeStates = new Set(['initiated', 'uploading', 'completing', 'recovery_required']);
+    const activeStates = new Set(['initiated', 'uploading', 'retry_wait', 'completing', 'recovery_required']);
 
     for (const upload of uploads) {
       if (upload.bucket !== bucket || !activeStates.has(upload.state) || !upload.key.startsWith(prefix)) continue;
@@ -558,12 +562,14 @@
     }
     try {
       const nextListing = await listObjects(csrf, bucket, prefix);
-      let uploads: MultipartUpload[] = [];
+      let uploads = activeUploadsByRoute.get(routeKey) ?? [];
       try {
         uploads = (await listMultipartUploads(bucket, prefix, csrf)).uploads ?? [];
+        activeUploadsByRoute.set(routeKey, uploads);
       } catch {
         // The committed object list remains useful if the transfer activity
-        // endpoint is temporarily unavailable.
+        // endpoint is temporarily unavailable. Retain the last activity
+        // snapshot so the in-flight row does not disappear and reappear.
       }
       if (requestSerial === objectsRequestSerial && routeKey === `${selectedBucket}|${currentPrefix}`) {
         listing = mergeActiveUploads(nextListing, uploads, bucket, prefix);

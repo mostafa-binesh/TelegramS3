@@ -10,7 +10,7 @@ use telegram_s3::MetadataStore;
 use telegram_s3::TelegramBootstrapSettings;
 use telegram_s3::object_format::ObjectFormatService;
 use tempfile::TempDir;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 fn config(tempdir: &TempDir) -> AppConfig {
     AppConfig {
@@ -52,7 +52,6 @@ async fn scripted_mock_transport_outcomes_are_deterministic_and_recovery_safe() 
     for fault in [
         "timeout",
         "proxy_disconnect",
-        "flood_wait",
         "auth_key_unregistered",
         "peer_lookup",
         "missing",
@@ -95,6 +94,61 @@ async fn scripted_mock_transport_outcomes_are_deterministic_and_recovery_safe() 
             std::env::remove_var("TELEGRAM_MOCK_FAULT");
         }
     }
+
+    // FLOOD_WAIT is Telegram's explicit pre-publication rejection, not an
+    // ambiguous acknowledgement. It should park the durable job, then resume
+    // cleanly once the account can send again.
+    unsafe {
+        std::env::set_var("TELEGRAM_MOCK_FAULT", "flood_wait");
+    }
+    let resumed_service = service.clone();
+    let resumed = tokio::spawn(async move {
+        resumed_service
+            .put_bytes(
+                "fault-matrix",
+                "faults/flood-wait-resumes.bin",
+                "application/octet-stream",
+                b"flood wait payload",
+            )
+            .await
+    });
+    let store = MetadataStore::open(tempdir.path().join("metadata.sqlite")).expect("metadata");
+    let job_id = timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(job) = store
+                .transfers(100, 0)
+                .expect("list transfers")
+                .into_iter()
+                .find(|job| {
+                    job.bucket == "fault-matrix" && job.key == "faults/flood-wait-resumes.bin"
+                })
+                && job.state == "retry_wait"
+            {
+                break job.id;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("flood wait should schedule a retry");
+    assert_eq!(
+        store
+            .transfer(&job_id)
+            .expect("inspect retry")
+            .expect("job")
+            .state,
+        "retry_wait"
+    );
+    unsafe {
+        std::env::remove_var("TELEGRAM_MOCK_FAULT");
+    }
+    let manifest = timeout(Duration::from_secs(5), resumed)
+        .await
+        .expect("resumed flood-wait upload should finish")
+        .expect("flood-wait task should join")
+        .expect("flood-wait upload should succeed");
+    assert_eq!(manifest.content_length, b"flood wait payload".len() as u64);
+    service.shutdown_workers().await;
     unsafe {
         std::env::remove_var("TELEGRAM_TRANSPORT_RUNTIME");
     }

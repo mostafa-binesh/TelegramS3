@@ -248,13 +248,14 @@ staged bytes remain encrypted at rest, but a process restart ends the browser
 session and reconciliation handles the stale receiving job as recovery work.
 
 Active S3 transfer jobs are also exposed to the authenticated bucket browser.
-The UI may show a key as receiving, uploading, finalizing, or needing attention
-before its manifest is committed, using the job's part/chunk counters and
-derived durable state. `N/N` with `completing` means payload publication is done
-and the final manifest is being published. This is operational visibility only
-and does not add the key to the committed object index. Partial or
-recovery-required data therefore remains unavailable to download until
-completion or explicit repair.
+The UI may show a key as receiving, uploading, waiting for Telegram,
+finalizing, or needing attention before its manifest is committed, using the
+job's part/chunk counters and derived durable state. `N/N` with `completing`
+means payload publication is done and the final manifest is being published.
+`retry_wait` means Telegram explicitly requested pacing and the worker will
+resume automatically. This is operational visibility only and does not add the
+key to the committed object index. Partial or recovery-required data therefore
+remains unavailable to download until completion or explicit repair.
 
 ## Recovery Rules
 
@@ -274,7 +275,17 @@ completion or explicit repair.
   complete history scan finds no matching document. An incomplete scan,
   unavailable Telegram session, missing staging file, or byte mismatch stays
   `recovery_required` for operator review.
+- An explicit Telegram `FLOOD_WAIT` is a known pre-publication rejection, not
+  an ambiguous acknowledgement. Its send attempt enters `retryable`, its job
+  enters `retry_wait`, and the worker preserves Telegram's requested pause
+  before retrying. Older persisted flood-wait rows are upgraded only after any
+  unrelated `sending` or `unknown` attempt has completed normal reconciliation.
 - Multipart parts remain hidden until completion publishes the final manifest.
+- A repeated in-flight `UploadPart` attaches to the earliest durable job for
+  that upload ID and part number instead of publishing a second payload. A
+  duplicate is superseded only when it has no `checkpointed`, `sending`, or
+  `unknown` Telegram attempt; anything that may own a remote document remains
+  recoverable for normal reconciliation or operator review.
 - Multipart completion reuses only chunk references whose source identity and
   Telegram location are explicit in schema v2; missing provenance or an
   unpublished source chunk fails completion without exposing an object.

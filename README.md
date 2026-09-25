@@ -131,6 +131,11 @@ A full request-lifecycle and consistency walkthrough is in
   Telegram documents for that token and repairs the checkpoint only after an
   exact encrypted-byte match; otherwise it schedules a safe retry. It never
   guesses from captions or silently duplicates an unknown send.
+- An explicit Telegram `FLOOD_WAIT` is different from a timeout: Telegram has
+  rejected the send before publication, so the durable worker records a
+  retryable attempt, waits for Telegram pacing, and resumes automatically.
+  Historic flood-wait rows are upgraded only after any separate ambiguous
+  acknowledgement has completed exact-byte reconciliation.
 - Deletes first record a recoverable tombstone and hide the object, then queue
   evidence-first physical cleanup for the durable worker to remove Telegram
   messages asynchronously with retry support.
@@ -342,10 +347,12 @@ session with CSRF protection.
 The bucket browser also includes active S3 transfer jobs before their final
 manifest is committed. A dedicated progress card shows completed/total parts,
 percentage, and distinct receiving, uploading, finalizing, and needs-attention
-states. At `269/269`, for example, the row says that the final manifest is being
-published instead of implying that more parts remain. Partial objects stay
-non-downloadable, and the browser refreshes this progress while the bucket
-remains open.
+states, plus a clear **Waiting for Telegram** state while a `FLOOD_WAIT` is
+being paced automatically. At `269/269`, for example, the row says that the
+final manifest is being published instead of implying that more parts remain.
+Partial objects stay non-downloadable, and the browser retains its last
+successful activity snapshot through a short activity-poll outage so an
+in-flight row does not disappear and reappear.
 
 Browser uploads use reception-only resumable sessions. A dropped connection can
 continue from the server-reported chunk offset while the 120-second reception

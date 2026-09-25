@@ -251,9 +251,18 @@ Completed in this increment:
 - Telegram sends now have durable attempt tokens and diagnostics; ambiguous
   acknowledgements are automatically reconciled by token plus exact encrypted
   bytes, and unmatched sends are safely retried after a complete history scan
+- explicit Telegram `FLOOD_WAIT` replies are classified as safe
+  pre-publication rejections, so the worker observes Telegram's pacing and
+  resumes automatically; historical flood-wait rows retain that delay even
+  when another genuinely ambiguous send must be reconciled first
+- repeated in-flight `UploadPart` calls now join their canonical durable part
+  job rather than creating duplicate Telegram uploads; only duplicates with no
+  checkpointed or ambiguous remote send can be discarded after the part commits
 - the bucket browser now merges active S3 transfer jobs into the object listing,
-  showing an accessible progress card with receiving, uploading, finalizing,
-  and needs-attention phases while the final multipart manifest is still hidden
+  showing an accessible progress card with receiving, uploading, waiting for
+  Telegram, finalizing, and needs-attention phases while the final multipart
+  manifest is still hidden; a short activity-endpoint outage retains the last
+  visible row instead of making it fade away
 - multipart completion regression coverage verifies metadata-only composition,
   cross-part range reads, retained-message cleanup safety, idempotency, and
   restart reads

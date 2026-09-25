@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.7.3-rc.3 - 2026-09-25
+
+Done jobs:
+
+- Classified Telegram `FLOOD_WAIT` as an explicit pre-publication rejection:
+  durable uploads now pause and resume automatically instead of incorrectly
+  entering acknowledgement recovery. Existing persisted flood-wait rows are
+  upgraded safely after any genuinely ambiguous send has been reconciled.
+- Serialized a transfer's Telegram sends so a failed chunk cannot cancel a
+  sibling send and leave its acknowledgement indeterminate.
+- Coalesced repeated in-flight S3 `UploadPart` requests onto the original
+  durable job and discarded only safe, never-published duplicates after the
+  canonical part commits.
+- Kept the file-browser's last successful multipart activity snapshot during a
+  transient activity-poll failure, preventing in-flight rows from fading out
+  and back in. Added a distinct automatic Telegram-pacing state.
+- Added durable recovery, fault-matrix, and browser coverage for rate limiting,
+  retry coalescing, and polling failure behavior.
+
 ## 0.7.3-rc.2 - 2026-09-25
 
 Done jobs:

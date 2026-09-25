@@ -385,6 +385,28 @@ impl MetadataStore {
             .optional()?)
         })
     }
+
+    /// Return the canonical outstanding job for a multipart part. S3 clients
+    /// legitimately resend a part after a timed-out HTTP response; attaching
+    /// that retry to the durable job prevents duplicate staging and duplicate
+    /// Telegram documents for the same part number.
+    pub(crate) fn active_multipart_part_transfer(
+        &self,
+        upload_id: Uuid,
+        part_number: u32,
+    ) -> Result<Option<TransferJob>, MetadataError> {
+        self.with_connection(|c| {
+            Ok(c.query_row(
+                &format!(
+                    "SELECT {COLUMNS} FROM multipart_jobs m JOIN transfer_jobs j ON j.id=m.job_id WHERE m.upload_id=?1 AND m.part_number=?2 AND j.state IN ('receiving','queued','retry_wait','uploading','committing','recovery_required') ORDER BY j.sequence ASC LIMIT 1"
+                ),
+                params![upload_id.to_string(), part_number],
+                row_job,
+            )
+            .optional()?)
+        })
+    }
+
     pub(crate) fn finish_part_job(
         &self,
         id: &str,
@@ -417,6 +439,18 @@ impl MetadataStore {
             let part=crate::multipart::MultipartPart {upload_id:Uuid::parse_str(upload).map_err(|e|MetadataError::InvalidManifest(e.to_string()))?,part_number:number,size:manifest.content_length,checksum:manifest.checksum.whole_object.clone(),e_tag:manifest.checksum.whole_object.clone(),telegram:manifest.telegram.clone(),manifest:Some(manifest),created_at:OffsetDateTime::now_utc()};
             tx.execute("INSERT INTO multipart_parts(upload_id,part_number,part_json,created_at) VALUES (?1,?2,?3,?4) ON CONFLICT(upload_id,part_number) DO UPDATE SET part_json=excluded.part_json,created_at=excluded.created_at",params![upload,number,serde_json::to_string(&part)?,part.created_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()])?;
             if tx.execute("UPDATE transfer_jobs SET state='completed',lease=NULL,error=NULL WHERE id=?1 AND lease=?2 AND state='committing'",params![id,lease])? != 1 {return Err(MetadataError::InvalidManifest("part lease lost".into()));}
+            // A client may have resent this part while the first HTTP response
+            // was waiting on Telegram. Once one durable job publishes it,
+            // discard safe duplicates so they cannot upload/replace it later.
+            tx.execute("UPDATE transfer_jobs SET state='superseded',lease=NULL,lease_until=0,error='Superseded by successful multipart part publication',updated_at=?4 WHERE id IN (SELECT job_id FROM multipart_jobs WHERE upload_id=?1 AND part_number=?2 AND job_id<>?3) AND state IN ('receiving','queued','retry_wait','recovery_required') AND NOT EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=transfer_jobs.id AND a.state IN ('sending','unknown','checkpointed'))",params![upload,number,id,now()])?;
+            for table in ["recovery_markers", "operation_journal", "object_manifests"] {
+                tx.execute(
+                    &format!(
+                        "DELETE FROM {table} WHERE object_id IN (SELECT j.object_id FROM multipart_jobs m JOIN transfer_jobs j ON j.id=m.job_id WHERE m.upload_id=?1 AND m.part_number=?2 AND j.id<>?3 AND j.state='superseded')"
+                    ),
+                    params![upload, number, id],
+                )?;
+            }
             tx.execute("DELETE FROM recovery_markers WHERE object_id=?1", [id])?;
             tx.execute("DELETE FROM operation_journal WHERE object_id=?1", [id])?;
             tx.execute("DELETE FROM object_manifests WHERE object_id=?1", [id])?;
@@ -734,6 +768,64 @@ impl MetadataStore {
         })
     }
 
+    /// Record an explicit Telegram rejection that is known not to have
+    /// published a document. This is intentionally separate from an unknown
+    /// acknowledgement: only the latter needs a remote token/byte scan before
+    /// it can be retried.
+    pub(crate) fn mark_send_attempt_retryable(
+        &self,
+        id: &str,
+        lease: &str,
+        order: u32,
+        attempt: &str,
+        error_kind: &str,
+        error: &str,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|c| {
+            let changed = c.execute(
+                "UPDATE transfer_send_attempts SET state='retryable',error_kind=?4,error=?5,finished_at=?6,retryable=1 WHERE job_id=?1 AND chunk_order=?2 AND attempt_id=?3 AND state='sending' AND EXISTS(SELECT 1 FROM transfer_jobs WHERE id=?1 AND lease=?7 AND state IN ('uploading','committing'))",
+                params![id, order, attempt, error_kind, error, now(), lease],
+            )?;
+            if changed != 1 {
+                return Err(MetadataError::InvalidManifest(
+                    "send attempt could not be marked retryable".into(),
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    /// Upgrade historical `FLOOD_WAIT` rows which older builds conservatively
+    /// labelled unknown. Telegram rejected those RPCs before publication, so
+    /// they can safely resume after a bounded pause without a remote scan.
+    pub(crate) fn reclassify_flood_wait_attempts(
+        &self,
+        retry_after: u64,
+    ) -> Result<usize, MetadataError> {
+        self.with_connection(|c| {
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let timestamp = now();
+            let retry_at = timestamp.saturating_add(retry_after.max(1) as i64);
+            let changed = tx.execute(
+                "UPDATE transfer_send_attempts SET state='retryable',error_kind='telegram_flood_wait',finished_at=COALESCE(finished_at,?1),retryable=1 WHERE state='unknown' AND UPPER(COALESCE(error,'')) LIKE '%FLOOD_WAIT%'",
+                [timestamp],
+            )?;
+            // Retain the pause even if another older attempt must still be
+            // reconciled first. Otherwise reconciliation could queue this job
+            // immediately and negate Telegram's requested backoff.
+            tx.execute(
+                "UPDATE transfer_jobs SET next_retry=MAX(next_retry,?1),updated_at=?2 WHERE state='recovery_required' AND EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=transfer_jobs.id AND a.state='retryable' AND a.error_kind='telegram_flood_wait')",
+                params![retry_at, timestamp],
+            )?;
+            tx.execute(
+                "UPDATE transfer_jobs SET state='retry_wait',error='Telegram rate limit detected; retry scheduled',next_retry=MAX(next_retry,?1),lease=NULL,lease_until=0,updated_at=?2 WHERE state='recovery_required' AND NOT EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=transfer_jobs.id AND a.state IN ('sending','unknown')) AND EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=transfer_jobs.id AND a.state='retryable' AND a.error_kind='telegram_flood_wait')",
+                params![retry_at, timestamp],
+            )?;
+            tx.commit()?;
+            Ok(changed)
+        })
+    }
+
     pub(crate) fn unresolved_send_attempts(
         &self,
         id: &str,
@@ -793,7 +885,7 @@ impl MetadataStore {
     pub(crate) fn queue_after_reconciliation(&self, id: &str) -> Result<bool, MetadataError> {
         self.with_connection(|c| {
             Ok(c.execute(
-                "UPDATE transfer_jobs SET state='queued',error='Automatic reconciliation completed; retry scheduled',next_retry=0,updated_at=?2 WHERE id=?1 AND state='recovery_required' AND NOT EXISTS(SELECT 1 FROM transfer_send_attempts WHERE job_id=?1 AND state IN ('sending','unknown'))",
+                "UPDATE transfer_jobs SET state=CASE WHEN EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=transfer_jobs.id AND a.state='retryable' AND a.error_kind='telegram_flood_wait') AND next_retry>?2 THEN 'retry_wait' ELSE 'queued' END,error=CASE WHEN EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=transfer_jobs.id AND a.state='retryable' AND a.error_kind='telegram_flood_wait') AND next_retry>?2 THEN 'Telegram rate limit detected; retry scheduled' ELSE 'Automatic reconciliation completed; retry scheduled' END,next_retry=CASE WHEN EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=transfer_jobs.id AND a.state='retryable' AND a.error_kind='telegram_flood_wait') AND next_retry>?2 THEN next_retry ELSE 0 END,updated_at=?2 WHERE id=?1 AND state='recovery_required' AND NOT EXISTS(SELECT 1 FROM transfer_send_attempts WHERE job_id=?1 AND state IN ('sending','unknown'))",
                 params![id, now()],
             )? == 1)
         })
@@ -995,6 +1087,158 @@ mod tests {
                 1
             )
         );
+    }
+
+    #[test]
+    fn explicit_flood_wait_is_retryable_without_remote_reconciliation() {
+        let s = store();
+        let id = s
+            .begin_transfer(Uuid::new_v4(), "test", "rate-limited.bin")
+            .unwrap();
+        s.reserve_staging(&id, 8, 8).unwrap();
+        s.queue_transfer(&id, Uuid::new_v4(), 1).unwrap();
+        let job = s.claim_transfer().unwrap().unwrap();
+        let lease = job.lease.as_deref().unwrap();
+        let attempt = s.begin_send_attempt(&id, lease, 0).unwrap();
+
+        s.mark_send_attempt_retryable(
+            &id,
+            lease,
+            0,
+            &attempt.id,
+            "telegram_flood_wait",
+            "rpc error 420: FLOOD_WAIT caused by messages.sendMedia",
+        )
+        .unwrap();
+        s.transfer_failed(&id, lease, Some(60), "Telegram rate limit detected")
+            .unwrap();
+
+        let job = s.transfer(&id).unwrap().unwrap();
+        assert_eq!(job.state, "retry_wait");
+        assert!(s.unresolved_send_attempts(&id).unwrap().is_empty());
+        let state: (String, String, i64) = s
+            .with_connection(|c| {
+                Ok(c.query_row(
+                    "SELECT state,error_kind,retryable FROM transfer_send_attempts WHERE job_id=?1",
+                    [&id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(state, ("retryable".into(), "telegram_flood_wait".into(), 1));
+    }
+
+    #[test]
+    fn legacy_flood_wait_recovery_is_rescheduled_safely() {
+        let s = store();
+        let id = s
+            .begin_transfer(Uuid::new_v4(), "test", "legacy-rate-limited.bin")
+            .unwrap();
+        s.reserve_staging(&id, 8, 8).unwrap();
+        s.queue_transfer(&id, Uuid::new_v4(), 1).unwrap();
+        let job = s.claim_transfer().unwrap().unwrap();
+        let lease = job.lease.as_deref().unwrap();
+        let attempt = s.begin_send_attempt(&id, lease, 0).unwrap();
+        s.mark_send_attempt_unknown(
+            &id,
+            lease,
+            0,
+            &attempt.id,
+            "telegram_send",
+            "rpc error 420: FLOOD_WAIT caused by messages.sendMedia",
+        )
+        .unwrap();
+        s.transfer_failed(&id, lease, Some(1), "Telegram transfer failed")
+            .unwrap();
+
+        assert_eq!(s.transfer(&id).unwrap().unwrap().state, "recovery_required");
+        assert_eq!(s.reclassify_flood_wait_attempts(60).unwrap(), 1);
+        let job = s.transfer(&id).unwrap().unwrap();
+        assert_eq!(job.state, "retry_wait");
+        assert!(job.next_retry >= now().saturating_add(59));
+        assert!(s.unresolved_send_attempts(&id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_flood_wait_pause_survives_other_attempt_reconciliation() {
+        let s = store();
+        let id = s
+            .begin_transfer(Uuid::new_v4(), "test", "legacy-rate-limit-plus-unknown.bin")
+            .unwrap();
+        s.reserve_staging(&id, 8, 8).unwrap();
+        s.queue_transfer(&id, Uuid::new_v4(), 2).unwrap();
+        let job = s.claim_transfer().unwrap().unwrap();
+        let lease = job.lease.as_deref().unwrap();
+        let flood = s.begin_send_attempt(&id, lease, 0).unwrap();
+        s.mark_send_attempt_unknown(
+            &id,
+            lease,
+            0,
+            &flood.id,
+            "telegram_send",
+            "rpc error 420: FLOOD_WAIT caused by messages.sendMedia",
+        )
+        .unwrap();
+        let ambiguous = s.begin_send_attempt(&id, lease, 1).unwrap();
+        s.mark_send_attempt_unknown(
+            &id,
+            lease,
+            1,
+            &ambiguous.id,
+            "lease_expired",
+            "Worker lease expired before Telegram acknowledgement",
+        )
+        .unwrap();
+        s.transfer_failed(&id, lease, Some(1), "Telegram transfer failed")
+            .unwrap();
+
+        assert_eq!(s.reclassify_flood_wait_attempts(60).unwrap(), 1);
+        let scheduled = s.transfer(&id).unwrap().unwrap();
+        assert_eq!(scheduled.state, "recovery_required");
+        assert!(scheduled.next_retry >= now().saturating_add(59));
+
+        let unresolved = s.unresolved_send_attempts(&id).unwrap();
+        assert_eq!(unresolved.len(), 1);
+        s.resolve_send_attempt(&unresolved[0], None, Some("not found"))
+            .unwrap();
+        assert!(s.queue_after_reconciliation(&id).unwrap());
+        let delayed = s.transfer(&id).unwrap().unwrap();
+        assert_eq!(delayed.state, "retry_wait");
+        assert!(delayed.next_retry >= now().saturating_add(59));
+    }
+
+    #[test]
+    fn multipart_part_retries_reuse_the_earliest_outstanding_job() {
+        let s = store();
+        let upload_id = Uuid::new_v4();
+        let first = s
+            .begin_transfer(Uuid::new_v4(), "test", "multipart.bin")
+            .unwrap();
+        s.with_connection(|c| {
+            c.execute(
+                "INSERT INTO multipart_jobs(job_id,upload_id,part_number,expected_checksum) VALUES (?1,?2,1,NULL)",
+                params![first, upload_id.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let second = s
+            .begin_transfer(Uuid::new_v4(), "test", "multipart.bin")
+            .unwrap();
+        s.with_connection(|c| {
+            c.execute(
+                "INSERT INTO multipart_jobs(job_id,upload_id,part_number,expected_checksum) VALUES (?1,?2,1,NULL)",
+                params![second, upload_id.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let selected = s
+            .active_multipart_part_transfer(upload_id, 1)
+            .unwrap()
+            .expect("outstanding multipart part");
+        assert_eq!(selected.id, first);
     }
 
     #[test]

@@ -798,6 +798,33 @@ impl ObjectFormatService {
             )));
         }
 
+        if let Some(existing) = self
+            .metadata
+            .active_multipart_part_transfer(upload_id, part_number)?
+        {
+            // Dokploy retries UploadPart after a timed-out response. Reuse the
+            // earliest durable job for that part rather than staging and
+            // publishing a second copy to Telegram.
+            Self::discard_duplicate_body(body).await;
+            if existing.state == "recovery_required" {
+                return Err(ObjectFormatError::InvalidPlan(existing.error.unwrap_or_else(
+                    || {
+                        "a prior multipart part needs Telegram reconciliation before it can be retried"
+                            .into()
+                    },
+                )));
+            }
+            self.wait_transfer(&existing.id).await?;
+            return self
+                .metadata
+                .get_multipart_part(upload_id, part_number)?
+                .ok_or_else(|| {
+                    ObjectFormatError::InvalidPlan(
+                        "reused multipart transfer completed without a part manifest".into(),
+                    )
+                });
+        }
+
         let job = self
             .enqueue_with_part(
                 &session.bucket,
@@ -2524,7 +2551,7 @@ impl ObjectFormatService {
                     "peer_lookup" => "storage peer lookup failed: scripted test fault",
                     "timeout" => "request timeout: scripted test fault",
                     "proxy_disconnect" => "proxy disconnected: scripted test fault",
-                    "flood_wait" => "FLOOD_WAIT_7: scripted test fault",
+                    "flood_wait" => "FLOOD_WAIT_1: scripted test fault",
                     "auth_key_unregistered" => "AUTH_KEY_UNREGISTERED: scripted test fault",
                     "missing" => "remote document was not acknowledged: scripted test fault",
                     _ => "",

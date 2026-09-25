@@ -80,6 +80,14 @@ pub fn parse_flood_wait_seconds(error: impl AsRef<str>) -> Option<u64> {
     None
 }
 
+/// A FLOOD_WAIT is an explicit RPC rejection: Telegram did not accept the
+/// request, so durable upload workers may retry it after waiting. This must not
+/// be confused with a timeout or connection loss, where delivery is unknown.
+pub fn is_flood_wait_error(error: impl AsRef<str>) -> bool {
+    let error = error.as_ref().to_ascii_uppercase();
+    error.contains("FLOOD_WAIT") || error.contains("RPC ERROR 420")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +97,15 @@ mod tests {
         assert_eq!(parse_flood_wait_seconds("FLOOD_WAIT_17"), Some(17));
         assert_eq!(parse_flood_wait_seconds("rpc error (value: 42)"), Some(42));
         assert_eq!(parse_flood_wait_seconds("no flood wait"), None);
+    }
+
+    #[test]
+    fn identifies_explicit_flood_wait_rejections() {
+        assert!(is_flood_wait_error(
+            "rpc error 420: FLOOD_WAIT caused by messages.sendMedia"
+        ));
+        assert!(is_flood_wait_error("FLOOD_WAIT_17"));
+        assert!(!is_flood_wait_error("request timeout after remote send"));
     }
 
     #[test]
