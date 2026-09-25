@@ -42,6 +42,7 @@ type MockOptions = {
   shareFailure?: boolean;
   storageFailure?: boolean;
   recoveryIssue?: Record<string, unknown>;
+  activeUpload?: boolean;
 };
 
 async function mockAdminApi(page: Page, options: MockOptions = {}) {
@@ -194,6 +195,19 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
       if (recoveryIssue) recoveryIssue = { ...recoveryIssue, acknowledged_at: null, acknowledged_by: null };
       return route.fulfill({ json: { ok: true, acknowledged_count: 0, unacknowledged_count: 1 } });
     }
+    if (path === '/multipart' && request.method() === 'GET') return route.fulfill({
+      json: {
+        uploads: options.activeUpload ? [{
+          upload_id: 'upload-active-upload',
+          bucket: 'release-test',
+          key: 'large-backup.iso',
+          state: 'uploading',
+          parts_done: 236,
+          parts_total: 282,
+          updated_at: 1_767_000_100
+        }] : []
+      }
+    });
     if (path === '/jobs' && request.method() === 'GET') return route.fulfill({ json: { jobs: [], next_offset: null } });
     if (path === '/jobs/job-upload' && request.method() === 'GET') return route.fulfill({ json: { id: 'job-upload', object_id: 'object-upload', operation_id: 'operation-upload', bucket: 'release-test', key: 'upload.txt', state: 'completed', bytes: 1, chunks_done: 1, chunks_total: 1, attempts: 1, next_retry: 0, created_at: 1_767_000_000, updated_at: 1_767_000_001 } });
     if (path === '/uploads/resumable' && request.method() === 'POST') return route.fulfill({ json: { id: 'reception-1', chunk_size: 1, received: 0 } });
@@ -217,6 +231,19 @@ async function openBucket(page: Page) {
   await page.getByRole('button', { name: /^release-test created/ }).click();
   await expect(page.getByRole('heading', { name: 'Bucket / release-test' })).toBeVisible();
 }
+
+test('bucket browser shows S3 uploads with part progress while they are in flight', async ({ page }) => {
+  await mockAdminApi(page, { activeUpload: true });
+  await signIn(page);
+  await openBucket(page);
+
+  await expect(page.getByText('large-backup.iso')).toBeVisible();
+  const uploadIcon = page.getByRole('img', { name: /Uploading to Telegram — 236 of 282 parts completed/ });
+  await expect(uploadIcon).toHaveAttribute('title', 'Uploading to Telegram — 236 of 282 parts completed');
+  await expect(page.getByText('236/282 parts')).toBeVisible();
+  await expect(page.getByText('In progress')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Download large-backup.iso' })).toHaveCount(0);
+});
 
 test('share modal uses an expiry preset, sends the correct payload, displays, and opens the public URL', async ({ page }) => {
   await mockAdminApi(page);

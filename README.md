@@ -335,6 +335,12 @@ manager for description, copy, expiry, and revoke actions. Guests see only the
 sign-in screen; every management and content API is gated behind a user-bound
 session with CSRF protection.
 
+The bucket browser also includes active S3 transfer jobs before their final
+manifest is committed. These rows are marked as in progress, show the completed
+and total part counts when available, and expose recovery-required state without
+presenting a partial object as downloadable. The browser refreshes this progress
+while the bucket remains open.
+
 Browser uploads use reception-only resumable sessions. A dropped connection can
 continue from the server-reported chunk offset while the 120-second reception
 lease remains active; the session is held in memory and is not resumable after a

@@ -17,6 +17,7 @@
     getStorageSettings,
     getSession,
     listBuckets,
+    listMultipartUploads,
     listObjects,
     listUsers,
     login,
@@ -41,6 +42,7 @@
     SessionState,
     SharedLink,
     TelegramSettings,
+    MultipartUpload,
     UserInfo
   } from './lib/types';
   import TopProgress from './components/TopProgress.svelte';
@@ -179,7 +181,13 @@
     if (window.location.pathname !== canonical) navigate(currentRoute(), { replace: true });
     void bootstrapApp();
     let disposed=false; let timer:ReturnType<typeof setTimeout>;
-    const poll=async()=>{if(session?.authenticated&&!document.hidden)await refreshOverview({silent:true});if(!disposed)timer=setTimeout(poll,10000);};
+    const poll=async()=>{
+      if(session?.authenticated&&!document.hidden){
+        await refreshOverview({silent:true});
+        if(view === 'buckets' && selectedBucket) await refreshObjects(selectedBucket, currentPrefix, {silent:true});
+      }
+      if(!disposed)timer=setTimeout(poll, view === 'buckets' && selectedBucket ? 2000 : 10000);
+    };
     timer=setTimeout(poll,10000);
     return ()=>{disposed=true;clearTimeout(timer);};
   });
@@ -490,19 +498,75 @@
     navigate({ view: 'buckets', bucket: '', prefix: '' });
   }
 
-  async function refreshObjects(bucket = selectedBucket, prefix = currentPrefix) {
+  function mergeActiveUploads(
+    nextListing: ObjectsState,
+    uploads: MultipartUpload[],
+    bucket: string,
+    prefix: string
+  ): ObjectsState {
+    const objects = new Map(nextListing.objects.map((object) => [object.key, object]));
+    const folders = new Set(nextListing.folders);
+    const activeStates = new Set(['initiated', 'uploading', 'completing', 'recovery_required']);
+
+    for (const upload of uploads) {
+      if (upload.bucket !== bucket || !activeStates.has(upload.state) || !upload.key.startsWith(prefix)) continue;
+      const relative = upload.key.slice(prefix.length);
+      if (!relative) continue;
+      const slash = relative.indexOf('/');
+      if (slash >= 0) {
+        folders.add(relative.slice(0, slash + 1));
+        continue;
+      }
+      const existing = objects.get(upload.key);
+      objects.set(upload.key, {
+        name: existing?.name ?? relative,
+        key: upload.key,
+        size: existing?.size ?? 0,
+        last_modified: new Date(upload.updated_at * 1000).toISOString(),
+        etag: existing?.etag ?? '',
+        expires_at: existing?.expires_at ?? null,
+        shared_links: existing?.shared_links ?? 0,
+        uploading: true,
+        upload_state: upload.state,
+        upload_job_id: upload.upload_id,
+        upload_parts_done: upload.parts_done,
+        upload_parts_total: upload.parts_total,
+      });
+    }
+
+    return {
+      ...nextListing,
+      folders: [...folders].sort(),
+      objects: [...objects.values()].sort((a, b) => a.name.localeCompare(b.name))
+    };
+  }
+
+  async function refreshObjects(
+    bucket = selectedBucket,
+    prefix = currentPrefix,
+    options: { silent?: boolean } = {}
+  ) {
     if (!bucket) return;
     const csrf = session?.csrf_token;
     const requestSerial = ++objectsRequestSerial;
     const routeKey = `${bucket}|${prefix}`;
-    listing = null;
+    if (!options.silent) listing = null;
     objectsError = '';
-    selectedKeys = [];
-    objectsLoading = true;
+    if (!options.silent) {
+      selectedKeys = [];
+      objectsLoading = true;
+    }
     try {
       const nextListing = await listObjects(csrf, bucket, prefix);
+      let uploads: MultipartUpload[] = [];
+      try {
+        uploads = (await listMultipartUploads(bucket, prefix, csrf)).uploads ?? [];
+      } catch {
+        // The committed object list remains useful if the transfer activity
+        // endpoint is temporarily unavailable.
+      }
       if (requestSerial === objectsRequestSerial && routeKey === `${selectedBucket}|${currentPrefix}`) {
-        listing = nextListing;
+        listing = mergeActiveUploads(nextListing, uploads, bucket, prefix);
         objectsError = '';
       }
     } catch (cause) {
@@ -511,7 +575,7 @@
         notifyError(objectsError);
       }
     } finally {
-      if (requestSerial === objectsRequestSerial) objectsLoading = false;
+      if (requestSerial === objectsRequestSerial && !options.silent) objectsLoading = false;
     }
   }
 
@@ -857,7 +921,7 @@
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'users'}
       {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} error={usersError} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={(id: string) => requestDelete({ type: 'operator', name: users.find((user) => user.id === id)?.username ?? id, key: id })} onAdd={openOperatorModal}/>{:else if routeLoadError}<LoadError title="Could not load operator accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
     {/if}

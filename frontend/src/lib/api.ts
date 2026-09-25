@@ -1,5 +1,6 @@
 import type {
   TransferJob,
+  MultipartUpload,
   BucketsState,
   ObjectsState,
   OverviewState,
@@ -523,6 +524,7 @@ export function wizardCancel(flowId?: string, csrf?: string | null) {
 
 export function getSetup(){return requestJson<{setup_required:boolean}>('/setup');}
 export function setupAccount(username:string,password:string){return requestJson<SessionState>('/setup',null,{method:'POST',body:{username,password}});}
+export function listMultipartUploads(bucket:string,prefix='',csrf?:string|null){const qp=new URLSearchParams({bucket,prefix});return requestJson<{uploads:MultipartUpload[]}>(`/multipart?${qp.toString()}`,csrf);}
 export function listJobs(offset=0){return requestJson<{jobs:TransferJob[];next_offset:number|null}>(`/jobs?offset=${offset}&limit=50`);}
 export function getJob(id:string){return requestJson<TransferJob>(`/jobs/${id}`);}
 export function jobAction(id:string,action:'retry'|'cancel',csrf?:string|null){return requestJson(`/jobs/${id}/${action}`,csrf,{method:'POST'});}

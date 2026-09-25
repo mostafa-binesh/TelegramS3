@@ -426,7 +426,7 @@ impl AdminUiState {
             return json_error(StatusCode::FORBIDDEN, "invalid csrf token");
         }
 
-        if rest == "jobs" || rest.starts_with("jobs/") {
+        if rest == "jobs" || rest.starts_with("jobs/") || rest == "multipart" {
             return self.job_api(request, rest);
         }
         if method == Method::POST && rest == "uploads" {

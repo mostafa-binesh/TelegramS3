@@ -246,6 +246,9 @@ Completed in this increment:
 - Telegram sends now have durable attempt tokens and diagnostics; ambiguous
   acknowledgements are automatically reconciled by token plus exact encrypted
   bytes, and unmatched sends are safely retried after a complete history scan
+- the bucket browser now merges active S3 transfer jobs into the object listing,
+  showing an uploading indicator and completed/total part progress while the
+  final multipart manifest is still hidden
 
 Multi-user boundary for the next increment:
 

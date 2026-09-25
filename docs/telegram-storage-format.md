@@ -213,6 +213,12 @@ job can enter the durable queue. Reception progress is held in process memory;
 staged bytes remain encrypted at rest, but a process restart ends the browser
 session and reconciliation handles the stale receiving job as recovery work.
 
+Active S3 transfer jobs are also exposed to the authenticated bucket browser.
+The UI may show a key as uploading before its manifest is committed, using the
+job's part/chunk counters and state; this is operational visibility only and does
+not add the key to the committed object index. Partial or recovery-required data
+therefore remains unavailable to download until completion or explicit repair.
+
 ## Recovery Rules
 
 - A manifest without a local commit row is not visible until reconciliation.
@@ -232,5 +238,8 @@ session and reconciliation handles the stale receiving job as recovery work.
   unavailable Telegram session, missing staging file, or byte mismatch stays
   `recovery_required` for operator review.
 - Multipart parts remain hidden until completion publishes the final manifest.
+- An active multipart key may be visible in the admin browser as an uploading
+  status row with progress, but it remains hidden from committed S3 listings and
+  download actions until completion publishes the final manifest.
 - Version IDs are derived from the stored manifest identity, so copy and delete
   marker flows can remain explicit across restarts.

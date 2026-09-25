@@ -61,6 +61,14 @@ lease, re-select the source file and start a new reception. Completed
 receptions are independent durable transfer jobs and continue through the
 normal worker/reconciliation path.
 
+The authenticated bucket browser polls those durable jobs while a bucket is open.
+An active S3 key can therefore remain visible as an uploading row with completed
+and total part counts, even though it is not yet a committed/downloadable object.
+If the row changes to `recovery_required`, preserve the Telegram payloads and
+metadata until reconciliation determines whether the acknowledgement can be
+matched exactly; do not delete the visible Telegram files just because the browser
+request was interrupted.
+
 ## Repair and Garbage Collection
 
 1. Run `telegram-s3 repair --dry-run` first to see which staged, recovery-
@@ -127,6 +135,11 @@ request will fix.
    before trying to complete the upload.
 4. If the session files are gone but the local session row remains, clean up
    the multipart metadata and retry the upload from a fresh initiate call.
+
+The bucket browser may show the session as an uploading row during these steps.
+That row is deliberately not a committed object: it provides part progress and
+recovery state, but has no download or object actions until the final manifest is
+published.
 
 ## Docker Deployment Loss
 

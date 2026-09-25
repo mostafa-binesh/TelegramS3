@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.7.3-rc.1 - 2026-09-25
+
+Done jobs:
+
+- Added active S3 multipart progress to the authenticated bucket browser.
+- Added an uploading indicator with completed/total S3 part counts and a
+  recovery-required state that keeps partial objects non-downloadable.
+- Added the authenticated multipart-progress admin API and Playwright coverage.
+- Preserved staged Telegram payloads until ambiguous acknowledgements are
+  reconciled; interrupted uploads are not silently deleted.
+
 ## 0.7.2-rc.1 - 2026-09-11
 
 Done jobs:

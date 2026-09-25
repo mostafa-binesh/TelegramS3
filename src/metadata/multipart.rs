@@ -253,6 +253,18 @@ impl MetadataStore {
         })
     }
 
+    pub fn multipart_part_progress(&self, upload_id: Uuid) -> Result<(u64, u64), MetadataError> {
+        let upload_id = upload_id.to_string();
+        self.with_connection(|connection| {
+            let (total, done): (i64, i64) = connection.query_row(
+                "SELECT COUNT(DISTINCT j.part_number), COUNT(DISTINCT CASE WHEN p.part_number IS NOT NULL THEN j.part_number END) FROM multipart_jobs j LEFT JOIN multipart_parts p ON p.upload_id=j.upload_id AND p.part_number=j.part_number WHERE j.upload_id=?1 AND j.part_number > 0",
+                [&upload_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            Ok((total.max(0) as u64, done.max(0) as u64))
+        })
+    }
+
     pub fn get_multipart_part(
         &self,
         upload_id: Uuid,

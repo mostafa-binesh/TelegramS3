@@ -240,6 +240,49 @@ impl AdminUiState {
     }
 
     pub(super) fn job_api(&self, request: Request<Incoming>, rest: &str) -> Response<Body> {
+        if rest == "multipart" && request.method() == Method::GET {
+            let params = request
+                .uri()
+                .query()
+                .map(parse_list_params)
+                .unwrap_or_default();
+            let bucket = params.get("bucket").map(String::as_str).unwrap_or_default();
+            if bucket.is_empty() {
+                return json_error(StatusCode::BAD_REQUEST, "bucket is required");
+            }
+            let prefix = params.get("prefix").map(String::as_str);
+            return match self.object_format.list_multipart_uploads(bucket, prefix) {
+                Ok(sessions) => {
+                    let mut uploads = Vec::with_capacity(sessions.len());
+                    for session in sessions {
+                        let (parts_total, parts_done) =
+                            match self.store().multipart_part_progress(session.upload_id) {
+                                Ok(progress) => progress,
+                                Err(_) => {
+                                    return json_error(
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        "multipart progress unavailable",
+                                    );
+                                }
+                            };
+                        uploads.push(serde_json::json!({
+                            "upload_id": session.upload_id,
+                            "bucket": session.bucket,
+                            "key": session.key,
+                            "state": session.state.as_str(),
+                            "parts_done": parts_done,
+                            "parts_total": parts_total,
+                            "updated_at": session.updated_at.unix_timestamp(),
+                        }));
+                    }
+                    json_response(StatusCode::OK, serde_json::json!({"uploads": uploads}))
+                }
+                Err(_) => json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "multipart store unavailable",
+                ),
+            };
+        }
         if rest == "jobs" && request.method() == Method::GET {
             let params = request
                 .uri()

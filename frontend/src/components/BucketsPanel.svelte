@@ -31,7 +31,25 @@
   export let onShare: (object: ObjectEntry) => void = () => {};
   export let onOpenShareLinks: (object: ObjectEntry) => void = () => {};
 
-  $: allVisibleSelected = selectedKeys.length > 0 && selectedKeys.length === (listing?.objects.length ?? 0);
+  $: selectableObjects = listing?.objects.filter((object) => !object.uploading) ?? [];
+  $: allVisibleSelected = selectedKeys.length > 0 && selectedKeys.length === selectableObjects.length;
+
+  function uploadTitle(object: ObjectEntry) {
+    const done = object.upload_parts_done ?? 0;
+    const total = object.upload_parts_total ?? 0;
+    const state = object.upload_state === 'recovery_required'
+      ? 'Upload interrupted; open Transfers to reconcile it'
+      : object.upload_state === 'receiving'
+        ? 'Receiving upload from S3'
+        : 'Uploading to Telegram';
+    return total > 0 ? `${state} — ${done} of ${total} parts completed` : `${state} — part total will appear when reception finishes`;
+  }
+
+  function uploadState(object: ObjectEntry) {
+    if (object.upload_state === 'recovery_required') return 'interrupted';
+    if (object.upload_state === 'receiving') return 'receiving from S3';
+    return 'uploading';
+  }
 </script>
 
 <section class="card surface">
@@ -54,7 +72,7 @@
     {:else if listing && listing.folders.length === 0 && listing.objects.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">↑</span>This folder is empty. Drop files above to upload the first one.</p>
     {:else}<div class="table-scroll"><table class="kv-table"><colgroup><col class="selection-column"/><col class="name-column"/><col class="size-column"/><col class="modified-column"/><col class="actions-column"/></colgroup><thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={allVisibleSelected} on:change={onToggleAll}/></th><th>Name</th><th>Size</th><th>Modified</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
       {#each listing?.folders ?? [] as folder (folder)}<tr><td></td><td><button class="btn-link" on:click={() => onEnterFolder(folder)}>{folder}/</button></td><td class="muted">folder</td><td class="muted">—</td><td class="row-actions"><ActionIcon name="trash" label={`Delete folder ${folder}`} tone="danger" on:click={() => onRemoveKey(folder)} disabled={busy}/></td></tr>{/each}
-      {#each listing?.objects ?? [] as obj (obj.key)}<tr><td><input class="select-all" type="checkbox" checked={selectedKeys.includes(obj.key)} on:change={() => onToggleKey(obj.key)} aria-label={`Select ${obj.name}`}/></td><td>{obj.name}{#if obj.expires_at}<small class="expiry-note">expires {formatTimestamp(obj.expires_at)}</small>{/if}</td><td>{formatBytes(obj.size)}</td><td>{formatTimestamp(obj.last_modified)}</td><td class="row-actions"><ActionIcon name="download" label={`Download ${obj.name}`} href={contentUrl(selectedBucket, obj.key)}/><ActionIcon name="share" label={`Share ${obj.name}`} on:click={() => onShare(obj)} disabled={busy}/><ActionIcon name="links" badge={obj.shared_links} label={`Manage shared links for ${obj.name}`} on:click={() => onOpenShareLinks(obj)} disabled={busy}/><ActionIcon name="trash" label={`Delete ${obj.name}`} tone="danger" on:click={() => onRemoveKey(obj)} disabled={busy}/></td></tr>{/each}
+      {#each listing?.objects ?? [] as obj (obj.key)}<tr class:uploading-row={obj.uploading}><td>{#if obj.uploading}<span class:interrupted={obj.upload_state === 'recovery_required'} class="uploading-icon" role="img" aria-label={uploadTitle(obj)} title={uploadTitle(obj)}>↑</span>{:else}<input class="select-all" type="checkbox" checked={selectedKeys.includes(obj.key)} on:change={() => onToggleKey(obj.key)} aria-label={`Select ${obj.name}`}/>{/if}</td><td><span class="object-name">{obj.name}</span>{#if obj.uploading}<small class="upload-note">{uploadState(obj)}{#if obj.upload_parts_total} · {obj.upload_parts_done ?? 0}/{obj.upload_parts_total} parts{:else} · preparing parts{/if}</small>{:else if obj.expires_at}<small class="expiry-note">expires {formatTimestamp(obj.expires_at)}</small>{/if}</td><td>{#if obj.uploading}<span class="upload-size">S3 multipart</span>{:else}{formatBytes(obj.size)}{/if}</td><td>{#if obj.uploading}<span class="upload-state">{uploadState(obj)}</span>{:else}{formatTimestamp(obj.last_modified)}{/if}</td><td class="row-actions">{#if obj.uploading}<span class="uploading-actions" title={uploadTitle(obj)}>In progress</span>{:else}<ActionIcon name="download" label={`Download ${obj.name}`} href={contentUrl(selectedBucket, obj.key)}/><ActionIcon name="share" label={`Share ${obj.name}`} on:click={() => onShare(obj)} disabled={busy}/><ActionIcon name="links" badge={obj.shared_links} label={`Manage shared links for ${obj.name}`} on:click={() => onOpenShareLinks(obj)} disabled={busy}/><ActionIcon name="trash" label={`Delete ${obj.name}`} tone="danger" on:click={() => onRemoveKey(obj)} disabled={busy}/>{/if}</td></tr>{/each}
     </tbody></table></div>{/if}
     {#if selectedKeys.length}<div class="selection-bar"><strong>{selectedKeys.length} selected</strong><button class="ghost" on:click={onRemoveSelected}>Delete</button><button class="ghost" on:click={onOpenMove}>→ Move</button></div>{/if}
   {/if}
@@ -73,5 +91,14 @@
   .kv-table th:nth-child(2), .kv-table td:nth-child(2) { overflow-wrap: anywhere; }
   .row-actions { justify-content: flex-end; }
   .row-actions :global(.action-icon) { flex: 0 0 38px; }
+  .uploading-row { background: linear-gradient(90deg, rgba(229,244,255,.72), rgba(255,255,255,.35)); }
+  .uploading-icon { display: inline-grid; place-items: center; width: 28px; height: 28px; border: 1px solid #9acbe8; border-radius: 9px; background: #eaf7ff; color: #2178ad; font-weight: 900; cursor: help; animation: upload-pulse 1.6s ease-in-out infinite; }
+  .uploading-icon.interrupted { border-color: #edc27c; background: #fff6e5; color: #a66a0b; animation: none; }
+  .object-name { overflow-wrap: anywhere; }
+  .upload-note, .upload-state { color: #2178ad; font-size: .75rem; }
+  .uploading-row .upload-note { font-weight: 700; }
+  .upload-size { color: #536f84; font-variant-numeric: tabular-nums; }
+  .uploading-actions { color: #2178ad; font-size: .75rem; font-weight: 800; cursor: help; }
+  @keyframes upload-pulse { 50% { transform: translateY(-2px); box-shadow: 0 0 0 4px rgba(33,120,173,.10); } }
   .visually-hidden { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
 </style>

@@ -31,6 +31,14 @@ export interface ObjectEntry {
   etag: string;
   expires_at?: string | null;
   shared_links: number;
+  /** True when this row represents a durable upload that is not committed yet. */
+  uploading?: boolean;
+  upload_state?: string;
+  upload_job_id?: string;
+  upload_bytes?: number;
+  upload_parts_done?: number;
+  upload_parts_total?: number;
+  upload_error?: string | null;
 }
 
 export interface SharedLink {
@@ -170,4 +178,9 @@ export interface TransferJob {
   id:string; object_id:string; operation_id:string|null; bucket:string; key:string; state:string;
   bytes:number; chunks_done:number; chunks_total:number; attempts:number; next_retry:number;
   error:string|null; created_at:number; updated_at:number;
+}
+
+export interface MultipartUpload {
+  upload_id: string; bucket: string; key: string; state: string;
+  parts_done: number; parts_total: number; updated_at: number;
 }

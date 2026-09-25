@@ -62,6 +62,10 @@ features, so they are documented separately.
   as the S3 data plane: uploads are
   `POST /_admin/api/objects/content?bucket&key`, downloads are
   `GET`/`HEAD` with an optional `Range` (`206`/`Content-Range`).
+- The bucket browser also reads active transfer jobs for the selected bucket and
+  prefix. An S3 multipart key appears as an in-progress row while its final
+  manifest is being committed, with an uploading indicator and completed/total
+  part progress; recovery-required rows remain non-downloadable until repaired.
 - The operator UI hosts an in-browser **Telegram account wizard**
   (`/telegram/wizard/{state,begin,submit-code,submit-password,cancel}`) that
   configures API credentials, storage chat, and network settings before driving
