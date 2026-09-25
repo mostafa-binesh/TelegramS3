@@ -3,6 +3,7 @@ use crate::manifest::TelegramLocation;
 use crate::metadata::{DbUser, MetadataError, MetadataStore};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -126,6 +127,14 @@ pub(crate) fn enqueue_part_cleanup(
     tx: &rusqlite::Transaction<'_>,
     part: &crate::multipart::MultipartPart,
 ) -> Result<(), MetadataError> {
+    enqueue_part_cleanup_preserving(tx, part, &HashSet::new())
+}
+
+pub(crate) fn enqueue_part_cleanup_preserving(
+    tx: &rusqlite::Transaction<'_>,
+    part: &crate::multipart::MultipartPart,
+    retained_chunks: &HashSet<(String, i64)>,
+) -> Result<(), MetadataError> {
     let connection_id = active_connection_id(tx)?;
     let cleanup_object_id = part
         .manifest
@@ -138,11 +147,19 @@ pub(crate) fn enqueue_part_cleanup(
     )?;
     let mut locations = vec![part.telegram.clone()];
     if let Some(m) = &part.manifest {
-        locations.extend(m.chunks.iter().map(|c| TelegramLocation {
-            peer_id: c.telegram_peer_id.clone(),
-            message_id: c.telegram_message_id,
-            document_id: c.telegram_document_id.clone(),
-        }));
+        locations.extend(
+            m.chunks
+                .iter()
+                .filter(|chunk| {
+                    !retained_chunks
+                        .contains(&(chunk.telegram_peer_id.clone(), chunk.telegram_message_id))
+                })
+                .map(|c| TelegramLocation {
+                    peer_id: c.telegram_peer_id.clone(),
+                    message_id: c.telegram_message_id,
+                    document_id: c.telegram_document_id.clone(),
+                }),
+        );
     }
     for l in locations {
         tx.execute("INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,?4,'message',?5)",params![cleanup_object_id,connection_id,l.peer_id,l.message_id,now()+crate::object_format::GARBAGE_COLLECTION_RETENTION_SECONDS])?;
@@ -591,7 +608,7 @@ impl MetadataStore {
                 [now()],
             )?;
             tx.execute(
-                "UPDATE transfer_jobs SET state='cancelled',lease=NULL,lease_until=0,error='Multipart session closed before transfer publication' WHERE id IN (SELECT p.job_id FROM multipart_jobs p JOIN multipart_uploads u ON u.upload_id=p.upload_id WHERE u.state NOT IN ('initiated','uploading')) AND state IN ('queued','retry_wait','recovery_required')",
+                "UPDATE transfer_jobs SET state='cancelled',lease=NULL,lease_until=0,error='Multipart session closed before transfer publication' WHERE id IN (SELECT p.job_id FROM multipart_jobs p JOIN multipart_uploads u ON u.upload_id=p.upload_id WHERE (p.part_number=0 AND u.state NOT IN ('initiated','uploading','completing')) OR (p.part_number>0 AND u.state NOT IN ('initiated','uploading'))) AND state IN ('queued','retry_wait','recovery_required')",
                 [],
             )?;
             // Defensive migration rule for older draft data: an older retry can

@@ -1,7 +1,10 @@
 mod reception;
 mod workflow;
 use crate::config::AppConfig;
-use crate::manifest::{ChunkRef, CommitState, ObjectChecksum, ObjectManifest, TelegramLocation};
+use crate::manifest::{
+    ChunkRef, CommitState, MANIFEST_SCHEMA_VERSION, ObjectChecksum, ObjectManifest,
+    TelegramLocation,
+};
 use crate::metadata::{
     BucketRecord, JournalEntry, MetadataError, MetadataStatus, MetadataStore, OperationKind,
 };
@@ -14,7 +17,7 @@ use grammers_client::media::Media;
 use grammers_client::message::InputMessage;
 use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
-use s3s::{Body, dto::StreamingBlob};
+use s3s::dto::StreamingBlob;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
@@ -32,6 +35,7 @@ use uuid::Uuid;
 pub(crate) type RecoverySnapshot = (Option<i64>, Vec<RecoveryIssue>, Option<String>);
 
 const CHECKSUM_ALGORITHM: &str = "sha256";
+const MULTIPART_CHECKSUM_ALGORITHM: &str = "sha256-parts-v1";
 const ENCRYPTION_FORMAT: &str = "chacha20poly1305-v1";
 /// Local tombstones and orphaned cleanup material are retained for one day
 /// before irreversible garbage collection becomes eligible.
@@ -783,7 +787,11 @@ impl ObjectFormatService {
             })?;
         if matches!(
             session.state,
-            MultipartState::Aborted | MultipartState::Completed | MultipartState::Quarantined
+            MultipartState::Completing
+                | MultipartState::Aborted
+                | MultipartState::Completed
+                | MultipartState::Quarantined
+                | MultipartState::RecoveryRequired
         ) {
             return Err(ObjectFormatError::InvalidPlan(format!(
                 "multipart upload is not active: {upload_id}"
@@ -856,6 +864,17 @@ impl ObjectFormatService {
                     )
                 });
         }
+        if session.state == MultipartState::Completing {
+            let job_id = self
+                .metadata
+                .multipart_completion_job(plan.upload_id)?
+                .ok_or_else(|| {
+                    ObjectFormatError::InvalidPlan(
+                        "multipart completion job is missing; recovery is required".into(),
+                    )
+                })?;
+            return self.wait_transfer(&job_id).await;
+        }
         if matches!(
             session.state,
             MultipartState::Aborted
@@ -879,8 +898,30 @@ impl ObjectFormatService {
             ));
         }
 
-        let mut sources = Vec::new();
+        if plan.object_id != plan.upload_id {
+            return Err(ObjectFormatError::InvalidPlan(
+                "multipart completion object id must match the upload id".to_string(),
+            ));
+        }
+        if plan.checksum_algorithm != session.checksum_algorithm {
+            return Err(ObjectFormatError::InvalidPlan(
+                "multipart checksum algorithm changed during completion".to_string(),
+            ));
+        }
+
+        let mut chunks = Vec::new();
+        let mut offset = 0_u64;
+        let mut previous_part_number = 0_u32;
+        let mut encryption = None;
+        let mut composite_hasher = Sha256::new();
+        composite_hasher.update(b"telegram-s3-multipart-sha256-v1\0");
         for part_plan in &plan.parts {
+            if part_plan.part_number <= previous_part_number {
+                return Err(ObjectFormatError::InvalidPlan(
+                    "multipart parts must be unique and ordered by part number".to_string(),
+                ));
+            }
+            previous_part_number = part_plan.part_number;
             let stored = stored_parts_by_number
                 .get(&part_plan.part_number)
                 .ok_or_else(|| ObjectFormatError::InvalidPlan("missing multipart part".into()))?;
@@ -898,29 +939,145 @@ impl ObjectFormatService {
                     "legacy multipart framing requires recovery or source re-upload".into(),
                 ));
             };
-            sources.push(manifest);
+            manifest
+                .validate()
+                .map_err(ObjectFormatError::InvalidPlan)?;
+            if stored.size != part_plan.size
+                || manifest.content_length != stored.size
+                || stored.checksum != part_plan.checksum
+                || manifest.checksum.whole_object != stored.checksum
+            {
+                return Err(ObjectFormatError::InvalidPlan(
+                    "multipart part metadata changed during completion".to_string(),
+                ));
+            }
+            if let Some(expected) = &encryption {
+                if expected != &manifest.encryption {
+                    return Err(ObjectFormatError::InvalidPlan(
+                        "multipart parts use incompatible encryption metadata".to_string(),
+                    ));
+                }
+            } else {
+                encryption = Some(manifest.encryption.clone());
+            }
+
+            composite_hasher.update(part_plan.part_number.to_be_bytes());
+            composite_hasher.update(stored.size.to_be_bytes());
+            update_checksum_component(&mut composite_hasher, &manifest.checksum.algorithm);
+            update_checksum_component(&mut composite_hasher, &manifest.checksum.whole_object);
+
+            for source_chunk in &manifest.chunks {
+                if source_chunk.telegram_peer_id.trim().is_empty()
+                    || source_chunk.telegram_message_id <= 0
+                {
+                    return Err(ObjectFormatError::InvalidPlan(format!(
+                        "multipart part {} has an unpublished chunk",
+                        part_plan.part_number
+                    )));
+                }
+                let order = u32::try_from(chunks.len()).map_err(|_| {
+                    ObjectFormatError::InvalidPlan(
+                        "multipart object contains too many chunks".to_string(),
+                    )
+                })?;
+                let (source_object_id, source_chunk_order) =
+                    source_chunk.payload_identity(manifest.object_id);
+                chunks.push(ChunkRef {
+                    order,
+                    offset,
+                    size: source_chunk.size,
+                    checksum: source_chunk.checksum.clone(),
+                    telegram_peer_id: source_chunk.telegram_peer_id.clone(),
+                    telegram_message_id: source_chunk.telegram_message_id,
+                    telegram_document_id: source_chunk.telegram_document_id.clone(),
+                    source_object_id: Some(source_object_id),
+                    source_chunk_order: Some(source_chunk_order),
+                });
+                offset = offset.checked_add(source_chunk.size).ok_or_else(|| {
+                    ObjectFormatError::InvalidPlan("multipart content length overflow".to_string())
+                })?;
+            }
         }
-        let service = Arc::new(self.clone());
-        let stream = futures::stream::iter(sources).flat_map(move |manifest| {
-            let spans = Self::plan_read(&manifest, 0..manifest.content_length)
-                .expect("validated part spans");
-            Self::read_spans_to_stream(Arc::clone(&service), &manifest, spans.chunks)
-        });
-        let body: StreamingBlob = Body::http_body_unsync(http_body_util::StreamBody::new(
-            stream.map(|chunk| chunk.map(hyper::body::Frame::data)),
-        ))
-        .into();
-        let job = self
-            .enqueue_with_part(
-                &plan.bucket,
-                &plan.key,
-                &plan.content_type,
-                Some(body),
-                Some((plan.upload_id, 0, None)),
-                None,
-                session.expires_at,
-            )
-            .await?;
+
+        if offset != plan.content_length {
+            return Err(ObjectFormatError::InvalidPlan(format!(
+                "multipart content length mismatch: expected {}, composed {}",
+                plan.content_length, offset
+            )));
+        }
+
+        let manifest = ObjectManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            commit_state: CommitState::Staging,
+            object_id: plan.object_id,
+            bucket: plan.bucket.clone(),
+            key: plan.key.clone(),
+            version_id: Some(plan.object_id.to_string()),
+            content_length: offset,
+            content_type: plan.content_type.clone(),
+            user_metadata: BTreeMap::new(),
+            tags: BTreeMap::new(),
+            created_at: OffsetDateTime::now_utc(),
+            expires_at: session.expires_at,
+            checksum: ObjectChecksum {
+                algorithm: MULTIPART_CHECKSUM_ALGORITHM.to_string(),
+                whole_object: hex::encode(composite_hasher.finalize()),
+            },
+            encryption: encryption.ok_or_else(|| {
+                ObjectFormatError::InvalidPlan(
+                    "multipart completion has no encryption metadata".to_string(),
+                )
+            })?,
+            telegram: TelegramLocation {
+                peer_id: self.storage_chat_id()?,
+                message_id: 0,
+                document_id: Some(format!("local:{}:manifest", plan.object_id)),
+            },
+            chunks,
+        };
+        manifest
+            .validate()
+            .map_err(ObjectFormatError::InvalidPlan)?;
+
+        let job_id = self
+            .metadata
+            .begin_transfer(plan.object_id, &plan.bucket, &plan.key)?;
+        let staging_dir = self.staging_dir(plan.object_id);
+        let queued = (|| -> Result<crate::durable::TransferJob, ObjectFormatError> {
+            fs::create_dir_all(&staging_dir)?;
+            let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+            self.metadata.reserve_staging(
+                &job_id,
+                manifest_bytes.len() as u64,
+                self.staging_budget,
+            )?;
+            write_json_file(&staging_dir.join(MANIFEST_FILE_NAME), &manifest)?;
+            let operation = self
+                .metadata
+                .stage_manifest(OperationKind::Put, manifest.clone())?;
+            self.metadata
+                .queue_multipart_completion(&job_id, operation, plan.upload_id)?;
+            self.metadata.transfer(&job_id)?.ok_or_else(|| {
+                ObjectFormatError::InvalidPlan("queued multipart completion missing".into())
+            })
+        })();
+        let job = match queued {
+            Ok(job) => job,
+            Err(error) => {
+                let removed = match fs::remove_dir_all(&staging_dir) {
+                    Ok(()) => true,
+                    Err(io_error) if io_error.kind() == io::ErrorKind::NotFound => true,
+                    Err(_) => false,
+                };
+                let _ = self.metadata.fail_reception(
+                    &job_id,
+                    removed,
+                    "Multipart completion could not be durably queued",
+                );
+                return Err(error);
+            }
+        };
+        self.ensure_workers();
         self.wait_transfer(&job.id).await
     }
 
@@ -1258,6 +1415,8 @@ impl ObjectFormatService {
                 telegram_peer_id: self.storage_chat_id()?,
                 telegram_message_id: i64::from(order) + 1,
                 telegram_document_id: Some(format!("local:{object_id}:{order}")),
+                source_object_id: None,
+                source_chunk_order: None,
             });
             chunk_plan.content_length =
                 chunk_plan.content_length.checked_add(size).ok_or_else(|| {
@@ -1403,7 +1562,8 @@ impl ObjectFormatService {
             })?;
             let ciphertext = self.download_message_bytes(message_id).await?;
             let plaintext = if manifest.encryption.enabled {
-                self.decrypt_chunk(manifest.object_id, chunk.order, &ciphertext)?
+                let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
+                self.decrypt_chunk(source_object_id, source_order, &ciphertext)?
             } else {
                 ciphertext
             };
@@ -1747,7 +1907,9 @@ impl ObjectFormatService {
                     }
                 };
                 let plaintext = if manifest.encryption.enabled {
-                    match object_format.decrypt_chunk(manifest.object_id, span.order, &ciphertext) {
+                    let (source_object_id, source_order) =
+                        chunk.payload_identity(manifest.object_id);
+                    match object_format.decrypt_chunk(source_object_id, source_order, &ciphertext) {
                         Ok(value) => value,
                         Err(error) => {
                             return Some((
@@ -1867,7 +2029,8 @@ impl ObjectFormatService {
             })?;
             let bytes = self.download_message_bytes(message_id).await?;
             let plaintext = if manifest.encryption.enabled {
-                self.decrypt_chunk(manifest.object_id, chunk.order, &bytes)?
+                let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
+                self.decrypt_chunk(source_object_id, source_order, &bytes)?
             } else {
                 bytes
             };
@@ -1892,6 +2055,12 @@ impl ObjectFormatService {
             return Ok(false);
         }
         for chunk in &manifest.chunks {
+            if chunk.references_remote_payload() {
+                if chunk.telegram_peer_id.trim().is_empty() || chunk.telegram_message_id <= 0 {
+                    return Ok(false);
+                }
+                continue;
+            }
             let path = staging_dir.join(chunk_file_name(chunk.order));
             if !path.exists() {
                 return Ok(false);
@@ -1900,7 +2069,8 @@ impl ObjectFormatService {
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)?;
             let plaintext = if manifest.encryption.enabled {
-                self.decrypt_chunk(manifest.object_id, chunk.order, &bytes)?
+                let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
+                self.decrypt_chunk(source_object_id, source_order, &bytes)?
             } else {
                 bytes
             };
@@ -1979,6 +2149,9 @@ impl ObjectFormatService {
         }
 
         for chunk in &manifest.chunks {
+            if chunk.references_remote_payload() {
+                continue;
+            }
             let path = staging_dir.join(chunk_file_name(chunk.order));
             if !path.exists() {
                 missing_details.push(format!(
@@ -1990,7 +2163,8 @@ impl ObjectFormatService {
             }
             let bytes = fs::read(&path)?;
             let plaintext = if manifest.encryption.enabled {
-                match self.decrypt_chunk(manifest.object_id, chunk.order, &bytes) {
+                let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
+                match self.decrypt_chunk(source_object_id, source_order, &bytes) {
                     Ok(value) => value,
                     Err(error) => {
                         corrupted_details.push(format!(
@@ -2097,7 +2271,8 @@ impl ObjectFormatService {
             };
 
             let plaintext = if manifest.encryption.enabled {
-                match self.decrypt_chunk(manifest.object_id, chunk.order, &ciphertext) {
+                let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
+                match self.decrypt_chunk(source_object_id, source_order, &ciphertext) {
                     Ok(value) => value,
                     Err(error) => {
                         corrupted_details.push(format!(
@@ -2302,7 +2477,7 @@ impl ObjectFormatService {
 
     fn new_manifest(&self, args: ManifestBuildArgs) -> ObjectManifest {
         ObjectManifest {
-            schema_version: 1,
+            schema_version: MANIFEST_SCHEMA_VERSION,
             commit_state: args.commit_state,
             object_id: args.object_id,
             bucket: args.bucket,
@@ -2544,6 +2719,15 @@ fn verify_staged_chunks(
     encryption: &ObjectEncryption,
 ) -> Result<(), ObjectFormatError> {
     for chunk in &manifest.chunks {
+        if chunk.references_remote_payload() {
+            if chunk.telegram_peer_id.trim().is_empty() || chunk.telegram_message_id <= 0 {
+                return Err(ObjectFormatError::InvalidPlan(format!(
+                    "composed chunk {} has no durable Telegram location",
+                    chunk.order
+                )));
+            }
+            continue;
+        }
         let path = staging_dir.join(chunk_file_name(chunk.order));
         if !path.exists() {
             return Err(ObjectFormatError::MissingChunk {
@@ -2555,7 +2739,8 @@ fn verify_staged_chunks(
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         let plaintext = if manifest.encryption.enabled {
-            encryption.decrypt_chunk(manifest.object_id, chunk.order, &bytes)?
+            let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
+            encryption.decrypt_chunk(source_object_id, source_order, &bytes)?
         } else {
             bytes
         };
@@ -2608,6 +2793,11 @@ fn write_json_file(path: &Path, value: &ObjectManifest) -> Result<(), ObjectForm
 pub fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
     let digest = Sha256::digest(bytes.as_ref());
     hex::encode(digest)
+}
+
+fn update_checksum_component(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
 }
 
 pub fn parse_checksum_hex(value: &str) -> Result<Vec<u8>, ObjectFormatError> {
@@ -2826,17 +3016,60 @@ mod tests {
         let upload = service
             .initiate_multipart_upload("bucket", "multipart.txt", "text/plain", Some("sha256"))
             .expect("initiate multipart");
-        let part = service
+        let first_payload = b"hello ";
+        let second_payload = b"multipart world";
+        let first = service
             .upload_multipart_part(
                 upload.upload_id,
                 1,
                 Some(s3s::dto::StreamingBlob::from_bytes(Bytes::from_static(
-                    b"hello multipart",
+                    first_payload,
                 ))),
                 None,
             )
             .await
-            .expect("upload part");
+            .expect("upload first part");
+        let second = service
+            .upload_multipart_part(
+                upload.upload_id,
+                2,
+                Some(s3s::dto::StreamingBlob::from_bytes(Bytes::from_static(
+                    second_payload,
+                ))),
+                None,
+            )
+            .await
+            .expect("upload second part");
+        let abandoned_job = service
+            .metadata
+            .begin_transfer(Uuid::new_v4(), &upload.bucket, &upload.key)
+            .expect("create abandoned pre-composition completion");
+        service
+            .metadata
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO multipart_jobs(job_id,upload_id,part_number,expected_checksum) VALUES (?1,?2,0,NULL)",
+                    rusqlite::params![abandoned_job, upload.upload_id.to_string()],
+                )?;
+                Ok(())
+            })
+            .expect("map abandoned completion job");
+        assert_eq!(
+            service
+                .metadata
+                .multipart_activity_state(upload.upload_id)
+                .expect("derive finalizing state")
+                .as_deref(),
+            Some("completing")
+        );
+        let remote_dir = tempdir.path().join("data/mock-telegram");
+        let remote_files_before = fs::read_dir(&remote_dir)
+            .expect("mock Telegram directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("bin")
+            })
+            .count();
         let plan = MultipartCompletionPlan {
             upload_id: upload.upload_id,
             object_id: upload.upload_id,
@@ -2844,14 +3077,23 @@ mod tests {
             key: upload.key.clone(),
             content_type: upload.content_type.clone(),
             checksum_algorithm: upload.checksum_algorithm.clone(),
-            content_length: part.size,
-            parts: vec![MultipartPartPlan {
-                part_number: 1,
-                offset: 0,
-                size: part.size,
-                checksum: part.e_tag.clone(),
-                e_tag: part.e_tag.clone(),
-            }],
+            content_length: first.size + second.size,
+            parts: vec![
+                MultipartPartPlan {
+                    part_number: 1,
+                    offset: 0,
+                    size: first.size,
+                    checksum: first.checksum.clone(),
+                    e_tag: first.e_tag.clone(),
+                },
+                MultipartPartPlan {
+                    part_number: 2,
+                    offset: first.size,
+                    size: second.size,
+                    checksum: second.checksum.clone(),
+                    e_tag: second.e_tag.clone(),
+                },
+            ],
         };
 
         let completed = service
@@ -2863,9 +3105,119 @@ mod tests {
             .await
             .expect("repeat complete");
         assert_eq!(completed.object_id, repeat.object_id);
+        let abandoned = service
+            .metadata
+            .transfer(&abandoned_job)
+            .expect("inspect abandoned completion")
+            .expect("abandoned completion job");
+        assert!(matches!(abandoned.state.as_str(), "superseded" | "cleaned"));
+        assert_eq!(
+            abandoned.error.as_deref(),
+            Some("Superseded by metadata-only multipart completion")
+        );
+        assert_eq!(completed.schema_version, MANIFEST_SCHEMA_VERSION);
+        assert_eq!(completed.checksum.algorithm, MULTIPART_CHECKSUM_ALGORITHM);
         assert_eq!(
             completed.checksum.whole_object,
             repeat.checksum.whole_object
+        );
+        assert!(
+            completed
+                .chunks
+                .iter()
+                .all(ChunkRef::references_remote_payload)
+        );
+        let source_chunks = first
+            .manifest
+            .as_ref()
+            .expect("first manifest")
+            .chunks
+            .iter()
+            .chain(
+                second
+                    .manifest
+                    .as_ref()
+                    .expect("second manifest")
+                    .chunks
+                    .iter(),
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(completed.chunks.len(), source_chunks.len());
+        for (composed, source) in completed.chunks.iter().zip(source_chunks) {
+            assert_eq!(
+                composed.payload_identity(completed.object_id),
+                source.payload_identity(if composed.offset < first.size {
+                    first.manifest.as_ref().expect("first manifest").object_id
+                } else {
+                    second.manifest.as_ref().expect("second manifest").object_id
+                })
+            );
+            assert_eq!(composed.telegram_message_id, source.telegram_message_id);
+        }
+        let remote_files_after = fs::read_dir(&remote_dir)
+            .expect("mock Telegram directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("bin")
+            })
+            .count();
+        assert_eq!(
+            remote_files_after,
+            remote_files_before + 1,
+            "completion should upload only the final manifest"
+        );
+        let expected = [first_payload.as_slice(), second_payload.as_slice()].concat();
+        assert_eq!(
+            service
+                .read_bytes("bucket", "multipart.txt", 0..expected.len() as u64)
+                .await
+                .expect("read composed multipart object"),
+            expected
+        );
+        assert_eq!(
+            service
+                .read_bytes("bucket", "multipart.txt", 4..12)
+                .await
+                .expect("read across part boundary"),
+            b"o multip"
+        );
+
+        for retained in &completed.chunks {
+            let cleanup_count: i64 = service
+                .metadata
+                .with_connection(|connection| {
+                    Ok(connection.query_row(
+                        "SELECT COUNT(*) FROM cleanup_targets WHERE peer_id=?1 AND message_id=?2",
+                        rusqlite::params![retained.telegram_peer_id, retained.telegram_message_id],
+                        |row| row.get(0),
+                    )?)
+                })
+                .expect("inspect retained cleanup targets");
+            assert_eq!(cleanup_count, 0, "retained chunks must not be deleted");
+        }
+        for part_manifest in [&first.telegram, &second.telegram] {
+            let cleanup_count: i64 = service
+                .metadata
+                .with_connection(|connection| {
+                    Ok(connection.query_row(
+                        "SELECT COUNT(*) FROM cleanup_targets WHERE peer_id=?1 AND message_id=?2",
+                        rusqlite::params![part_manifest.peer_id, part_manifest.message_id],
+                        |row| row.get(0),
+                    )?)
+                })
+                .expect("inspect part manifest cleanup target");
+            assert_eq!(cleanup_count, 1, "part manifests should be reclaimed");
+        }
+
+        service.shutdown_workers().await;
+        drop(service);
+        let service = sample_service(&tempdir).await;
+        assert_eq!(
+            service
+                .read_bytes("bucket", "multipart.txt", 0..expected.len() as u64)
+                .await
+                .expect("read composed object after restart"),
+            expected
         );
 
         let aborted = service

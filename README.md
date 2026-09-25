@@ -122,6 +122,10 @@ A full request-lifecycle and consistency walkthrough is in
 - Uploads write to staging, verify every chunk checksum, publish the chunk
   payloads to Telegram, then commit the manifest and local index **atomically**
   — readers never see a partial object.
+- Multipart completion composes the already-published part chunks into a schema
+  v2 manifest and uploads only that final manifest. Per-chunk payload provenance
+  preserves the original encryption identity, so a large completion does not
+  download and re-upload the whole object.
 - Every Telegram send has a durable attempt token and outcome. If a timeout or
   restart leaves the acknowledgement ambiguous, the worker scans recent
   Telegram documents for that token and repairs the checkpoint only after an
@@ -336,10 +340,12 @@ sign-in screen; every management and content API is gated behind a user-bound
 session with CSRF protection.
 
 The bucket browser also includes active S3 transfer jobs before their final
-manifest is committed. These rows are marked as in progress, show the completed
-and total part counts when available, and expose recovery-required state without
-presenting a partial object as downloadable. The browser refreshes this progress
-while the bucket remains open.
+manifest is committed. A dedicated progress card shows completed/total parts,
+percentage, and distinct receiving, uploading, finalizing, and needs-attention
+states. At `269/269`, for example, the row says that the final manifest is being
+published instead of implying that more parts remain. Partial objects stay
+non-downloadable, and the browser refreshes this progress while the bucket
+remains open.
 
 Browser uploads use reception-only resumable sessions. A dropped connection can
 continue from the server-reported chunk offset while the 120-second reception

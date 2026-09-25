@@ -80,6 +80,11 @@ Completed work:
 
 - multipart sessions and parts now persist in the local metadata store
 - multipart initiate, upload-part, upload-part-copy, complete, abort, and list flows are wired through the S3 server seam
+- multipart completion composes immutable part chunk references into the final
+  schema v2 manifest, uploads only that manifest, and preserves source
+  encryption identities without a whole-object Telegram round trip
+- final cleanup removes private part manifests but retains every chunk now
+  referenced by the committed object
 - copy-object and version-aware listings now flow through the same object-format backend
 - checksum enforcement now runs through part uploads, chunk reads, and reconciliation
 - conditional requests now honor ETag and timestamp preconditions on read, write, copy, and delete paths
@@ -247,8 +252,11 @@ Completed in this increment:
   acknowledgements are automatically reconciled by token plus exact encrypted
   bytes, and unmatched sends are safely retried after a complete history scan
 - the bucket browser now merges active S3 transfer jobs into the object listing,
-  showing an uploading indicator and completed/total part progress while the
-  final multipart manifest is still hidden
+  showing an accessible progress card with receiving, uploading, finalizing,
+  and needs-attention phases while the final multipart manifest is still hidden
+- multipart completion regression coverage verifies metadata-only composition,
+  cross-part range reads, retained-message cleanup safety, idempotency, and
+  restart reads
 
 Multi-user boundary for the next increment:
 
@@ -269,8 +277,9 @@ Remaining Phase 10 work:
   runner; the isolated live Telegram drill remains a separate RC/stable gate
 - expand fault-injection coverage for Telegram timeouts, process crashes, and
   history-scan limits beyond the current deterministic matrix
-- expand browser coverage from the Playwright authentication/navigation smoke
-  tests to upload progress, retry/cancel, wizard, and degraded recovery flows
+- continue browser coverage beyond the now-covered multipart upload/finalizing/
+  recovery progress states into transfer retry/cancel, wizard, and degraded
+  recovery flows
 - add periodic reconciliation for staged uploads so missing chunks, orphaned
   staging trees, and interrupted commits are repaired or quarantined before
   they become user-visible corruption

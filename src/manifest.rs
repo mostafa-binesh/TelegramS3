@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+pub const MANIFEST_SCHEMA_VERSION: u16 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommitState {
@@ -47,6 +49,27 @@ pub struct ChunkRef {
     pub telegram_peer_id: String,
     pub telegram_message_id: i64,
     pub telegram_document_id: Option<String>,
+    /// Payload provenance for a chunk reused by a composed manifest. When
+    /// absent, the payload was encrypted for this manifest's object id and
+    /// chunk order. The pair also tells the publisher that the Telegram
+    /// document is already durable and must not be uploaded again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_object_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_chunk_order: Option<u32>,
+}
+
+impl ChunkRef {
+    pub fn payload_identity(&self, manifest_object_id: Uuid) -> (Uuid, u32) {
+        (
+            self.source_object_id.unwrap_or(manifest_object_id),
+            self.source_chunk_order.unwrap_or(self.order),
+        )
+    }
+
+    pub fn references_remote_payload(&self) -> bool {
+        self.source_object_id.is_some() && self.source_chunk_order.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,10 +127,12 @@ impl ObjectManifest {
                 telegram_peer_id: args.peer_id.clone(),
                 telegram_message_id: args.message_id + 1,
                 telegram_document_id: None,
+                source_object_id: None,
+                source_chunk_order: None,
             }]
         };
         Self {
-            schema_version: 1,
+            schema_version: MANIFEST_SCHEMA_VERSION,
             commit_state: CommitState::Committed,
             object_id: Uuid::new_v4(),
             bucket: args.bucket,
@@ -177,6 +202,15 @@ impl ObjectManifest {
 
         let mut expected_offset = 0_u64;
         for (index, chunk) in self.chunks.iter().enumerate() {
+            if chunk.source_object_id.is_some() != chunk.source_chunk_order.is_some() {
+                return Err(
+                    "chunk source_object_id and source_chunk_order must appear together"
+                        .to_string(),
+                );
+            }
+            if chunk.references_remote_payload() && chunk.telegram_message_id <= 0 {
+                return Err("referenced chunk requires a durable Telegram message".to_string());
+            }
             if chunk.order != index as u32 {
                 return Err("chunk order must be contiguous".to_string());
             }

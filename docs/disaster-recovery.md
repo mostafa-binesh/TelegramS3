@@ -131,15 +131,26 @@ request will fix.
    the same time as the failure.
 2. Multipart sessions are durable in local metadata, so restart reuse should
    preserve the upload ID and uploaded parts.
-3. If a multipart session is marked `recovery_required`, abort or repair it
+3. A row at `N/N` parts may be in `completing`: all payload chunks are already
+   durable and the server is publishing the small final manifest. Current
+   completion does not download or re-upload the concatenated object.
+4. If a multipart session is marked `recovery_required`, abort or repair it
    before trying to complete the upload.
-4. If the session files are gone but the local session row remains, clean up
+5. If the session files are gone but the local session row remains, clean up
    the multipart metadata and retry the upload from a fresh initiate call.
 
-The bucket browser may show the session as an uploading row during these steps.
-That row is deliberately not a committed object: it provides part progress and
-recovery state, but has no download or object actions until the final manifest is
-published.
+After upgrading from a release that reassembled multipart data during
+completion, retry `CompleteMultipartUpload` with the same upload ID and ordered
+part ETags. Abandoned receiving/queued completion jobs with no ambiguous remote
+send are safely superseded by metadata-only composition. A job with a
+`sending`/`unknown` attempt is not superseded: exact-byte Telegram
+reconciliation must finish first so the server never guesses whether a remote
+document exists.
+
+The bucket browser may show the session as receiving, uploading, finalizing, or
+needing attention during these steps. That row is deliberately not a committed
+object: it provides part progress and recovery state, but has no download or
+object actions until the final manifest is published.
 
 ## Docker Deployment Loss
 

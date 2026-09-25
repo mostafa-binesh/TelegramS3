@@ -265,11 +265,21 @@ impl AdminUiState {
                                     );
                                 }
                             };
+                        let state = match self.store().multipart_activity_state(session.upload_id) {
+                            Ok(Some(state)) => state,
+                            Ok(None) => session.state.as_str().to_string(),
+                            Err(_) => {
+                                return json_error(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "multipart activity unavailable",
+                                );
+                            }
+                        };
                         uploads.push(serde_json::json!({
                             "upload_id": session.upload_id,
                             "bucket": session.bucket,
                             "key": session.key,
-                            "state": session.state.as_str(),
+                            "state": state,
                             "parts_done": parts_done,
                             "parts_total": parts_total,
                             "updated_at": session.updated_at.unix_timestamp(),

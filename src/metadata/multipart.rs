@@ -265,6 +265,145 @@ impl MetadataStore {
         })
     }
 
+    pub(crate) fn multipart_completion_job(
+        &self,
+        upload_id: Uuid,
+    ) -> Result<Option<String>, MetadataError> {
+        self.with_connection(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT j.id FROM multipart_jobs m JOIN transfer_jobs j ON j.id=m.job_id WHERE m.upload_id=?1 AND m.part_number=0 ORDER BY j.sequence DESC LIMIT 1",
+                    [upload_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })
+    }
+
+    /// Return the operator-facing phase derived from durable jobs. This keeps
+    /// older sessions honest even when their persisted session state predates
+    /// the `completing` transition.
+    pub(crate) fn multipart_activity_state(
+        &self,
+        upload_id: Uuid,
+    ) -> Result<Option<String>, MetadataError> {
+        self.with_connection(|connection| {
+            let upload_id = upload_id.to_string();
+            let completion: Option<String> = connection
+                .query_row(
+                    "SELECT j.state FROM multipart_jobs m JOIN transfer_jobs j ON j.id=m.job_id WHERE m.upload_id=?1 AND m.part_number=0 ORDER BY j.sequence DESC LIMIT 1",
+                    [&upload_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(state) = completion {
+                if matches!(state.as_str(), "recovery_required" | "reception_failed") {
+                    return Ok(Some("recovery_required".to_string()));
+                }
+                if matches!(
+                    state.as_str(),
+                    "receiving" | "queued" | "retry_wait" | "uploading" | "committing"
+                ) {
+                    return Ok(Some("completing".to_string()));
+                }
+            }
+
+            let failed_part: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM multipart_jobs m JOIN transfer_jobs j ON j.id=m.job_id LEFT JOIN multipart_parts p ON p.upload_id=m.upload_id AND p.part_number=m.part_number WHERE m.upload_id=?1 AND m.part_number>0 AND p.part_number IS NULL AND j.state IN ('recovery_required','reception_failed'))",
+                [&upload_id],
+                |row| row.get(0),
+            )?;
+            if failed_part {
+                return Ok(Some("recovery_required".to_string()));
+            }
+            let receiving_part: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM multipart_jobs m JOIN transfer_jobs j ON j.id=m.job_id LEFT JOIN multipart_parts p ON p.upload_id=m.upload_id AND p.part_number=m.part_number WHERE m.upload_id=?1 AND m.part_number>0 AND p.part_number IS NULL AND j.state='receiving')",
+                [&upload_id],
+                |row| row.get(0),
+            )?;
+            if receiving_part {
+                return Ok(Some("receiving".to_string()));
+            }
+            Ok(None)
+        })
+    }
+
+    pub(crate) fn queue_multipart_completion(
+        &self,
+        job_id: &str,
+        operation_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|connection| {
+            let tx = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let upload_id = upload_id.to_string();
+            let session_json: String = tx
+                .query_row(
+                    "SELECT session_json FROM multipart_uploads WHERE upload_id=?1",
+                    [&upload_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| MetadataError::MultipartSessionNotFound(upload_id.clone()))?;
+            let mut session: MultipartSession = serde_json::from_str(&session_json)?;
+            if !matches!(
+                session.state,
+                MultipartState::Initiated
+                    | MultipartState::Uploading
+                    | MultipartState::Completing
+            ) {
+                return Err(MetadataError::InvalidManifest(
+                    "multipart completion session is closed".to_string(),
+                ));
+            }
+
+            let unsafe_prior: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM multipart_jobs m JOIN transfer_jobs j ON j.id=m.job_id WHERE m.upload_id=?1 AND m.part_number=0 AND j.id<>?2 AND (j.state IN ('uploading','committing') OR (j.state='recovery_required' AND EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=j.id AND a.state IN ('sending','unknown')))))",
+                params![upload_id, job_id],
+                |row| row.get(0),
+            )?;
+            if unsafe_prior {
+                return Err(MetadataError::InvalidManifest(
+                    "an earlier multipart completion still needs Telegram reconciliation"
+                        .to_string(),
+                ));
+            }
+
+            tx.execute(
+                "UPDATE transfer_jobs SET state='superseded',lease=NULL,lease_until=0,error='Superseded by metadata-only multipart completion',updated_at=?3 WHERE id IN (SELECT job_id FROM multipart_jobs WHERE upload_id=?1 AND part_number=0) AND id<>?2 AND (state IN ('receiving','queued','retry_wait','reception_failed','cancelled') OR (state='recovery_required' AND NOT EXISTS(SELECT 1 FROM transfer_send_attempts a WHERE a.job_id=transfer_jobs.id AND a.state IN ('sending','unknown'))))",
+                params![upload_id, job_id, crate::durable::now()],
+            )?;
+
+            if tx.execute(
+                "UPDATE transfer_jobs SET operation_id=?2,chunks_total=0,state='queued',updated_at=?3,lease_until=0 WHERE id=?1 AND state='receiving'",
+                params![job_id, operation_id.to_string(), crate::durable::now()],
+            )? != 1
+            {
+                return Err(MetadataError::InvalidManifest(
+                    "multipart completion cannot be queued".to_string(),
+                ));
+            }
+            tx.execute(
+                "INSERT INTO multipart_jobs(job_id,upload_id,part_number,expected_checksum) VALUES (?1,?2,0,NULL)",
+                params![job_id, upload_id],
+            )?;
+
+            session.state = MultipartState::Completing;
+            session.updated_at = OffsetDateTime::now_utc();
+            tx.execute(
+                "UPDATE multipart_uploads SET state='completing',session_json=?2,updated_at=?3 WHERE upload_id=?1",
+                params![
+                    upload_id,
+                    serde_json::to_string(&session)?,
+                    timestamp_now()?
+                ],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     pub fn get_multipart_part(
         &self,
         upload_id: Uuid,

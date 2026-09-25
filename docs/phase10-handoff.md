@@ -159,8 +159,13 @@ Refactor rules:
 - Private completed part manifests are removed from the ordinary manifest,
   journal, and recovery-marker tables; `wait_transfer` resolves their embedded
   part manifest instead.
-- Completion streams selected part manifests through the common writer and
-  commits the final object and session transition in one SQLite transaction.
+- Completion composes selected part chunk references into a schema v2 manifest,
+  preserving each source payload's encryption identity. It uploads only the
+  final manifest and commits the object/session transition in one SQLite
+  transaction; it does not stream the full object back through Telegram.
+- Completion cleanup retains every reused chunk message and queues only the
+  private part manifests (plus any unreferenced payload) for evidence-first
+  deletion.
 - Completed-session retry can return the already-visible final object.
 - Abort rejects actively uploading/committing part jobs and schedules known
   completed part references for cleanup.

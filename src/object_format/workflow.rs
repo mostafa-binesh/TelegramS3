@@ -1,5 +1,6 @@
 use super::*;
 use crate::durable::{CleanupTarget, TransferJob, TransferWriteConditionals};
+use s3s::Body;
 use std::sync::atomic::Ordering;
 
 #[derive(Debug)]
@@ -206,6 +207,8 @@ impl ObjectFormatService {
             telegram_peer_id: self.storage_chat_id()?,
             telegram_message_id: 0,
             telegram_document_id: Some(format!("local:{object_id}:{order}")),
+            source_object_id: None,
+            source_chunk_order: None,
         });
         *offset += bytes.len() as u64;
         Ok(())
@@ -515,6 +518,17 @@ impl ObjectFormatService {
             futures::stream::iter(manifest.chunks.clone().into_iter().map(|mut chunk| {
                 let dir = &dir;
                 async move {
+                    if chunk.references_remote_payload() {
+                        if chunk.telegram_peer_id.trim().is_empty()
+                            || chunk.telegram_message_id <= 0
+                        {
+                            return Err(ObjectFormatError::InvalidPlan(format!(
+                                "composed chunk {} has no durable Telegram location",
+                                chunk.order
+                            )));
+                        }
+                        return Ok::<_, ObjectFormatError>(chunk);
+                    }
                     let location = match self.metadata.checkpoint_location(&job.id, chunk.order)? {
                         Some(location) => location,
                         None => {
@@ -815,13 +829,21 @@ impl ObjectFormatService {
                 &manifest.bucket,
                 &manifest.key,
             )?;
+            let local_chunks = manifest
+                .chunks
+                .iter()
+                .filter(|chunk| !chunk.references_remote_payload())
+                .collect::<Vec<_>>();
             self.metadata.reserve_staging(
                 &id,
-                manifest.content_length + manifest.chunks.len() as u64 * 16,
+                local_chunks
+                    .iter()
+                    .map(|chunk| chunk.size.saturating_add(16))
+                    .sum(),
                 self.staging_budget,
             )?;
             self.metadata
-                .queue_transfer(&id, entry.operation_id, manifest.chunks.len())?;
+                .queue_transfer(&id, entry.operation_id, local_chunks.len())?;
         }
         Ok(())
     }

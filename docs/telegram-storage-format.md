@@ -63,7 +63,7 @@ The manifest must not depend on captions alone.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "commit_state": "committed",
   "object_id": "uuid",
   "bucket": "photos",
@@ -97,11 +97,21 @@ The manifest must not depend on captions alone.
       "checksum": "hex",
       "telegram_peer_id": "channel-or-chat-id",
       "telegram_message_id": 456,
-      "telegram_document_id": "optional"
+      "telegram_document_id": "optional",
+      "source_object_id": "optional-source-uuid",
+      "source_chunk_order": 0
     }
   ]
 }
 ```
+
+Schema v1 manifests remain readable. Schema v2 adds the optional paired
+`source_object_id` and `source_chunk_order` fields. They are absent for payloads
+encrypted directly for the current manifest. Multipart composition sets both
+fields so the reader derives the key, nonce, and authenticated-data identity
+from the part that originally produced the immutable Telegram document. The
+pair also marks the document as an existing remote reference: publication must
+not look for a local staged chunk or upload the payload again.
 
 `expires_at` is optional for backward-compatible manifests. When present, it
 is an RFC3339 UTC timestamp. The local index and all S3/admin read and list
@@ -141,6 +151,30 @@ revoked, but the admin panel cannot reconstruct their URL.
 - Local disk keeps only temporary staging, quarantine, or mock transport
   artifacts.
 - Chunk payloads must be independently verifiable.
+
+## Multipart Manifest Composition
+
+Each completed part has a private manifest and one or more already-published
+Telegram chunk documents. Completion validates the requested part order, ETags,
+sizes, checksums, manifest shape, Telegram locations, and encryption metadata.
+It then builds one contiguous final chunk map by assigning final orders and
+offsets while retaining each source message/document location and payload
+identity. Only the final canonical manifest is sent to Telegram.
+
+Ordinary PUT manifests use `sha256`, whose value is the digest of the complete
+plaintext object. A composed multipart manifest uses `sha256-parts-v1`: SHA-256
+over a domain separator followed by each ordered part number, byte size,
+checksum algorithm, and already-verified part checksum, with variable strings
+length-prefixed. This is a deterministic composite object identity, not a claim
+to be the raw-byte SHA-256 of the concatenated payload. Every reused chunk keeps
+its plaintext SHA-256 and is independently decrypted and verified during full
+or range reads.
+
+The final SQLite commit changes object visibility and the multipart session to
+`completed` atomically. Cleanup queues the private part-manifest messages but
+filters out every chunk location referenced by the final manifest. Those chunks
+become owned by the committed object and are eligible for physical cleanup only
+after that object is tombstoned under the normal evidence-first rules.
 
 ## Local Index
 
@@ -214,10 +248,13 @@ staged bytes remain encrypted at rest, but a process restart ends the browser
 session and reconciliation handles the stale receiving job as recovery work.
 
 Active S3 transfer jobs are also exposed to the authenticated bucket browser.
-The UI may show a key as uploading before its manifest is committed, using the
-job's part/chunk counters and state; this is operational visibility only and does
-not add the key to the committed object index. Partial or recovery-required data
-therefore remains unavailable to download until completion or explicit repair.
+The UI may show a key as receiving, uploading, finalizing, or needing attention
+before its manifest is committed, using the job's part/chunk counters and
+derived durable state. `N/N` with `completing` means payload publication is done
+and the final manifest is being published. This is operational visibility only
+and does not add the key to the committed object index. Partial or
+recovery-required data therefore remains unavailable to download until
+completion or explicit repair.
 
 ## Recovery Rules
 
@@ -238,6 +275,12 @@ therefore remains unavailable to download until completion or explicit repair.
   unavailable Telegram session, missing staging file, or byte mismatch stays
   `recovery_required` for operator review.
 - Multipart parts remain hidden until completion publishes the final manifest.
+- Multipart completion reuses only chunk references whose source identity and
+  Telegram location are explicit in schema v2; missing provenance or an
+  unpublished source chunk fails completion without exposing an object.
+- An abandoned pre-composition completion may be superseded only when no
+  `sending`/`unknown` Telegram attempt remains. Ambiguous acknowledgements keep
+  the session recovery-required until token-and-exact-byte reconciliation.
 - An active multipart key may be visible in the admin browser as an uploading
   status row with progress, but it remains hidden from committed S3 listings and
   download actions until completion publishes the final manifest.

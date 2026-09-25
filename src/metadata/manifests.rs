@@ -7,7 +7,7 @@ use crate::durable::TransferWriteConditionals;
 use crate::manifest::{CommitState, ObjectManifest};
 use rusqlite::{OptionalExtension, params};
 use s3s::dto::{ETagCondition, Timestamp};
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -268,7 +268,7 @@ impl MetadataStore {
             ).optional()?;
             if let Some(upload) = completion.as_deref() {
                 let active: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM multipart_uploads WHERE upload_id=?1 AND state IN ('initiated','uploading'))",
+                    "SELECT EXISTS(SELECT 1 FROM multipart_uploads WHERE upload_id=?1 AND state IN ('initiated','uploading','completing'))",
                     [upload],
                     |r| r.get(0),
                 )?;
@@ -330,10 +330,20 @@ impl MetadataStore {
                 tx.execute("UPDATE transfer_jobs SET state='completed',error=NULL,lease=NULL,lease_until=0,updated_at=?2 WHERE operation_id=?1", params![operation_id, crate::durable::now()])?;
             }
             if let Some(upload) = completion {
+                let retained_chunks: HashSet<(String, i64)> = manifest
+                    .chunks
+                    .iter()
+                    .map(|chunk| {
+                        (
+                            chunk.telegram_peer_id.clone(),
+                            chunk.telegram_message_id,
+                        )
+                    })
+                    .collect();
                 for row in tx.prepare("SELECT part_json FROM multipart_parts WHERE upload_id=?1")?.query_map([&upload],|r|r.get::<_,String>(0))? {
-                    crate::durable::enqueue_part_cleanup(&tx,&serde_json::from_str(&row?)?)?;
+                    crate::durable::enqueue_part_cleanup_preserving(&tx,&serde_json::from_str(&row?)?,&retained_chunks)?;
                 }
-                if tx.execute("UPDATE multipart_uploads SET state='completed',session_json=json_set(session_json,'$.state','completed') WHERE upload_id=?1 AND state IN ('initiated','uploading')",[&upload])? != 1 {
+                if tx.execute("UPDATE multipart_uploads SET state='completed',session_json=json_set(session_json,'$.state','completed') WHERE upload_id=?1 AND state IN ('initiated','uploading','completing')",[&upload])? != 1 {
                     return Err(MetadataError::InvalidManifest("multipart completion session is closed".into()));
                 }
                 tx.execute("DELETE FROM multipart_parts WHERE upload_id=?1",[upload])?;

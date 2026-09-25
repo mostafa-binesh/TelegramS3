@@ -43,6 +43,9 @@ type MockOptions = {
   storageFailure?: boolean;
   recoveryIssue?: Record<string, unknown>;
   activeUpload?: boolean;
+  activeUploadState?: string;
+  activeUploadPartsDone?: number;
+  activeUploadPartsTotal?: number;
 };
 
 async function mockAdminApi(page: Page, options: MockOptions = {}) {
@@ -201,9 +204,9 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
           upload_id: 'upload-active-upload',
           bucket: 'release-test',
           key: 'large-backup.iso',
-          state: 'uploading',
-          parts_done: 236,
-          parts_total: 282,
+          state: options.activeUploadState ?? 'uploading',
+          parts_done: options.activeUploadPartsDone ?? 236,
+          parts_total: options.activeUploadPartsTotal ?? 282,
           updated_at: 1_767_000_100
         }] : []
       }
@@ -240,9 +243,37 @@ test('bucket browser shows S3 uploads with part progress while they are in fligh
   await expect(page.getByText('large-backup.iso')).toBeVisible();
   const uploadIcon = page.getByRole('img', { name: /Uploading to Telegram — 236 of 282 parts completed/ });
   await expect(uploadIcon).toHaveAttribute('title', 'Uploading to Telegram — 236 of 282 parts completed');
-  await expect(page.getByText('236/282 parts')).toBeVisible();
-  await expect(page.getByText('In progress')).toBeVisible();
+  const progress = page.getByRole('progressbar', { name: 'Upload progress for large-backup.iso' });
+  await expect(progress).toHaveAttribute('aria-valuenow', '84');
+  await expect(progress).toHaveAttribute('aria-valuetext', '236 of 282 parts completed');
+  await expect(page.getByText('236 of 282 parts')).toBeVisible();
+  await expect(page.getByText('84%')).toBeVisible();
+  await expect(page.getByText('Working')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Download large-backup.iso' })).toHaveCount(0);
+});
+
+test('bucket browser distinguishes final manifest publication from part upload', async ({ page }) => {
+  await mockAdminApi(page, { activeUpload: true, activeUploadState: 'completing', activeUploadPartsDone: 269, activeUploadPartsTotal: 269 });
+  await signIn(page);
+  await openBucket(page);
+
+  await expect(page.getByText('Finalizing backup').first()).toBeVisible();
+  await expect(page.getByText('Publishing the final manifest')).toBeVisible();
+  const progress = page.getByRole('progressbar', { name: 'Upload progress for large-backup.iso' });
+  await expect(progress).toHaveAttribute('aria-valuenow', '100');
+  await expect(progress).toHaveAttribute('aria-valuetext', '269 of 269 parts completed');
+  await expect(page.getByRole('img', { name: 'Finalizing the object manifest — 269 of 269 parts completed' })).toBeVisible();
+});
+
+test('bucket browser presents interrupted multipart uploads as actionable', async ({ page }) => {
+  await mockAdminApi(page, { activeUpload: true, activeUploadState: 'recovery_required', activeUploadPartsDone: 269, activeUploadPartsTotal: 269 });
+  await signIn(page);
+  await openBucket(page);
+
+  await expect(page.locator('.upload-phase', { hasText: 'Needs attention' })).toBeVisible();
+  await expect(page.getByText('Open Transfers to review')).toBeVisible();
+  await expect(page.locator('.uploading-actions', { hasText: 'Needs action' })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Upload needs attention; open Transfers to reconcile it — 269 of 269 parts completed' })).toBeVisible();
 });
 
 test('share modal uses an expiry preset, sends the correct payload, displays, and opens the public URL', async ({ page }) => {

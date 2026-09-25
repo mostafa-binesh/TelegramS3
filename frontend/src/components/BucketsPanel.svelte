@@ -37,18 +37,50 @@
   function uploadTitle(object: ObjectEntry) {
     const done = object.upload_parts_done ?? 0;
     const total = object.upload_parts_total ?? 0;
-    const state = object.upload_state === 'recovery_required'
-      ? 'Upload interrupted; open Transfers to reconcile it'
-      : object.upload_state === 'receiving'
+    const state = uploadKind(object) === 'attention'
+      ? 'Upload needs attention; open Transfers to reconcile it'
+      : uploadKind(object) === 'receiving'
         ? 'Receiving upload from S3'
-        : 'Uploading to Telegram';
+        : uploadKind(object) === 'finalizing'
+          ? 'Finalizing the object manifest'
+          : uploadKind(object) === 'preparing'
+            ? 'Preparing multipart upload'
+            : 'Uploading to Telegram';
     return total > 0 ? `${state} — ${done} of ${total} parts completed` : `${state} — part total will appear when reception finishes`;
   }
 
-  function uploadState(object: ObjectEntry) {
-    if (object.upload_state === 'recovery_required') return 'interrupted';
-    if (object.upload_state === 'receiving') return 'receiving from S3';
+  function uploadKind(object: ObjectEntry) {
+    if (object.upload_state === 'recovery_required') return 'attention';
+    if (object.upload_state === 'receiving') return 'receiving';
+    const done = object.upload_parts_done ?? 0;
+    const total = object.upload_parts_total ?? 0;
+    if (object.upload_state === 'completing' || (total > 0 && done >= total)) return 'finalizing';
+    if (object.upload_state === 'initiated' || total === 0) return 'preparing';
     return 'uploading';
+  }
+
+  function uploadLabel(object: ObjectEntry) {
+    const kind = uploadKind(object);
+    if (kind === 'attention') return 'Needs attention';
+    if (kind === 'receiving') return 'Receiving from S3';
+    if (kind === 'finalizing') return 'Finalizing backup';
+    if (kind === 'preparing') return 'Preparing upload';
+    return 'Uploading to Telegram';
+  }
+
+  function uploadDetail(object: ObjectEntry) {
+    const kind = uploadKind(object);
+    if (kind === 'attention') return 'Open Transfers to review';
+    if (kind === 'receiving') return 'Parts appear as they arrive';
+    if (kind === 'finalizing') return 'Publishing the final manifest';
+    if (kind === 'preparing') return 'Waiting for the first part';
+    return 'Encrypted parts are being secured';
+  }
+
+  function uploadPercent(object: ObjectEntry) {
+    const done = object.upload_parts_done ?? 0;
+    const total = object.upload_parts_total ?? 0;
+    return total > 0 ? Math.min(100, Math.max(0, Math.round((done / total) * 100))) : 0;
   }
 </script>
 
@@ -72,7 +104,54 @@
     {:else if listing && listing.folders.length === 0 && listing.objects.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">↑</span>This folder is empty. Drop files above to upload the first one.</p>
     {:else}<div class="table-scroll"><table class="kv-table"><colgroup><col class="selection-column"/><col class="name-column"/><col class="size-column"/><col class="modified-column"/><col class="actions-column"/></colgroup><thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={allVisibleSelected} on:change={onToggleAll}/></th><th>Name</th><th>Size</th><th>Modified</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
       {#each listing?.folders ?? [] as folder (folder)}<tr><td></td><td><button class="btn-link" on:click={() => onEnterFolder(folder)}>{folder}/</button></td><td class="muted">folder</td><td class="muted">—</td><td class="row-actions"><ActionIcon name="trash" label={`Delete folder ${folder}`} tone="danger" on:click={() => onRemoveKey(folder)} disabled={busy}/></td></tr>{/each}
-      {#each listing?.objects ?? [] as obj (obj.key)}<tr class:uploading-row={obj.uploading}><td>{#if obj.uploading}<span class:interrupted={obj.upload_state === 'recovery_required'} class="uploading-icon" role="img" aria-label={uploadTitle(obj)} title={uploadTitle(obj)}>↑</span>{:else}<input class="select-all" type="checkbox" checked={selectedKeys.includes(obj.key)} on:change={() => onToggleKey(obj.key)} aria-label={`Select ${obj.name}`}/>{/if}</td><td><span class="object-name">{obj.name}</span>{#if obj.uploading}<small class="upload-note">{uploadState(obj)}{#if obj.upload_parts_total} · {obj.upload_parts_done ?? 0}/{obj.upload_parts_total} parts{:else} · preparing parts{/if}</small>{:else if obj.expires_at}<small class="expiry-note">expires {formatTimestamp(obj.expires_at)}</small>{/if}</td><td>{#if obj.uploading}<span class="upload-size">S3 multipart</span>{:else}{formatBytes(obj.size)}{/if}</td><td>{#if obj.uploading}<span class="upload-state">{uploadState(obj)}</span>{:else}{formatTimestamp(obj.last_modified)}{/if}</td><td class="row-actions">{#if obj.uploading}<span class="uploading-actions" title={uploadTitle(obj)}>In progress</span>{:else}<ActionIcon name="download" label={`Download ${obj.name}`} href={contentUrl(selectedBucket, obj.key)}/><ActionIcon name="share" label={`Share ${obj.name}`} on:click={() => onShare(obj)} disabled={busy}/><ActionIcon name="links" badge={obj.shared_links} label={`Manage shared links for ${obj.name}`} on:click={() => onOpenShareLinks(obj)} disabled={busy}/><ActionIcon name="trash" label={`Delete ${obj.name}`} tone="danger" on:click={() => onRemoveKey(obj)} disabled={busy}/>{/if}</td></tr>{/each}
+      {#each listing?.objects ?? [] as obj (obj.key)}
+        <tr class:uploading-row={obj.uploading} class:upload-attention={obj.uploading && uploadKind(obj) === 'attention'}>
+          <td>
+            {#if obj.uploading}
+              <span class="uploading-icon" class:attention-icon={uploadKind(obj) === 'attention'} role="img" aria-label={uploadTitle(obj)} title={uploadTitle(obj)}>
+                {#if uploadKind(obj) === 'attention'}
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3.5v.01M10.3 3.8 2.7 17a2 2 0 0 0 1.73 3h15.14a2 2 0 0 0 1.73-3L13.7 3.8a2 2 0 0 0-3.4 0Z"/></svg>
+                {:else}
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 17.5H6.5a4 4 0 0 1-.36-7.98A6 6 0 0 1 17.6 8.1a4.5 4.5 0 0 1-.1 9.4H16M12 19V9m0 0-3 3m3-3 3 3"/></svg>
+                {/if}
+                <span class="status-beacon" aria-hidden="true"></span>
+              </span>
+            {:else}
+              <input class="select-all" type="checkbox" checked={selectedKeys.includes(obj.key)} on:change={() => onToggleKey(obj.key)} aria-label={`Select ${obj.name}`}/>
+            {/if}
+          </td>
+          <td>
+            <span class="object-name">{obj.name}</span>
+            {#if obj.uploading}
+              <div class="upload-progress" class:attention-progress={uploadKind(obj) === 'attention'}>
+                <div class="upload-progress-head">
+                  <span class="upload-phase"><span class="phase-dot" aria-hidden="true"></span>{uploadLabel(obj)}</span>
+                  {#if obj.upload_parts_total}<strong>{uploadPercent(obj)}%</strong>{/if}
+                </div>
+                <div
+                  class="upload-track"
+                  class:indeterminate={!obj.upload_parts_total}
+                  role="progressbar"
+                  aria-label={`Upload progress for ${obj.name}`}
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow={obj.upload_parts_total ? uploadPercent(obj) : undefined}
+                  aria-valuetext={obj.upload_parts_total ? `${obj.upload_parts_done ?? 0} of ${obj.upload_parts_total} parts completed` : 'Preparing multipart upload'}
+                ><span class="upload-fill" style:width={`${uploadPercent(obj)}%`}></span></div>
+                <div class="upload-meta">
+                  <span>{#if obj.upload_parts_total}{obj.upload_parts_done ?? 0} of {obj.upload_parts_total} parts{:else}Discovering parts…{/if}</span>
+                  <span>{uploadDetail(obj)}</span>
+                </div>
+              </div>
+            {:else if obj.expires_at}
+              <small class="expiry-note">expires {formatTimestamp(obj.expires_at)}</small>
+            {/if}
+          </td>
+          <td>{#if obj.uploading}<span class="upload-size"><strong>Multipart</strong><small>S3 upload</small></span>{:else}{formatBytes(obj.size)}{/if}</td>
+          <td>{#if obj.uploading}<span class="upload-state"><strong>{uploadLabel(obj)}</strong><small>{formatTimestamp(obj.last_modified)}</small></span>{:else}{formatTimestamp(obj.last_modified)}{/if}</td>
+          <td class="row-actions">{#if obj.uploading}<span class="uploading-actions" class:needs-action={uploadKind(obj) === 'attention'} title={uploadTitle(obj)}><span aria-hidden="true"></span>{uploadKind(obj) === 'attention' ? 'Needs action' : 'Working'}</span>{:else}<ActionIcon name="download" label={`Download ${obj.name}`} href={contentUrl(selectedBucket, obj.key)}/><ActionIcon name="share" label={`Share ${obj.name}`} on:click={() => onShare(obj)} disabled={busy}/><ActionIcon name="links" badge={obj.shared_links} label={`Manage shared links for ${obj.name}`} on:click={() => onOpenShareLinks(obj)} disabled={busy}/><ActionIcon name="trash" label={`Delete ${obj.name}`} tone="danger" on:click={() => onRemoveKey(obj)} disabled={busy}/>{/if}</td>
+        </tr>
+      {/each}
     </tbody></table></div>{/if}
     {#if selectedKeys.length}<div class="selection-bar"><strong>{selectedKeys.length} selected</strong><button class="ghost" on:click={onRemoveSelected}>Delete</button><button class="ghost" on:click={onOpenMove}>→ Move</button></div>{/if}
   {/if}
@@ -82,23 +161,50 @@
   .back-button { flex: 0 0 auto; }
   .bucket-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .expiry-note { display:block; color:var(--muted); font-size:.75rem; }
-  .kv-table { table-layout: fixed; min-width: 800px; }
+  .kv-table { table-layout: fixed; min-width: 940px; }
   .selection-column { width: 44px; }
   .size-column { width: 120px; }
-  .modified-column { width: 180px; }
-  .actions-column { width: 194px; }
+  .modified-column { width: 172px; }
+  .actions-column { width: 128px; }
   .kv-table th, .kv-table td { vertical-align: middle; }
   .kv-table th:nth-child(2), .kv-table td:nth-child(2) { overflow-wrap: anywhere; }
   .row-actions { justify-content: flex-end; }
   .row-actions :global(.action-icon) { flex: 0 0 38px; }
-  .uploading-row { background: linear-gradient(90deg, rgba(229,244,255,.72), rgba(255,255,255,.35)); }
-  .uploading-icon { display: inline-grid; place-items: center; width: 28px; height: 28px; border: 1px solid #9acbe8; border-radius: 9px; background: #eaf7ff; color: #2178ad; font-weight: 900; cursor: help; animation: upload-pulse 1.6s ease-in-out infinite; }
-  .uploading-icon.interrupted { border-color: #edc27c; background: #fff6e5; color: #a66a0b; animation: none; }
-  .object-name { overflow-wrap: anywhere; }
-  .upload-note, .upload-state { color: #2178ad; font-size: .75rem; }
-  .uploading-row .upload-note { font-weight: 700; }
-  .upload-size { color: #536f84; font-variant-numeric: tabular-nums; }
-  .uploading-actions { color: #2178ad; font-size: .75rem; font-weight: 800; cursor: help; }
-  @keyframes upload-pulse { 50% { transform: translateY(-2px); box-shadow: 0 0 0 4px rgba(33,120,173,.10); } }
+  .uploading-row { background: linear-gradient(90deg, rgba(237,247,255,.82), rgba(250,253,255,.45)); }
+  .uploading-row td { padding-top: 16px; padding-bottom: 16px; border-color: #dcebf5; }
+  .uploading-row.upload-attention { background: linear-gradient(90deg, rgba(255,247,231,.88), rgba(255,252,246,.5)); }
+  .uploading-icon { position: relative; display: inline-grid; place-items: center; width: 36px; height: 36px; border: 1px solid #9acbe8; border-radius: 13px; background: linear-gradient(145deg,#f3fbff,#dff2ff); color: #2178ad; cursor: help; box-shadow: 0 8px 20px rgba(33,109,186,.12); }
+  .uploading-icon svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .status-beacon { position: absolute; right: -3px; bottom: -3px; width: 10px; height: 10px; border: 2px solid var(--surface); border-radius: 50%; background: #28a783; box-shadow: 0 0 0 0 rgba(40,167,131,.35); animation: beacon 1.8s ease-out infinite; }
+  .uploading-icon.attention-icon { border-color: #edc27c; background: linear-gradient(145deg,#fffaf0,#ffedcb); color: #a66a0b; box-shadow: 0 8px 20px rgba(166,106,11,.1); }
+  .attention-icon .status-beacon { background: #d88917; animation: none; }
+  .object-name { display: block; overflow-wrap: anywhere; font-weight: 750; color: #203b57; }
+  .upload-progress { display: grid; gap: 7px; max-width: 520px; margin-top: 10px; padding: 10px 12px; border: 1px solid #d3e8f5; border-radius: 13px; background: rgba(255,255,255,.78); box-shadow: 0 5px 15px rgba(35,90,130,.04); }
+  .upload-progress-head, .upload-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .upload-progress-head strong { color: #1c6f9f; font-size: .72rem; font-variant-numeric: tabular-nums; }
+  .upload-phase { display: inline-flex; align-items: center; gap: 7px; color: #245f85; font-size: .72rem; font-weight: 850; letter-spacing: .01em; }
+  .phase-dot { width: 7px; height: 7px; border-radius: 50%; background: #28a783; box-shadow: 0 0 0 4px rgba(40,167,131,.1); }
+  .upload-track { position: relative; height: 7px; overflow: hidden; border-radius: 999px; background: #dcecf5; box-shadow: inset 0 1px 2px rgba(27,77,111,.08); }
+  .upload-fill { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: linear-gradient(90deg,#2b82c5,#34b09d); transition: width .35s ease; }
+  .upload-fill::after { content: ''; display: block; width: 35%; height: 100%; background: linear-gradient(90deg,transparent,rgba(255,255,255,.7),transparent); animation: shimmer 1.9s ease-in-out infinite; }
+  .upload-track.indeterminate .upload-fill { width: 38%!important; animation: indeterminate 1.7s ease-in-out infinite; }
+  .upload-meta { color: #6b8194; font-size: .67rem; line-height: 1.3; }
+  .upload-meta span:first-child { color: #3f6681; font-weight: 750; font-variant-numeric: tabular-nums; }
+  .attention-progress { border-color: #efd8ad; background: rgba(255,253,248,.88); }
+  .attention-progress .upload-phase, .attention-progress .upload-progress-head strong { color: #9a630f; }
+  .attention-progress .phase-dot { background: #d88917; box-shadow: 0 0 0 4px rgba(216,137,23,.1); }
+  .attention-progress .upload-track { background: #f2e4ca; }
+  .attention-progress .upload-fill { background: linear-gradient(90deg,#d9972b,#e4b14f); }
+  .upload-size, .upload-state { display: grid; gap: 3px; color: #536f84; }
+  .upload-size strong, .upload-state strong { color: #345d78; font-size: .73rem; }
+  .upload-size small, .upload-state small { color: #7d8f9e; font-size: .65rem; line-height: 1.3; }
+  .uploading-actions { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid #cbe4f3; border-radius: 999px; background: #f1faff; color: #2178ad; font-size: .68rem; font-weight: 850; cursor: help; white-space: nowrap; }
+  .uploading-actions > span { width: 6px; height: 6px; border-radius: 50%; background: #28a783; }
+  .uploading-actions.needs-action { border-color: #ecd4a7; background: #fff8e9; color: #9a630f; }
+  .uploading-actions.needs-action > span { background: #d88917; }
+  @keyframes beacon { 70%,100% { box-shadow: 0 0 0 7px rgba(40,167,131,0); } }
+  @keyframes shimmer { from { transform: translateX(-160%); } to { transform: translateX(380%); } }
+  @keyframes indeterminate { 0% { transform: translateX(-110%); } 55%,100% { transform: translateX(270%); } }
+  @media (prefers-reduced-motion: reduce) { .status-beacon, .upload-fill, .upload-fill::after { animation: none!important; transition: none; } }
   .visually-hidden { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
 </style>

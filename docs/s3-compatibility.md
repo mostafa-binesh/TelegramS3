@@ -26,14 +26,14 @@ features, so they are documented separately.
 | Byte-range GET | implemented | cargo test | Maps ranges to chunk spans and fetches only the required Telegram documents | Requires chunk-aware verification | 4 |
 | Multipart initiation | implemented | cargo check | Persists durable upload state in the local metadata store | Multipart state is local | 5 |
 | Multipart part upload | implemented | cargo check | Stages part data, uploads it to Telegram, and stores the returned identifiers | Each part must stay under Telegram limits | 5 |
-| Multipart completion | implemented | cargo check | Commits manifest atomically after staged parts are verified and uploaded | Completion must reconcile staged parts | 5 |
+| Multipart completion | implemented | cargo test | Composes verified part chunk references, publishes only the final schema v2 manifest, and commits the object/session atomically | A pre-composition job with an ambiguous Telegram acknowledgement must still reconcile before replacement | 5 |
 | Multipart abort | implemented | cargo check | Marks upload aborted and cleans up local state | Abort is local cleanup | 5 |
 | Multipart listing | implemented | cargo check | Lists live multipart sessions from the local journal/metadata | Telegram does not expose upload sessions natively | 5 |
 | Conditional requests | implemented | cargo test | GET/HEAD/PUT and copy/delete preconditions honor ETag and timestamp guards | Requires strong object-state checks | 5 |
 | Object versioning | implemented | cargo check | Version IDs are surfaced from manifests and version listings | Telegram lacks built-in versions | 5 |
 | Delete markers | implemented | cargo check | Tombstones are listed as delete markers and remain recoverable until cleanup | Must be modeled locally | 5 |
 | Object tags | compatibility gap | none yet | Must persist in manifest/index | Captions are not enough | 5 |
-| Checksums | implemented | cargo test | Chunk and whole-object checksums are enforced during upload, read, and reconciliation | Telegram alone is not enough | 5 |
+| Checksums | implemented | cargo test | Ordinary PUTs use whole-byte SHA-256; multipart objects use `sha256-parts-v1`, a domain-separated digest of ordered part number, size, algorithm, and verified part checksum; every chunk is still SHA-256 verified on read | A multipart composite checksum is not the raw-byte SHA-256 of the concatenated object | 5 |
 | Presigned URLs | compatibility gap | none yet | AWS SigV4 presigning is not implemented; the admin surface provides separate opaque `/_public/<token>` capability links | Share links are local metadata capabilities, not Telegram URLs | 5 |
 | Server-side copy | implemented | cargo check | Copy uses the local object-format backend and manifest reuse | Telegram copy may not preserve metadata exactly | 5 |
 | Lifecycle cleanup | implemented | cargo test | Garbage collection now removes only tombstoned data older than the 24-hour retention window after dry-run review | Cleanup is conservative and retention-based | 6 |
@@ -64,8 +64,10 @@ features, so they are documented separately.
   `GET`/`HEAD` with an optional `Range` (`206`/`Content-Range`).
 - The bucket browser also reads active transfer jobs for the selected bucket and
   prefix. An S3 multipart key appears as an in-progress row while its final
-  manifest is being committed, with an uploading indicator and completed/total
-  part progress; recovery-required rows remain non-downloadable until repaired.
+  manifest is being committed, with an accessible percentage bar, completed/
+  total part count, and separate receiving, uploading, finalizing, and
+  needs-attention presentation; recovery-required rows remain non-downloadable
+  until repaired.
 - The operator UI hosts an in-browser **Telegram account wizard**
   (`/telegram/wizard/{state,begin,submit-code,submit-password,cancel}`) that
   configures API credentials, storage chat, and network settings before driving

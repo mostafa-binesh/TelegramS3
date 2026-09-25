@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.7.3-rc.2 - 2026-09-25
+
+Done jobs:
+
+- Fixed large S3 multipart completion so uploaded Telegram chunks are composed
+  into the final manifest instead of downloading and uploading the entire
+  object a second time.
+- Added manifest schema v2 payload provenance, cross-part range reads, and
+  cleanup filtering that retains every chunk owned by the completed object.
+- Safely superseded abandoned pre-composition completion receptions while
+  preserving any ambiguous Telegram send for exact-byte reconciliation.
+- Redesigned file-browser upload progress with accessible percentage bars and
+  distinct receiving, uploading, finalizing, and needs-attention states.
+- Added Rust restart/cleanup/composition regression coverage and Playwright
+  coverage for in-flight, 269/269 finalization, and interrupted uploads.
+
 ## 0.7.3-rc.1 - 2026-09-25
 
 Done jobs:
