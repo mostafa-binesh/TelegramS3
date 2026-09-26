@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.7.4-rc.1 - 2026-09-26
+## 0.7.5-rc.1 - 2026-09-26
 
 Release candidate for resilient Telegram-backed downloads.
 
