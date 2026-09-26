@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.7.3 - 2026-09-26
+
+- Promoted the validated `v0.7.3-rc.6` build to stable.
+- Includes smooth folder navigation with stale-poll protection and regression
+  coverage for slow responses, races, and bucket re-entry.
+- Includes aligned bucket-table geometry, non-overlapping timestamps and action
+  icons, narrow-screen support, and labeled bulk Delete and Move actions.
+- Includes the nested-object deletion fix, polished operator account card,
+  Recovery Telegram badge, and aligned destructive-action checkbox.
+- Includes expanded Overview analytics and separate client/Telegram upload and
+  download traffic counters refreshed every five seconds.
+- Completed Rust, frontend, and 34-test Playwright verification for the release.
+
 ## 0.7.3-rc.6 - 2026-09-26
 
 Done jobs:
