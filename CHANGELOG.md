@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+## 0.7.4 - 2026-09-26
+
+Stable release promoted from `v0.7.3-rc.8`.
+
+### Recovery verification
+
+- Added a database-backed sampled recovery verifier. Each healthy committed
+  object is checked at a configurable interval using a fresh, uniformly random
+  sample of distinct chunk indexes, without downloading every chunk on every
+  pass.
+- Added Storage policy controls for verifier enabled state, verification
+  interval, and random chunks per file. The verifier can be disabled entirely;
+  saved policy values and existing recovery findings are preserved.
+- Added `TELEGRAM_RECOVERY_VERIFY_ENABLED` as the configuration seed for new
+  metadata databases. Existing databases reuse the existing `app_settings` and
+  `recovery_markers` tables, so no schema bump or destructive migration is
+  required.
+- Confirmed missing, undecryptable, or checksum-invalid sampled chunks
+  quarantine their object as `recovery_required`, remove it from active
+  listings, and retain durable recovery details. Temporary Telegram or network
+  failures remain retryable and do not quarantine objects.
+- Added Overview verifier telemetry: enabled or disabled state, next scheduled
+  run, sample policy, distinct broken-file total, and the current problem list.
+  The Recovery page provides the full corrupted and missing-file issue list.
+
+### Admin UI and storage policy
+
+- Restored the complete Storage Policy layout after the recovery verifier
+  controls were introduced: policy cards, two-column grids, styled input
+  wrappers, unit suffixes, preset buttons, badges, action row, and impact panel.
+- Added browser regression coverage for the storage-policy layout and verifier
+  settings, including disabled-state behavior, persistence, and save failures.
+- Preserved the existing file-management, folder-navigation, transfer,
+  recovery, traffic-analytics, operator, and Telegram-settings improvements
+  already included in `v0.7.3`.
+
+### Documentation and validation
+
+- Updated the configuration, disaster-recovery, S3 compatibility, Telegram
+  storage-format, README, ROADMAP, and sampled-verification ADR documentation.
+- Added Rust coverage for random sampling, quarantine behavior, migration
+  preservation, recovery markers, and verifier lifecycle behavior.
+- Validation completed with Rust formatting, Clippy, the full Rust workspace
+  test suite, frontend type checks/build, and all 36 Playwright tests.
+
 ## 0.7.3-rc.8 - 2026-09-26
 
 Done jobs:
