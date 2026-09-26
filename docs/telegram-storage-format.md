@@ -174,6 +174,22 @@ revoked, but the admin panel cannot reconstruct their URL.
   artifacts.
 - Chunk payloads must be independently verifiable.
 
+## Read Streaming, Retry, and Resume
+
+S3 and public-share reads fetch the referenced Telegram document for one
+manifest chunk at a time, decrypt and checksum-verify that complete chunk, and
+only then emit its requested byte span. A transient Telegram RPC or transport
+I/O failure discards the partial fetch and retries the same message under the
+configured bounded retry/flood-wait policy. The server never emits a partial or
+unverified chunk before retrying.
+
+Public share responses advertise `Accept-Ranges: bytes` and support a single
+`Range` request with `Content-Range`. If all retries for a chunk are exhausted,
+the response ends with the already-sent bytes intact; a capable client can
+request the remaining range and resume. Missing Telegram messages, decryption
+failures, and checksum mismatches are not treated as transient network errors
+and remain recovery signals.
+
 ## Multipart Manifest Composition
 
 Each completed part has a private manifest and one or more already-published

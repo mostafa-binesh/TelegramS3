@@ -9,7 +9,10 @@ use crate::metadata::{
     BucketRecord, JournalEntry, MetadataError, MetadataStatus, MetadataStore, OperationKind,
 };
 use crate::multipart::{MultipartCompletionPlan, MultipartPart, MultipartSession, MultipartState};
-use crate::telegram::{TelegramConnectionState, TelegramTransportManager};
+use crate::telegram::{
+    RetryDecision, RetryPolicy, TelegramConnectionState, TelegramTransportError,
+    TelegramTransportManager, parse_flood_wait_seconds,
+};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use futures::StreamExt;
@@ -2121,6 +2124,13 @@ impl ObjectFormatService {
                 let ciphertext = match object_format.download_message_bytes(message_id).await {
                     Ok(value) => value,
                     Err(error) => {
+                        warn!(
+                            object_id = %manifest.object_id,
+                            chunk_order = span.order,
+                            telegram_message_id = message_id,
+                            error = %error,
+                            "object stream chunk failed"
+                        );
                         return Some((
                             Err(io::Error::other(error.to_string())),
                             (object_format, manifest, index + 1, spans, true, pin),
@@ -2851,12 +2861,24 @@ impl ObjectFormatService {
     async fn download_message_bytes(&self, message_id: i32) -> Result<Vec<u8>, ObjectFormatError> {
         let transport = self.transport_manager.current().await?;
         if transport.is_mock() {
+            return self.download_message_bytes_once(message_id).await;
+        }
+        retry_telegram_read(transport.retry_policy(), message_id, || {
+            self.download_message_bytes_once(message_id)
+        })
+        .await
+    }
+
+    async fn download_message_bytes_once(
+        &self,
+        message_id: i32,
+    ) -> Result<Vec<u8>, ObjectFormatError> {
+        let transport = self.transport_manager.current().await?;
+        if transport.is_mock() {
             if let Ok(fault) = std::env::var("TELEGRAM_MOCK_READ_FAULT") {
-                return Err(ObjectFormatError::Telegram(
-                    crate::telegram::TelegramTransportError::Rpc(format!(
-                        "{fault}: scripted mock read fault for message {message_id}"
-                    )),
-                ));
+                return Err(ObjectFormatError::Telegram(TelegramTransportError::Rpc(
+                    format!("{fault}: scripted mock read fault for message {message_id}"),
+                )));
             }
             let path = self.mock_telegram_dir().join(format!("{message_id}.bin"));
             if !path.exists() {
@@ -2895,6 +2917,14 @@ impl ObjectFormatService {
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
+    }
+
+    fn is_retryable_telegram_read_error(error: &ObjectFormatError) -> bool {
+        matches!(
+            error,
+            ObjectFormatError::Telegram(TelegramTransportError::Rpc(_))
+                | ObjectFormatError::Telegram(TelegramTransportError::Io(_))
+        )
     }
 
     async fn delete_telegram_messages(&self, message_ids: &[i32]) -> Result<(), ObjectFormatError> {
@@ -2951,6 +2981,46 @@ impl ObjectFormatService {
             }
         }
         Ok(self.metadata.allocate_mock_message_id(observed_max)?)
+    }
+}
+
+async fn retry_telegram_read<F, Fut>(
+    retry_policy: RetryPolicy,
+    message_id: i32,
+    mut read: F,
+) -> Result<Vec<u8>, ObjectFormatError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, ObjectFormatError>>,
+{
+    let mut attempt = 1;
+    loop {
+        match read().await {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) => {
+                if !ObjectFormatService::is_retryable_telegram_read_error(&error) {
+                    return Err(error);
+                }
+                let error_text = error.to_string();
+                let decision =
+                    retry_policy.retry_decision(attempt, parse_flood_wait_seconds(&error_text));
+                let delay = match decision {
+                    RetryDecision::RetryAfter(delay) | RetryDecision::RespectFloodWait(delay) => {
+                        delay
+                    }
+                    RetryDecision::GiveUp => return Err(error),
+                };
+                warn!(
+                    telegram_message_id = message_id,
+                    attempt,
+                    retry_delay_ms = delay.as_millis() as u64,
+                    error = %error_text,
+                    "retrying Telegram chunk download"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+        }
     }
 }
 
@@ -3100,7 +3170,7 @@ mod tests {
     };
     use bytes::Bytes;
     use std::env;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
     use time::Duration;
 
@@ -3156,6 +3226,54 @@ mod tests {
         assert_eq!(plan.chunks.len(), 5);
         assert_eq!(plan.chunks[0].offset, 0);
         assert_eq!(plan.chunks[4].size, 1);
+    }
+
+    #[tokio::test]
+    async fn transient_telegram_read_is_retried_before_returning_data() {
+        let attempts = std::sync::Arc::new(AtomicUsize::new(0));
+        let result =
+            retry_telegram_read(RetryPolicy::new(3, std::time::Duration::ZERO, true), 17, {
+                let attempts = std::sync::Arc::clone(&attempts);
+                move || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if attempt == 0 {
+                            Err(ObjectFormatError::Telegram(TelegramTransportError::Rpc(
+                                "temporary timeout".to_string(),
+                            )))
+                        } else {
+                            Ok(vec![1, 2, 3])
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("transient read should recover");
+
+        assert_eq!(result, vec![1, 2, 3]);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn permanent_telegram_read_failure_is_not_retried() {
+        let attempts = std::sync::Arc::new(AtomicUsize::new(0));
+        let error =
+            retry_telegram_read(RetryPolicy::new(3, std::time::Duration::ZERO, true), 18, {
+                let attempts = std::sync::Arc::clone(&attempts);
+                move || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    async {
+                        Err(ObjectFormatError::InvalidRead(
+                            "telegram message not found".to_string(),
+                        ))
+                    }
+                }
+            })
+            .await
+            .expect_err("missing message should remain a hard read failure");
+
+        assert!(matches!(error, ObjectFormatError::InvalidRead(_)));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[test]

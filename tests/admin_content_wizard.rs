@@ -369,8 +369,34 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
         "public share should preserve the object filename, got {:?}",
         shared.headers.get("content-disposition")
     );
+    assert_eq!(
+        header(&shared, "accept-ranges"),
+        "bytes",
+        "public shares must advertise resumable byte ranges"
+    );
+    let shared_range = raw_request(
+        &client,
+        &bind_addr,
+        "GET",
+        &share_url,
+        &[("Range", "bytes=4-8")],
+        b"",
+    )
+    .await;
+    assert_eq!(shared_range.status, 206, "public share range GET");
+    assert_eq!(shared_range.body, raw[4..=8], "public share range body");
+    assert_eq!(
+        header(&shared_range, "content-range"),
+        format!("bytes 4-8/{}", raw.len()),
+        "public share range metadata"
+    );
     let shared_head = raw_request(&client, &bind_addr, "HEAD", &share_url, &[], b"").await;
     assert_eq!(shared_head.status, 200, "public share HEAD");
+    assert_eq!(
+        header(&shared_head, "accept-ranges"),
+        "bytes",
+        "public share HEAD must advertise resumability"
+    );
     assert!(
         shared_head.body.is_empty(),
         "share HEAD body should be empty"

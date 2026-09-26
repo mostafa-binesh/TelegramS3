@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+## 0.7.4-rc.1 - 2026-09-26
+
+Release candidate for resilient Telegram-backed downloads.
+
+### Download reliability
+
+- Added bounded per-chunk retries for transient Telegram RPC and transport I/O
+  failures while serving S3 and public-share reads. The retry uses the existing
+  Telegram retry count, backoff, and flood-wait policy.
+- Retries discard the incomplete remote fetch and restart the same Telegram
+  document from the beginning. A chunk is emitted only after the existing
+  decrypt and checksum verification succeeds, so a failed retry cannot leak
+  partial or unverified bytes.
+- Missing Telegram messages, decryption failures, checksum mismatches, and
+  other permanent integrity errors remain non-retryable recovery failures.
+- Added object/chunk/message identifiers to exhausted streaming-read warnings
+  for production diagnosis.
+
+### Resume support
+
+- Public `/_public/<token>` responses now advertise `Accept-Ranges: bytes`.
+- Existing single-range handling is covered as a resume path with `206`,
+  `Content-Range`, and the correct remaining body bytes. `HEAD` responses
+  advertise the same capability.
+- No metadata migration is required; existing manifests, Telegram documents,
+  and local databases remain compatible.
+
+### Tests and documentation
+
+- Added retry success and permanent-failure unit coverage.
+- Extended public-share integration coverage for range resume and headers.
+- Documented retry, integrity, resume, and recovery behavior in the README,
+  roadmap, configuration, S3 compatibility, storage-format, disaster-recovery,
+  and ADR documentation.
+
 ## 0.7.4 - 2026-09-26
 
 Stable release promoted from `v0.7.3-rc.8`.

@@ -222,6 +222,10 @@ Completed in this increment:
 - lazy-loaded console views now surface a retryable asset-load error instead of
   remaining on an infinite skeleton; Docker/static serving keeps hashed Vite
   chunks under `/_admin/assets/`
+- public share downloads now retry transient Telegram reads at the current
+  chunk, log exhausted stream failures with object/chunk context, and advertise
+  byte-range resume support so clients can continue after a disconnect without
+  restarting the complete object
 - browser reception now supports bounded resumable chunks, authoritative offset
   re-sync, pause/resume while the reception lease remains active, and explicit
   cancellation cleanup; server restart resumption remains intentionally

@@ -84,6 +84,13 @@ Defaults used by the current scaffold:
 - flood-wait respect: `true`
 - admin UI dist dir: `frontend/dist`
 
+Telegram-backed reads use `retry count`, `retry backoff`, and flood-wait
+settings for transient chunk-download failures. Each retry re-fetches the
+current complete chunk before it is emitted, so partial or unverified data is
+never forwarded. Public share responses advertise `Accept-Ranges: bytes`; a
+client can resume an exhausted stream with a single byte range without any
+additional setting.
+
 ## Operator accounts
 
 Passwords/accounts are stored in `metadata.sqlite` (schema `5`), hashed with

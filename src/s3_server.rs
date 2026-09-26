@@ -564,6 +564,9 @@ async fn handle_share_request(
         HeaderValue::from_str(&manifest.content_type)
             .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     response.headers_mut().insert(
         header::ETAG,
         HeaderValue::from_str(&manifest.checksum.whole_object)
