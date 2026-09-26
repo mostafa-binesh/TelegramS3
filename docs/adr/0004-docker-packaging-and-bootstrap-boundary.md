@@ -26,6 +26,10 @@ The Docker image will package the existing Rust binary directly.
 - The service exposes only the S3 listener on the host.
 - The admin listener remains loopback-only inside the container.
 - State lives on mounted volumes for metadata, chunks/manifests, and sessions.
+- The S3 and loopback admin listeners bind before the background recovery
+  worker performs the first full Telegram-backed chunk snapshot; a slow remote
+  read therefore cannot make a freshly started container appear to be running
+  only at Docker's proxy layer.
 
 ## Consequences
 

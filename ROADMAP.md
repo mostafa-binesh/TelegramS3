@@ -51,6 +51,7 @@ Completed work:
 - startup reconciliation repairs complete staged uploads, marks incomplete objects recovery-required, and quarantines orphaned data
 - committed object payloads now live in Telegram documents/messages while SQLite keeps the control-plane index and journal
 - `doctor` and `server` now fail fast if object-format bootstrap finds unresolved recovery state
+- server listeners bind before the first Telegram-backed recovery snapshot; the background worker publishes recovery visibility after startup instead of blocking the container on remote chunk reads
 
 ## Phase 4 - RustFS integration
 

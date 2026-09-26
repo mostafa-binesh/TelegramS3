@@ -471,7 +471,6 @@ impl ObjectFormatService {
             ObjectEncryption::from_master_key(&master_key),
         )?;
         service.staging_budget = config.staging_budget()?;
-        let _ = service.refresh_recovery_snapshot().await;
         Ok(service)
     }
 
@@ -3413,6 +3412,24 @@ mod tests {
                 .any(|issue| issue.kind == "orphaned_staging_dir")
         );
         assert!(snapshot.2.is_none());
+    }
+
+    #[tokio::test]
+    async fn opening_service_defers_remote_recovery_scan() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        service
+            .put_bytes("bucket", "startup.txt", "text/plain", b"startup")
+            .await
+            .expect("put object");
+        service.shutdown_workers().await;
+        drop(service);
+
+        let reopened = sample_service(&tempdir).await;
+        let snapshot = reopened.cached_recovery_snapshot().expect("snapshot");
+        assert!(snapshot.0.is_none());
+        assert_eq!(snapshot.1.len(), 0);
+        assert_eq!(snapshot.2.as_deref(), Some("Recovery scan pending"));
     }
 
     #[tokio::test]

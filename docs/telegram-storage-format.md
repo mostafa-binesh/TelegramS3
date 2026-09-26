@@ -247,6 +247,12 @@ job can enter the durable queue. Reception progress is held in process memory;
 staged bytes remain encrypted at rest, but a process restart ends the browser
 session and reconciliation handles the stale receiving job as recovery work.
 
+The server does not verify every committed Telegram chunk before binding its
+listeners. The first full recovery snapshot runs in the background worker after
+startup and updates the local recovery view; this keeps health and operator
+access available while a slow or unavailable Telegram read is still being
+checked.
+
 Active S3 transfer jobs are also exposed to the authenticated bucket browser.
 The UI may show a key as receiving, uploading, waiting for Telegram,
 finalizing, or needing attention before its manifest is committed, using the

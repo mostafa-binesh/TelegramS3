@@ -44,12 +44,21 @@ remain revocable but cannot have their URL reconstructed.
 
 ## Interrupted Upload
 
-1. On startup, inspect the operation journal.
-2. The startup reconciliation pass now promotes complete staged uploads,
+1. After the S3 and admin listeners bind, the background recovery worker
+   inspects the operation journal and begins the recovery snapshot.
+2. The recovery pass now promotes complete staged uploads,
    recreates recovery markers for incomplete rows, and quarantines orphaned
    staging artifacts.
 3. Resume only if the upload state is safe to continue.
 4. Otherwise roll back and clean up staging or quarantined artifacts.
+
+The initial recovery snapshot may validate committed chunks against Telegram.
+That remote work is intentionally asynchronous: a slow or unavailable
+Telegram connection must not keep a restarted container listening only through
+Docker's port proxies without the application accepting requests. Until the
+scan completes, the admin recovery view reports that the recovery scan is
+pending; committed-object visibility remains governed by the local metadata
+index and the normal recovery rules below.
 
 ### Interrupted Admin Browser Reception
 

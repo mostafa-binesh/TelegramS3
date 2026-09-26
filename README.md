@@ -39,8 +39,9 @@ staging, and recovery artifacts, not committed payloads.
   listings, delete markers, and full multipart upload sessions, served over a
   RustFS-backed listener.
 - **Journaled, crash-safe object model** — uploads stage invisibly and commit
-  atomically; interrupted writes never appear as objects; startup
-  reconciliation repairs, rolls back, or quarantines incomplete state.
+  atomically; interrupted writes never appear as objects; background startup
+  reconciliation repairs, rolls back, or quarantines incomplete state without
+  delaying the listener while Telegram-backed recovery checks run.
 - **Chunked manifest format** — every object is a canonical manifest plus
   immutable, independently verifiable chunks (SHA-256 checked) published as
   Telegram documents/messages.
@@ -109,6 +110,11 @@ Two complementary surfaces serve the same store:
 - the **admin listener** (default loopback `:9001`) serves `/healthz` and
   `/metrics`, while the authenticated `/_admin` SPA and JSON API live on the
   public listener behind credentials.
+
+The S3 and admin listeners bind before the first full recovery snapshot. That
+snapshot verifies committed Telegram chunks and is refreshed by the background
+worker, so a slow or unavailable Telegram read does not leave a newly started
+container with open Docker ports but no application listener.
 
 A full request-lifecycle and consistency walkthrough is in
 [ARCHITECTURE.md](ARCHITECTURE.md).
