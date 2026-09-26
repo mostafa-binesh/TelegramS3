@@ -155,6 +155,25 @@ After cleanup completes, reconnect and verify that the overview reports `connect
 be logged in again; it is not a storage-peer lookup problem that a new delete
 request will fix.
 
+## Sampled Recovery Verifier
+
+When enabled, the verifier runs once after workers start and then at the
+configured interval. It can be disabled from Telegram settings; this stops
+automatic remote checks without deleting existing recovery markers or changing
+the saved interval/sample policy. For every healthy committed object it selects a fresh uniform random sample of
+the configured number of distinct chunk indexes. The admin overview shows the
+next run, sample policy, distinct broken-file count, and the current verifier
+problem list.
+
+If a sampled message is confirmed missing, cannot be decrypted, or fails its
+checksum, the object is marked `recovery_required` and hidden from the active
+S3 namespace. This is intentional: the server has no trustworthy plaintext
+source from which to recreate that chunk. It preserves the manifest and all
+remaining Telegram evidence, and an operator must re-upload or restore the
+original source (or run repair if a later full verification proves the remote
+payload is intact). Temporary Telegram or network failures remain retryable and
+do not mark the file broken.
+
 ## Interrupted Multipart Upload
 
 1. Check `telegram-s3 auth status` first if the session was refreshed around

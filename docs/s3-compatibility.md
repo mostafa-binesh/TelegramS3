@@ -57,7 +57,9 @@ features, so they are documented separately.
 - The dashboard reports storage overview, endpoint details, capacity, live
   transfer-pipeline analytics, five-second process-scoped client/Telegram
   traffic telemetry, system checks, storage safeguards, Telegram
-  readiness, operator accounts (superadmin-only add/remove), in-app bucket
+  readiness, sampled recovery-verifier enabled/disabled state, timing, and
+  broken-file problems,
+  operator accounts (superadmin-only add/remove), in-app bucket
   creation, and a bucket/object browser (prefix folders + directory markers +
   delete + per-file **upload/download**). Binary content is streamed through
   the same Telegram-backed object-format service and the shared bounded reader

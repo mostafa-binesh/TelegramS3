@@ -15,6 +15,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use grammers_client::media::Media;
 use grammers_client::message::InputMessage;
+use rand_core::{OsRng, RngCore};
 use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use s3s::dto::StreamingBlob;
@@ -110,7 +111,7 @@ pub struct ObjectFormatStatus {
     pub orphaned_chunks: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RecoveryIssue {
     pub object_id: Option<Uuid>,
@@ -369,6 +370,9 @@ pub struct ObjectFormatService {
     transport_manager: std::sync::Arc<TelegramTransportManager>,
     data_dir: PathBuf,
     chunk_size: Arc<RwLock<u64>>,
+    recovery_verify_enabled: Arc<RwLock<bool>>,
+    recovery_verify_interval_secs: Arc<RwLock<u64>>,
+    recovery_verify_chunks: Arc<RwLock<u64>>,
     storage_chat_id: Arc<RwLock<String>>,
     worker_runtime: Arc<WorkerRuntime>,
     read_pins: Arc<Mutex<HashMap<Uuid, u64>>>,
@@ -484,6 +488,31 @@ impl ObjectFormatService {
                 chunk_size
             }
         };
+        let recovery_verify_interval_secs =
+            match metadata.telegram_recovery_verify_interval_secs()? {
+                Some(value) => AppConfig::validate_recovery_verify_interval_secs(value)?,
+                None => {
+                    let value = config.recovery_verify_interval_secs()?;
+                    metadata.set_telegram_recovery_verify_interval_secs(value)?;
+                    value
+                }
+            };
+        let recovery_verify_enabled = match metadata.telegram_recovery_verify_enabled()? {
+            Some(value) => value,
+            None => {
+                let value = config.recovery_verify_enabled()?;
+                metadata.set_telegram_recovery_verify_enabled(value)?;
+                value
+            }
+        };
+        let recovery_verify_chunks = match metadata.telegram_recovery_verify_chunks()? {
+            Some(value) => AppConfig::validate_recovery_verify_chunks(value)?,
+            None => {
+                let value = config.recovery_verify_chunks()?;
+                metadata.set_telegram_recovery_verify_chunks(value)?;
+                value
+            }
+        };
         let mut service = Self::new(
             metadata,
             transport_manager,
@@ -493,6 +522,11 @@ impl ObjectFormatService {
             ObjectEncryption::from_master_key(&master_key),
         )?;
         service.staging_budget = config.staging_budget()?;
+        service.set_recovery_verification_settings(
+            recovery_verify_interval_secs,
+            recovery_verify_chunks,
+        )?;
+        service.set_recovery_verifier_enabled(recovery_verify_enabled);
         Ok(service)
     }
 
@@ -516,6 +550,15 @@ impl ObjectFormatService {
             transport_manager,
             data_dir,
             chunk_size: Arc::new(RwLock::new(chunk_size)),
+            recovery_verify_enabled: Arc::new(RwLock::new(
+                crate::config::DEFAULT_RECOVERY_VERIFY_ENABLED,
+            )),
+            recovery_verify_interval_secs: Arc::new(RwLock::new(
+                crate::config::DEFAULT_RECOVERY_VERIFY_INTERVAL_SECS,
+            )),
+            recovery_verify_chunks: Arc::new(RwLock::new(
+                crate::config::DEFAULT_RECOVERY_VERIFY_CHUNKS,
+            )),
             storage_chat_id: Arc::new(RwLock::new(storage_chat_id)),
             worker_runtime: Arc::new(WorkerRuntime::default()),
             read_pins: Arc::new(Mutex::new(HashMap::new())),
@@ -584,6 +627,54 @@ impl ObjectFormatService {
         crate::config::AppConfig::validate_chunk_size(chunk_size)
             .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
         *self.chunk_size.write().expect("chunk size lock") = chunk_size;
+        Ok(())
+    }
+
+    pub fn recovery_verify_interval_secs(&self) -> u64 {
+        *self
+            .recovery_verify_interval_secs
+            .read()
+            .expect("recovery verification interval lock")
+    }
+
+    pub fn recovery_verifier_enabled(&self) -> bool {
+        *self
+            .recovery_verify_enabled
+            .read()
+            .expect("recovery verification enabled lock")
+    }
+
+    pub fn set_recovery_verifier_enabled(&self, enabled: bool) {
+        *self
+            .recovery_verify_enabled
+            .write()
+            .expect("recovery verification enabled lock") = enabled;
+    }
+
+    pub fn recovery_verify_chunks(&self) -> u64 {
+        *self
+            .recovery_verify_chunks
+            .read()
+            .expect("recovery verification chunks lock")
+    }
+
+    pub fn set_recovery_verification_settings(
+        &self,
+        interval_secs: u64,
+        chunks: u64,
+    ) -> Result<(), ObjectFormatError> {
+        AppConfig::validate_recovery_verify_interval_secs(interval_secs)
+            .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+        AppConfig::validate_recovery_verify_chunks(chunks)
+            .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+        *self
+            .recovery_verify_interval_secs
+            .write()
+            .expect("recovery verification interval lock") = interval_secs;
+        *self
+            .recovery_verify_chunks
+            .write()
+            .expect("recovery verification chunks lock") = chunks;
         Ok(())
     }
 
@@ -1272,8 +1363,56 @@ impl ObjectFormatService {
                         .map(|entry| entry.operation_id);
                     issues.extend(self.inspect_staging_manifest(&manifest, operation_id)?);
                 }
-                CommitState::Committed | CommitState::RecoveryRequired => {
-                    issues.extend(self.inspect_committed_manifest(&manifest).await?);
+                CommitState::Committed => {
+                    let mut sampled_issues = self.inspect_committed_manifest(&manifest).await?;
+                    let durable_issues: Vec<RecoveryIssue> = sampled_issues
+                        .iter()
+                        .filter(|issue| {
+                            matches!(
+                                issue.kind.as_str(),
+                                "invalid_manifest" | "missing_chunk" | "corrupted_chunk"
+                            )
+                        })
+                        .cloned()
+                        .collect();
+                    if !durable_issues.is_empty() {
+                        self.metadata.update_manifest_state(
+                            manifest.object_id,
+                            CommitState::RecoveryRequired,
+                        )?;
+                        let mut persisted = durable_issues.clone();
+                        for issue in &mut persisted {
+                            issue.commit_state = Some(CommitState::RecoveryRequired);
+                        }
+                        self.metadata.set_object_recovery_marker(
+                            manifest.object_id,
+                            &manifest.bucket,
+                            &manifest.key,
+                            &serde_json::to_string(&persisted)?,
+                        )?;
+                        for issue in &mut sampled_issues {
+                            issue.commit_state = Some(CommitState::RecoveryRequired);
+                        }
+                    }
+                    issues.extend(sampled_issues);
+                }
+                CommitState::RecoveryRequired => {
+                    if let Some(details_json) =
+                        self.metadata.object_recovery_marker(manifest.object_id)?
+                    {
+                        let persisted = serde_json::from_str::<Vec<RecoveryIssue>>(&details_json)?;
+                        issues.extend(persisted);
+                    } else {
+                        issues.push(self.build_recovery_issue(
+                            &manifest,
+                            "object_recovery_required",
+                            "object requires recovery".to_string(),
+                            vec![
+                                "the object is hidden from S3 reads until a full repair verification succeeds".to_string(),
+                                "re-upload or restore the original source; the server cannot recreate a missing chunk from metadata alone".to_string(),
+                            ],
+                        ));
+                    }
                 }
                 CommitState::Orphaned => {
                     issues.push(RecoveryIssue {
@@ -2311,6 +2450,7 @@ impl ObjectFormatService {
         let mut issues = Vec::new();
         let mut missing_details = Vec::new();
         let mut corrupted_details = Vec::new();
+        let mut unavailable_details = Vec::new();
         let mut invalid_details = Vec::new();
 
         if let Err(error) = manifest.validate() {
@@ -2324,7 +2464,10 @@ impl ObjectFormatService {
             ));
         }
 
-        for chunk in &manifest.chunks {
+        let chunk_indices =
+            random_chunk_sample(manifest.chunks.len(), self.recovery_verify_chunks());
+        for index in chunk_indices {
+            let chunk = &manifest.chunks[index];
             let message_id = match i32::try_from(chunk.telegram_message_id) {
                 Ok(message_id) => message_id,
                 Err(_) => {
@@ -2346,8 +2489,8 @@ impl ObjectFormatService {
                             chunk.order, message_id
                         ));
                     } else {
-                        corrupted_details.push(format!(
-                            "chunk {} could not be read from Telegram message {}: {}",
+                        unavailable_details.push(format!(
+                            "chunk {} could not be verified from Telegram message {}: {}",
                             chunk.order, message_id, message
                         ));
                     }
@@ -2402,6 +2545,14 @@ impl ObjectFormatService {
                 "corrupted_chunk",
                 format!("{} chunk(s) corrupted", corrupted_details.len()),
                 corrupted_details,
+            ));
+        }
+        if !unavailable_details.is_empty() {
+            issues.push(self.build_recovery_issue(
+                manifest,
+                "verification_unavailable",
+                "one or more sampled chunks could not be verified yet".to_string(),
+                unavailable_details,
             ));
         }
 
@@ -2898,6 +3049,44 @@ fn chunk_file_name(order: u32) -> String {
     format!("chunk-{order:08}.bin")
 }
 
+/// Select a uniformly random set of distinct chunk indexes without allocating
+/// a second list the size of a large object. A fresh OS-random source is used
+/// on every scan, so the verifier does not repeatedly inspect the same prefix.
+fn random_chunk_sample(chunk_count: usize, requested: u64) -> Vec<usize> {
+    let requested = usize::try_from(requested)
+        .unwrap_or(usize::MAX)
+        .min(chunk_count);
+    if requested == 0 || chunk_count == 0 {
+        return Vec::new();
+    }
+
+    let mut rng = OsRng;
+    let mut selected = Vec::with_capacity(requested);
+    for index in 0..chunk_count {
+        if selected.len() < requested {
+            selected.push(index);
+            continue;
+        }
+        let slot = random_below(&mut rng, index + 1);
+        if slot < requested {
+            selected[slot] = index;
+        }
+    }
+    selected
+}
+
+fn random_below(rng: &mut OsRng, upper: usize) -> usize {
+    debug_assert!(upper > 0);
+    let upper = u64::try_from(upper).expect("usize must fit in u64");
+    let threshold = upper.wrapping_neg() % upper;
+    loop {
+        let value = rng.next_u64();
+        if value >= threshold {
+            return (value % upper) as usize;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2967,6 +3156,27 @@ mod tests {
         assert_eq!(plan.chunks.len(), 5);
         assert_eq!(plan.chunks[0].offset, 0);
         assert_eq!(plan.chunks[4].size, 1);
+    }
+
+    #[test]
+    fn recovery_verifier_samples_distinct_random_chunk_indexes() {
+        let sample = random_chunk_sample(100, 12);
+        let mut sorted = sample.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sample.len(), 12);
+        assert_eq!(sorted.len(), sample.len());
+        assert!(sample.iter().all(|index| *index < 100));
+
+        let all = random_chunk_sample(3, 99);
+        assert_eq!(all.len(), 3);
+        assert_eq!(
+            all.iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]
@@ -3476,6 +3686,60 @@ mod tests {
                 .any(|issue| issue.kind == "orphaned_staging_dir")
         );
         assert!(snapshot.2.is_none());
+    }
+
+    #[tokio::test]
+    async fn verifier_quarantines_an_object_after_confirmed_sample_failure() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        service
+            .set_recovery_verification_settings(60, 3)
+            .expect("verifier settings");
+        let manifest = service
+            .put_bytes(
+                "bucket",
+                "sampled.txt",
+                "text/plain",
+                &vec![7_u8; 2_100_000],
+            )
+            .await
+            .expect("put object");
+        let failed_message = manifest.chunks[1].telegram_message_id;
+        fs::write(
+            tempdir
+                .path()
+                .join(format!("data/mock-telegram/{failed_message}.bin")),
+            b"corrupt sampled payload",
+        )
+        .expect("corrupt remote chunk");
+
+        service
+            .refresh_recovery_snapshot()
+            .await
+            .expect("refresh verifier");
+
+        assert!(
+            service
+                .get_active_manifest("bucket", "sampled.txt")
+                .expect("active manifest")
+                .is_none()
+        );
+        assert_eq!(
+            service
+                .metadata
+                .get_manifest(manifest.object_id)
+                .expect("manifest")
+                .expect("stored manifest")
+                .commit_state,
+            CommitState::RecoveryRequired
+        );
+        let snapshot = service.cached_recovery_snapshot().expect("snapshot");
+        assert!(
+            snapshot
+                .1
+                .iter()
+                .any(|issue| issue.kind == "corrupted_chunk")
+        );
     }
 
     #[tokio::test]

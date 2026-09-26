@@ -29,6 +29,16 @@ const overview = {
     recovery_required_objects: 0
   },
   recovery: { issue_count: 0, unacknowledged_count: 0, scan_ok: true, issues: [] },
+  verifier: {
+    enabled: true,
+    interval_secs: 300,
+    chunks_per_object: 1,
+    status: 'healthy',
+    broken_files: 0,
+    last_run_at: '2026-01-01T00:00:00Z',
+    next_run_at: '2026-01-01T00:05:00Z',
+    problems: []
+  },
   telegram: {
     session_state: 'authorized',
     connection_state: 'connected',
@@ -52,6 +62,9 @@ type MockOptions = {
 async function mockAdminApi(page: Page, options: MockOptions = {}) {
   let loggedIn = false;
   let chunkSize = overview.storage.chunk_size;
+  let recoveryVerifyEnabled = true;
+  let recoveryVerifyIntervalSecs = 300;
+  let recoveryVerifyChunks = 1;
   let connectionRemoved = false;
   let createdFolders = new Set(['docs']);
   const deletedKeys = new Set<string>();
@@ -94,6 +107,7 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
           ...overview,
           storage: { ...overview.storage, buckets: buckets.length, committed_objects: 2 - deletedKeys.size, active_objects: 2 - deletedKeys.size, chunk_size: chunkSize },
           recovery: { ...overview.recovery, issue_count: issue.filter((item) => !item.acknowledged_at).length, unacknowledged_count: issue.filter((item) => !item.acknowledged_at).length, issues: issue },
+          verifier: { ...overview.verifier, enabled: recoveryVerifyEnabled, status: !recoveryVerifyEnabled ? 'disabled' : issue.length ? 'attention' : 'healthy', broken_files: issue.length ? 1 : 0, problems: issue },
           telegram: connectionRemoved ? { ...overview.telegram, connection_state: 'needs_reauth', detail: 'Telegram storage is not connected' } : overview.telegram
         }
       });
@@ -103,12 +117,16 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
       return route.fulfill({ json: { settings: { telegram_api_id: '12345', telegram_api_hash: 'hash', telegram_storage_chat_id: '-1001234567890', telegram_proxy_url: '', telegram_proxy_username: '', telegram_proxy_password: '', telegram_proxy_mode: 'auto', telegram_account_phone: '+15551234567' } } });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'GET') {
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, source: 'database' } });
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, recovery_verify_enabled: recoveryVerifyEnabled, recovery_verify_interval_secs: recoveryVerifyIntervalSecs, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: recoveryVerifyChunks, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, source: 'database' } });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'POST') {
       if (options.storageFailure) return route.fulfill({ status: 400, json: { error: 'storage settings rejected for this test' } });
-      chunkSize = (request.postDataJSON() as { chunk_size: number }).chunk_size;
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, source: 'database' } });
+      const body = request.postDataJSON() as { chunk_size: number; recovery_verify_enabled: boolean; recovery_verify_interval_secs: number; recovery_verify_chunks: number };
+      chunkSize = body.chunk_size;
+      recoveryVerifyEnabled = body.recovery_verify_enabled;
+      recoveryVerifyIntervalSecs = body.recovery_verify_interval_secs;
+      recoveryVerifyChunks = body.recovery_verify_chunks;
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, recovery_verify_enabled: recoveryVerifyEnabled, recovery_verify_interval_secs: recoveryVerifyIntervalSecs, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: recoveryVerifyChunks, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, source: 'database' } });
     }
     if (path === '/telegram/disconnect' && request.method() === 'POST') {
       connectionRemoved = true;
@@ -581,12 +599,56 @@ test('storage policy tab loads, applies MiB to bytes, and reports a save failure
   await expect(page.getByLabel('New upload chunk size')).toHaveValue('1');
   await page.getByRole('button', { name: '8 MiB', exact: true }).click();
   await expect(page.getByLabel('New upload chunk size')).toHaveValue('8');
+  await page.getByRole('spinbutton', { name: 'Verification interval seconds' }).fill('600');
+  await page.getByLabel('Random chunks per file').fill('3');
   const [saveRequest] = await Promise.all([
     page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/telegram/storage-settings') && candidate.method() === 'POST'),
     page.getByRole('button', { name: 'Apply storage policy' }).click()
   ]);
-  expect(saveRequest.postDataJSON()).toMatchObject({ chunk_size: 8 * 1_048_576 });
+  expect(saveRequest.postDataJSON()).toMatchObject({ chunk_size: 8 * 1_048_576, recovery_verify_enabled: true, recovery_verify_interval_secs: 600, recovery_verify_chunks: 3 });
   await expect(page.getByRole('alert')).toContainText('storage settings rejected for this test');
+});
+
+test('overview shows verifier timing, broken-file totals, and its problem list', async ({ page }) => {
+  await mockAdminApi(page, {
+    recoveryIssue: {
+      id: 'broken-1',
+      object_id: 'object-1',
+      path: 'backups/broken.tar',
+      commit_state: 'recovery_required',
+      kind: 'missing_chunk',
+      summary: '1 chunk missing',
+      details: ['chunk 4 is missing']
+    }
+  });
+  await signIn(page);
+  const verifier = page.locator('.verifier-card');
+  await expect(verifier.getByRole('heading', { name: 'Remote integrity checks' })).toBeVisible();
+  await expect(verifier.getByText('Next verifier')).toBeVisible();
+  await expect(verifier.getByText('Broken files')).toBeVisible();
+  await expect(verifier.getByText('1', { exact: true })).toBeVisible();
+  await expect(verifier.getByText('Problems found')).toBeVisible();
+  await expect(verifier.getByText('backups/broken.tar')).toBeVisible();
+  await expect(verifier.getByText('missing chunk')).toBeVisible();
+});
+
+test('storage policy can disable the verifier and overview reports it', async ({ page }) => {
+  await mockAdminApi(page);
+  await signIn(page);
+  await page.getByRole('button', { name: 'Telegram settings' }).click();
+  await page.getByRole('tab', { name: /Storage policy/ }).click();
+  await page.getByLabel('Enable automatic recovery verification').uncheck();
+  const [saveRequest] = await Promise.all([
+    page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/telegram/storage-settings') && candidate.method() === 'POST'),
+    page.getByRole('button', { name: 'Apply storage policy' }).click()
+  ]);
+  expect(saveRequest.postDataJSON()).toMatchObject({ recovery_verify_enabled: false });
+  await expect(page.locator('p.storage-message[role="status"]')).toContainText('Automatic recovery verification is disabled.');
+
+  await page.getByRole('button', { name: 'Overview', exact: true }).click();
+  const verifier = page.locator('.verifier-card');
+  await expect(verifier.locator('.score-chip')).toHaveText('Disabled');
+  await expect(verifier.getByText('Automatic verification is disabled.')).toBeVisible();
 });
 
 test('storage policy success is reflected after leaving and returning to the tab', async ({ page }) => {
@@ -595,6 +657,8 @@ test('storage policy success is reflected after leaving and returning to the tab
   await page.getByRole('button', { name: 'Telegram settings' }).click();
   await page.getByRole('tab', { name: /Storage policy/ }).click();
   await page.getByRole('button', { name: '8 MiB', exact: true }).click();
+  await page.getByRole('spinbutton', { name: 'Verification interval seconds' }).fill('900');
+  await page.getByLabel('Random chunks per file').fill('4');
   await Promise.all([
     page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/telegram/storage-settings') && candidate.method() === 'POST'),
     page.getByRole('button', { name: 'Apply storage policy' }).click()
@@ -603,6 +667,8 @@ test('storage policy success is reflected after leaving and returning to the tab
   await page.getByRole('tab', { name: /Connection/ }).click();
   await page.getByRole('tab', { name: /Storage policy/ }).click();
   await expect(page.getByText('8.00 MiB now')).toBeVisible();
+  await expect(page.getByRole('spinbutton', { name: 'Verification interval seconds' })).toHaveValue('900');
+  await expect(page.getByLabel('Random chunks per file')).toHaveValue('4');
 });
 
 test('connection removal shows the account and stays disabled until its exact number is entered', async ({ page }) => {
@@ -628,7 +694,7 @@ test('connection removal shows the account and stays disabled until its exact nu
 test('recovery issue can be acknowledged and restored from the UI', async ({ page }) => {
   await mockAdminApi(page, { recoveryIssue: { id: 'issue-1', kind: 'missing_chunk', path: 'release-test/readme.txt', summary: 'Missing chunk', details: ['chunk 0 is unavailable'] } });
   await signIn(page);
-  await page.getByRole('button', { name: 'Recovery' }).click();
+    await page.getByRole('button', { name: 'Recovery', exact: true }).click();
   await expect(page.getByRole('heading', { name: '1 file needs attention' })).toBeVisible();
   await page.getByText('release-test/readme.txt').click();
   await page.getByRole('button', { name: 'Acknowledge' }).click();

@@ -350,14 +350,25 @@ impl ObjectFormatService {
         let service = self.clone();
         let mut recovery_shutdown = shutdown_rx.clone();
         let recovery_handle = tokio::spawn(async move {
-            let _ = service.refresh_recovery_snapshot().await;
+            if service.recovery_verifier_enabled() {
+                let _ = service.refresh_recovery_snapshot().await;
+            }
             loop {
                 if *recovery_shutdown.borrow() {
                     break;
                 }
+                if !service.recovery_verifier_enabled() {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                        _ = recovery_shutdown.changed() => {}
+                    }
+                    continue;
+                }
                 tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
-                        let _ = service.refresh_recovery_snapshot().await;
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(service.recovery_verify_interval_secs())) => {
+                        if service.recovery_verifier_enabled() {
+                            let _ = service.refresh_recovery_snapshot().await;
+                        }
                     }
                     _ = recovery_shutdown.changed() => {}
                 }

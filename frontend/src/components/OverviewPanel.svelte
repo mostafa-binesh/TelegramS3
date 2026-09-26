@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { formatBytes, formatCount } from '../lib/format';
   import LoadError from './LoadError.svelte';
   import type { OverviewState } from '../lib/types';
@@ -41,6 +42,26 @@
   $: trafficMetrics = overview?.traffic ?? emptyTrafficMetrics;
   $: checks = overview?.checks ?? [];
   $: passingChecks = checks.filter((check) => check.ok).length;
+  let now = Date.now();
+  onMount(() => {
+    const timer = window.setInterval(() => now = Date.now(), 1000);
+    return () => window.clearInterval(timer);
+  });
+
+  function formatCountdown(value?: string | null, enabled = true) {
+    if (!enabled) return 'Disabled';
+    if (!value) return 'Waiting for first scan';
+    const remaining = Math.floor((Date.parse(value) - now) / 1000);
+    if (remaining <= 0) return 'Due now';
+    const minutes = Math.floor(remaining / 60);
+    const seconds = remaining % 60;
+    if (minutes >= 60) return `in ${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+    return `in ${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+  }
+
+  function verifierStatusLabel(status: string) {
+    return status === 'disabled' ? 'Disabled' : status === 'healthy' ? 'Healthy' : status === 'attention' ? 'Needs attention' : status === 'unavailable' ? 'Unavailable' : 'Starting';
+  }
 </script>
 
 <section class="section-head overview-head">
@@ -120,6 +141,23 @@
         <p class="fine-print traffic-note">Payload totals only; protocol overhead is excluded. Counters reset when the server process restarts.</p>
       {/if}
     </article>
+    <article class="card surface verifier-card">
+      <div class="analytics-heading"><div><p class="card-label">Recovery verifier</p><h2>Remote integrity checks</h2></div><span class:healthy={overview?.verifier?.status === 'healthy'} class:attention={overview?.verifier?.status === 'attention'} class:disabled={overview?.verifier?.status === 'disabled'} class="score-chip">{verifierStatusLabel(overview?.verifier?.status ?? 'pending')}</span></div>
+      {#if loading || !overview}<div class="skeleton" style="height:132px"></div>{:else}
+        <div class="verifier-summary">
+          <div><span>Next verifier</span><strong>{formatCountdown(overview.verifier?.next_run_at, overview.verifier?.enabled ?? true)}</strong><small>{overview.verifier?.enabled === false ? 'not scheduled' : `${overview.verifier?.interval_secs ?? 0}s interval`}</small></div>
+          <div><span>Random sample</span><strong>{overview.verifier?.chunks_per_object ?? 0} / file</strong><small>fresh chunks per scan</small></div>
+          <div><span>Broken files</span><strong class:bad={(overview.verifier?.broken_files ?? 0) > 0}>{formatCount(overview.verifier?.broken_files ?? 0)}</strong><small>confirmed recovery findings</small></div>
+        </div>
+        {#if overview.verifier?.problems?.length}
+          <div class="verifier-problems" aria-label="Verifier problems">
+            <div class="problem-heading"><strong>Problems found</strong><button class="btn-link" type="button" on:click={onRecovery}>Open recovery →</button></div>
+            {#each overview.verifier.problems.slice(0, 5) as problem (problem.id)}<div class="problem-row"><span class:confirmed={problem.commit_state === 'recovery_required'} class="problem-dot" aria-hidden="true"></span><div><strong>{problem.path ?? problem.summary}</strong><small>{problem.summary}</small></div><span class="problem-kind">{problem.kind.replaceAll('_', ' ')}</span></div>{/each}
+            {#if overview.verifier.problems.length > 5}<p class="fine-print">Showing 5 of {formatCount(overview.verifier.problems.length)} verifier problem(s).</p>{/if}
+          </div>
+        {:else if overview.verifier?.enabled === false}<p class="fine-print">Automatic verification is disabled. Existing recovery findings remain available, but no new remote checks will run until it is enabled in Telegram settings.</p>{:else}<p class="fine-print">No verifier problems have been found. A temporary Telegram read issue stays retryable and does not mark the file broken.</p>{/if}
+      {/if}
+    </article>
     <article class="card surface posture-card">
       <div class="analytics-heading"><div><p class="card-label">Operational posture</p><h2>Storage safeguards</h2></div><span class="fine-print">Current snapshot</span></div>
       {#if loading || !overview}<div class="skeleton" style="height:72px"></div>{:else}<div class="posture-grid"><div><span>Recovery markers</span><strong>{formatCount(overview.storage?.recovery_markers ?? 0)}</strong></div><div><span>Recovery-required objects</span><strong>{formatCount(overview.storage?.recovery_required_objects ?? 0)}</strong></div><div><span>Cleanup requiring review</span><strong>{formatCount(transferMetrics.cleanup_recovery_required)}</strong></div><div><span>Configured chunk size</span><strong>{formatBytes(overview.storage?.chunk_size ?? 0)}</strong></div></div>{/if}
@@ -140,6 +178,7 @@
   .live-chip span { width: 7px; height: 7px; border-radius: 50%; background: #2e9a73; box-shadow: 0 0 0 4px rgba(46,154,115,.12); }
   .score-chip { flex: 0 0 auto; padding: 6px 9px; border: 1px solid #efc88b; border-radius: 999px; background: #fff8e9; color: #9a630f; font-size: .7rem; font-weight: 800; }
   .score-chip.clear, .score-chip.healthy { border-color: #b8dfce; background: #effaf5; color: #197658; }
+  .score-chip.disabled { border-color: #d7dfe6; background: #f1f3f5; color: #68798a; }
   .pipeline-chart { display: flex; height: 18px; overflow: hidden; border-radius: 999px; background: #edf1f5; }
   .pipeline-segment { min-width: 0; }
   .pipeline-segment.pending, .pipeline-legend .pending { background: #3d8ac5; }
@@ -184,6 +223,25 @@
   .traffic-row > strong { min-width: 60px; color: #203b57; font-size: .76rem; text-align: right; }
   .traffic-note { margin: 0; }
   .posture-card { grid-column: 1 / -1; }
+  .verifier-card { grid-column: 1 / -1; }
+  .score-chip.attention { border-color: #efc88b; background: #fff8e9; color: #9a630f; }
+  .verifier-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .verifier-summary > div { padding: 13px 14px; border: 1px solid #e1e9f0; border-radius: 12px; background: #fbfcfe; }
+  .verifier-summary span, .verifier-summary strong, .verifier-summary small { display: block; }
+  .verifier-summary span { color: var(--muted); font-size: .7rem; }
+  .verifier-summary strong { margin-top: 5px; color: #203b57; font-size: 1.02rem; }
+  .verifier-summary strong.bad { color: #b24646; }
+  .verifier-summary small { margin-top: 4px; color: var(--muted); font-size: .68rem; }
+  .verifier-problems { display: grid; gap: 9px; padding-top: 15px; border-top: 1px solid var(--border); }
+  .problem-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #203b57; font-size: .82rem; }
+  .problem-row { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 9px 0; border-bottom: 1px solid #edf1f5; }
+  .problem-row:last-of-type { border-bottom: 0; }
+  .problem-dot { width: 8px; height: 8px; border-radius: 50%; background: #d59a47; box-shadow: 0 0 0 4px rgba(213,154,71,.12); }
+  .problem-dot.confirmed { background: #c35a5a; box-shadow: 0 0 0 4px rgba(195,90,90,.12); }
+  .problem-row strong, .problem-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .problem-row strong { color: #294967; font-size: .76rem; }
+  .problem-row small { margin-top: 3px; color: var(--muted); font-size: .67rem; }
+  .problem-kind { color: #7890a6; font-size: .63rem; text-transform: uppercase; }
   .posture-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
   .posture-grid div { padding: 12px 13px; border: 1px solid #e1e9f0; border-radius: 12px; background: #fbfcfe; }
   .posture-grid span, .posture-grid strong { display: block; }
@@ -204,6 +262,6 @@
   .corrupted.attention { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); background: color-mix(in srgb, var(--danger) 5%, var(--surface)); }
   .corrupted.attention strong { color: var(--danger); }
   .card-link { margin-top: .6rem; font-size: .85rem; }
-  @media (max-width: 760px) { .analysis-grid, .insight-grid, .traffic-grid { grid-template-columns: 1fr; } .posture-card, .traffic-card { grid-column: auto; } .posture-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  @media (max-width: 480px) { .metric-strip { grid-template-columns: 1fr; gap: 8px; } .posture-grid { grid-template-columns: 1fr; } .traffic-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; } .traffic-label { grid-column: 1 / -1; } .traffic-meter { grid-column: 1; } }
+  @media (max-width: 760px) { .analysis-grid, .insight-grid, .traffic-grid { grid-template-columns: 1fr; } .posture-card, .traffic-card, .verifier-card { grid-column: auto; } .posture-grid, .verifier-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 480px) { .metric-strip { grid-template-columns: 1fr; gap: 8px; } .posture-grid, .verifier-summary { grid-template-columns: 1fr; } .traffic-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; } .traffic-label { grid-column: 1 / -1; } .traffic-meter { grid-column: 1; } }
 </style>

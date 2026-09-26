@@ -170,6 +170,13 @@
   let storageChunkSizeMiB = '1';
   let storageChunkSizeMin = 1;
   let storageChunkSizeMax = 2000000000;
+  let recoveryVerifyIntervalSecs = 300;
+  let recoveryVerifyIntervalMin = 60;
+  let recoveryVerifyIntervalMax = 604800;
+  let recoveryVerifyChunks = 1;
+  let recoveryVerifyChunksMin = 1;
+  let recoveryVerifyChunksMax = 1024;
+  let recoveryVerifyEnabled = true;
   let storageSettingsBusy = false;
   let storageSettingsError = '';
   let storageSettingsMessage = '';
@@ -364,11 +371,29 @@
     }
   }
 
-  function applyStorageSettings(settings: { chunk_size: number; min_chunk_size: number; max_chunk_size: number }) {
+  function applyStorageSettings(settings: {
+    chunk_size: number;
+    min_chunk_size: number;
+    max_chunk_size: number;
+    recovery_verify_enabled?: boolean;
+    recovery_verify_interval_secs: number;
+    min_recovery_verify_interval_secs: number;
+    max_recovery_verify_interval_secs: number;
+    recovery_verify_chunks: number;
+    min_recovery_verify_chunks: number;
+    max_recovery_verify_chunks: number;
+  }) {
     storageChunkSizeBytes = settings.chunk_size;
     storageChunkSizeMin = settings.min_chunk_size;
     storageChunkSizeMax = settings.max_chunk_size;
     storageChunkSizeMiB = (settings.chunk_size / 1048576).toFixed(3).replace(/\.?(0+)$/, '');
+    recoveryVerifyEnabled = settings.recovery_verify_enabled ?? true;
+    recoveryVerifyIntervalSecs = settings.recovery_verify_interval_secs ?? 300;
+    recoveryVerifyIntervalMin = settings.min_recovery_verify_interval_secs ?? 60;
+    recoveryVerifyIntervalMax = settings.max_recovery_verify_interval_secs ?? 604800;
+    recoveryVerifyChunks = settings.recovery_verify_chunks ?? 1;
+    recoveryVerifyChunksMin = settings.min_recovery_verify_chunks ?? 1;
+    recoveryVerifyChunksMax = settings.max_recovery_verify_chunks ?? 1024;
     storageSettingsError = '';
   }
 
@@ -379,9 +404,16 @@
     const mib = Number(storageChunkSizeMiB);
     const bytes = Number.isFinite(mib) && mib > 0 ? Math.round(mib * 1048576) : 0;
     try {
-      const response = await saveStorageSettings(session?.csrf_token, { chunk_size: bytes });
+      const response = await saveStorageSettings(session?.csrf_token, {
+        chunk_size: bytes,
+        recovery_verify_enabled: recoveryVerifyEnabled,
+        recovery_verify_interval_secs: Number(recoveryVerifyIntervalSecs),
+        recovery_verify_chunks: Number(recoveryVerifyChunks)
+      });
       applyStorageSettings(response);
-      storageSettingsMessage = 'Storage policy updated. New uploads use this size immediately; active uploads keep their original policy.';
+      storageSettingsMessage = recoveryVerifyEnabled
+        ? 'Storage policy updated. New uploads use this size immediately; verification is enabled on the new schedule.'
+        : 'Storage policy updated. Automatic recovery verification is disabled.';
     } catch (cause) {
       storageSettingsError = normalizeError(cause);
       throw cause;
@@ -929,7 +961,7 @@
         {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else if routeLoadError}<LoadError title="Could not load interrupted transfers" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {/if}
     {:else if view === 'telegram'}
-      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab={telegramTab} onTabChange={(tab: TelegramTab) => navigate({ view: 'telegram', telegramTab: tab })} settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose} onRemoveConnection={removeCurrentConnection}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Telegram settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
+      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab={telegramTab} onTabChange={(tab: TelegramTab) => navigate({ view: 'telegram', telegramTab: tab })} settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} bind:recoveryVerifyEnabled bind:recoveryVerifyIntervalSecs {recoveryVerifyIntervalMin} {recoveryVerifyIntervalMax} bind:recoveryVerifyChunks {recoveryVerifyChunksMin} {recoveryVerifyChunksMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose} onRemoveConnection={removeCurrentConnection}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Telegram settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}

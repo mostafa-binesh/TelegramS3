@@ -151,13 +151,13 @@ async function mockAdminApi(
       });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'GET') {
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, source: 'database' } });
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, recovery_verify_enabled: true, recovery_verify_interval_secs: 300, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: 1, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, source: 'database' } });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'POST') {
       if (options.storageSettingsFailure) return route.fulfill({ status: 400, json: { error: 'storage settings rejected for this test' } });
       const body = request.postDataJSON() as { chunk_size: number };
       chunkSize = body.chunk_size;
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, source: 'database' } });
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, recovery_verify_enabled: true, recovery_verify_interval_secs: 300, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: 1, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, source: 'database' } });
     }
     if (path === '/telegram/wizard/begin' && request.method() === 'POST') {
       return route.fulfill({ json: { phase: 'code', message: null } });

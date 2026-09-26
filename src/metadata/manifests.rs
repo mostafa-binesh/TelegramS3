@@ -701,6 +701,13 @@ impl MetadataStore {
                 }
             }
 
+            if commit_state != CommitState::RecoveryRequired {
+                tx.execute(
+                    "DELETE FROM recovery_markers WHERE marker_key = ?1",
+                    params![format!("object:{object_id}")],
+                )?;
+            }
+
             tx.commit()?;
             Ok(manifest)
         })

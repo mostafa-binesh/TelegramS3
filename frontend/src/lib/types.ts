@@ -122,6 +122,17 @@ export interface RecoveryState {
   issues: RecoveryIssue[];
 }
 
+export interface VerifierState {
+  enabled: boolean;
+  interval_secs: number;
+  chunks_per_object: number;
+  status: 'pending' | 'healthy' | 'attention' | 'unavailable' | string;
+  broken_files: number;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  problems: RecoveryIssue[];
+}
+
 export interface OverviewState {
   checked_at?: string;
   session?: { authenticated: boolean; user?: UserInfo };
@@ -129,6 +140,7 @@ export interface OverviewState {
   transfers?: DurableMetrics;
   traffic?: TrafficMetrics;
   recovery?: RecoveryState;
+  verifier?: VerifierState;
   telegram?: {
     session_state: string;
     connection_state: string;
@@ -169,6 +181,13 @@ export interface StorageSettings {
   chunk_size: number;
   min_chunk_size: number;
   max_chunk_size: number;
+  recovery_verify_enabled: boolean;
+  recovery_verify_interval_secs: number;
+  min_recovery_verify_interval_secs: number;
+  max_recovery_verify_interval_secs: number;
+  recovery_verify_chunks: number;
+  min_recovery_verify_chunks: number;
+  max_recovery_verify_chunks: number;
   source: 'database' | string;
 }
 

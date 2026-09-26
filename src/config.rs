@@ -10,6 +10,13 @@ const DEFAULT_DATA_DIR: &str = "data";
 pub const MIN_CHUNK_SIZE: u64 = 1;
 pub const MAX_CHUNK_SIZE: u64 = 2_000_000_000;
 pub const DEFAULT_CHUNK_SIZE: u64 = 1_048_576;
+pub const MIN_RECOVERY_VERIFY_INTERVAL_SECS: u64 = 60;
+pub const MAX_RECOVERY_VERIFY_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
+pub const DEFAULT_RECOVERY_VERIFY_INTERVAL_SECS: u64 = 300;
+pub const MIN_RECOVERY_VERIFY_CHUNKS: u64 = 1;
+pub const MAX_RECOVERY_VERIFY_CHUNKS: u64 = 1024;
+pub const DEFAULT_RECOVERY_VERIFY_CHUNKS: u64 = 1;
+pub const DEFAULT_RECOVERY_VERIFY_ENABLED: bool = true;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppConfig {
@@ -17,6 +24,9 @@ pub struct AppConfig {
     pub telegram_data_dir: Option<String>,
     pub telegram_session_path: Option<String>,
     pub telegram_chunk_size: Option<String>,
+    pub telegram_recovery_verify_enabled: Option<String>,
+    pub telegram_recovery_verify_interval_secs: Option<String>,
+    pub telegram_recovery_verify_chunks: Option<String>,
     pub telegram_staging_max_bytes: Option<String>,
     pub telegram_connection_timeout_secs: Option<String>,
     pub telegram_request_timeout_secs: Option<String>,
@@ -74,6 +84,9 @@ impl AppConfig {
             telegram_data_dir: read("TELEGRAM_DATA_DIR"),
             telegram_session_path: read("TELEGRAM_SESSION_PATH"),
             telegram_chunk_size: read("TELEGRAM_CHUNK_SIZE"),
+            telegram_recovery_verify_enabled: read("TELEGRAM_RECOVERY_VERIFY_ENABLED"),
+            telegram_recovery_verify_interval_secs: read("TELEGRAM_RECOVERY_VERIFY_INTERVAL_SECS"),
+            telegram_recovery_verify_chunks: read("TELEGRAM_RECOVERY_VERIFY_CHUNKS"),
             telegram_staging_max_bytes: read("TELEGRAM_STAGING_MAX_BYTES"),
             telegram_connection_timeout_secs: read("TELEGRAM_CONNECTION_TIMEOUT_SECS"),
             telegram_request_timeout_secs: read("TELEGRAM_REQUEST_TIMEOUT_SECS"),
@@ -128,6 +141,51 @@ impl AppConfig {
     pub fn validate_chunk_size(value: u64) -> Result<u64, ConfigError> {
         if !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&value) {
             return Err(ConfigError::Invalid("TELEGRAM_CHUNK_SIZE"));
+        }
+        Ok(value)
+    }
+
+    pub fn recovery_verify_interval_secs(&self) -> Result<u64, ConfigError> {
+        parse_u64(
+            "TELEGRAM_RECOVERY_VERIFY_INTERVAL_SECS",
+            self.telegram_recovery_verify_interval_secs.as_deref(),
+            MIN_RECOVERY_VERIFY_INTERVAL_SECS,
+            MAX_RECOVERY_VERIFY_INTERVAL_SECS,
+            DEFAULT_RECOVERY_VERIFY_INTERVAL_SECS,
+        )
+    }
+
+    pub fn recovery_verify_enabled(&self) -> Result<bool, ConfigError> {
+        parse_bool(
+            "TELEGRAM_RECOVERY_VERIFY_ENABLED",
+            self.telegram_recovery_verify_enabled.as_deref(),
+            DEFAULT_RECOVERY_VERIFY_ENABLED,
+        )
+    }
+
+    pub fn validate_recovery_verify_interval_secs(value: u64) -> Result<u64, ConfigError> {
+        if !(MIN_RECOVERY_VERIFY_INTERVAL_SECS..=MAX_RECOVERY_VERIFY_INTERVAL_SECS).contains(&value)
+        {
+            return Err(ConfigError::Invalid(
+                "TELEGRAM_RECOVERY_VERIFY_INTERVAL_SECS",
+            ));
+        }
+        Ok(value)
+    }
+
+    pub fn recovery_verify_chunks(&self) -> Result<u64, ConfigError> {
+        parse_u64(
+            "TELEGRAM_RECOVERY_VERIFY_CHUNKS",
+            self.telegram_recovery_verify_chunks.as_deref(),
+            MIN_RECOVERY_VERIFY_CHUNKS,
+            MAX_RECOVERY_VERIFY_CHUNKS,
+            DEFAULT_RECOVERY_VERIFY_CHUNKS,
+        )
+    }
+
+    pub fn validate_recovery_verify_chunks(value: u64) -> Result<u64, ConfigError> {
+        if !(MIN_RECOVERY_VERIFY_CHUNKS..=MAX_RECOVERY_VERIFY_CHUNKS).contains(&value) {
+            return Err(ConfigError::Invalid("TELEGRAM_RECOVERY_VERIFY_CHUNKS"));
         }
         Ok(value)
     }
@@ -295,6 +353,9 @@ impl AppConfig {
 
     fn validate_runtime_settings(&self) -> Result<(), ConfigError> {
         self.chunk_size()?;
+        self.recovery_verify_enabled()?;
+        self.recovery_verify_interval_secs()?;
+        self.recovery_verify_chunks()?;
         self.connection_timeout_secs()?;
         self.request_timeout_secs()?;
         self.transfer_timeout_secs()?;
@@ -557,6 +618,12 @@ mod tests {
         assert_eq!(config.metadata_path(), PathBuf::from(DEFAULT_METADATA_PATH));
         assert_eq!(config.data_dir(), PathBuf::from(DEFAULT_DATA_DIR));
         assert_eq!(config.chunk_size().expect("chunk"), 1_048_576);
+        assert_eq!(
+            config.recovery_verify_interval_secs().expect("interval"),
+            300
+        );
+        assert_eq!(config.recovery_verify_chunks().expect("chunks"), 1);
+        assert!(config.recovery_verify_enabled().expect("enabled"));
         assert_eq!(config.retry_count().expect("retry"), 5);
         assert!(config.respect_flood_wait().expect("respect"));
     }
@@ -565,6 +632,9 @@ mod tests {
     fn parses_boolean_and_numeric_settings() {
         let config = AppConfig {
             telegram_chunk_size: Some("2048".to_string()),
+            telegram_recovery_verify_enabled: Some("false".to_string()),
+            telegram_recovery_verify_interval_secs: Some("120".to_string()),
+            telegram_recovery_verify_chunks: Some("4".to_string()),
             telegram_connection_timeout_secs: Some("15".to_string()),
             telegram_request_timeout_secs: Some("16".to_string()),
             telegram_transfer_timeout_secs: Some("17".to_string()),
@@ -574,6 +644,12 @@ mod tests {
             ..AppConfig::default()
         };
         assert_eq!(config.chunk_size().expect("chunk"), 2048);
+        assert!(!config.recovery_verify_enabled().expect("enabled"));
+        assert_eq!(
+            config.recovery_verify_interval_secs().expect("interval"),
+            120
+        );
+        assert_eq!(config.recovery_verify_chunks().expect("chunks"), 4);
         assert_eq!(config.connection_timeout_secs().expect("connect"), 15);
         assert_eq!(config.request_timeout_secs().expect("request"), 16);
         assert_eq!(config.transfer_timeout_secs().expect("transfer"), 17);

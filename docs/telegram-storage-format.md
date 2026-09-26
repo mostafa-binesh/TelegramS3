@@ -53,6 +53,28 @@ existing Telegram documents. A live database-backed setting could remove the
 restart requirement, but it would still need to be captured per upload so one
 transfer cannot change shape halfway through.
 
+## Sampled Recovery Verification
+
+The background verifier checks committed objects without downloading every
+chunk on every pass. For each healthy committed manifest it selects up to the
+configured number of distinct chunk indexes uniformly at random, downloads and
+decrypts those Telegram documents, and verifies their plaintext checksums. The
+interval, sample count, and enabled state are stored in `app_settings` and can
+be changed from the authenticated Storage policy page. Disabling the verifier
+stops its automatic worker scans while preserving the other policy values and
+existing recovery findings. Environment variables only seed missing database
+settings.
+
+A confirmed missing Telegram message, decryption failure, or checksum mismatch
+transitions the manifest to `recovery_required` and removes it from
+`active_objects`, so S3 reads, listings, and shares fail closed. The surviving
+Telegram chunks and the manifest are retained for evidence. The server does
+not invent or silently re-upload a missing chunk: repair requires a successful
+full verification of the existing remote payload or a new upload/restore from
+the original source. A transient Telegram/network read failure is reported as
+`verification_unavailable` and retried on a later scan without quarantining the
+object.
+
 ## Manifest Document
 
 The manifest is a small JSON document. The committed manifest lives in the

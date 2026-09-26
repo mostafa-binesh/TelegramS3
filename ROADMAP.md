@@ -215,6 +215,10 @@ Completed in this increment:
 - the Telegram settings page now exposes a database-backed Storage policy tab;
   chunk size can be changed live for new uploads while existing manifests and
   active receptions retain their captured boundaries
+- the Storage policy tab now controls a sampled recovery verifier: its interval
+  and random chunk count are persisted live, it can be disabled completely, the
+  overview shows its state, next run, and distinct broken-file count, and
+  verifier problems are listed with their durable recovery state
 - lazy-loaded console views now surface a retryable asset-load error instead of
   remaining on an infinite skeleton; Docker/static serving keeps hashed Vite
   chunks under `/_admin/assets/`

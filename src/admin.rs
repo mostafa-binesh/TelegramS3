@@ -1675,7 +1675,12 @@ impl AdminUiState {
     }
 
     async fn telegram_save_storage_settings(&self, request: Request<Incoming>) -> Response<Body> {
-        let StorageSettingsRequest { chunk_size } = match read_json(request).await {
+        let StorageSettingsRequest {
+            chunk_size,
+            recovery_verify_enabled,
+            recovery_verify_interval_secs,
+            recovery_verify_chunks,
+        } = match read_json(request).await {
             Ok(body) => body,
             Err(_) => {
                 return json_error(StatusCode::BAD_REQUEST, "invalid storage settings payload");
@@ -1687,12 +1692,47 @@ impl AdminUiState {
         if let Err(error) = crate::config::AppConfig::validate_chunk_size(chunk_size) {
             return json_error(StatusCode::BAD_REQUEST, &error.to_string());
         }
+        let interval_secs = recovery_verify_interval_secs
+            .unwrap_or_else(|| self.object_format.recovery_verify_interval_secs());
+        let verifier_enabled = recovery_verify_enabled
+            .unwrap_or_else(|| self.object_format.recovery_verifier_enabled());
+        let chunks =
+            recovery_verify_chunks.unwrap_or_else(|| self.object_format.recovery_verify_chunks());
+        if let Err(error) = AppConfig::validate_recovery_verify_interval_secs(interval_secs) {
+            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+        if let Err(error) = AppConfig::validate_recovery_verify_chunks(chunks) {
+            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        }
         if let Err(error) = self.store().set_telegram_chunk_size(chunk_size) {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
         }
         if let Err(error) = self.object_format.set_chunk_size(chunk_size) {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
         }
+        if let Err(error) = self
+            .store()
+            .set_telegram_recovery_verify_enabled(verifier_enabled)
+        {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self
+            .store()
+            .set_telegram_recovery_verify_interval_secs(interval_secs)
+        {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self.store().set_telegram_recovery_verify_chunks(chunks) {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self
+            .object_format
+            .set_recovery_verification_settings(interval_secs, chunks)
+        {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        self.object_format
+            .set_recovery_verifier_enabled(verifier_enabled);
         json_response(StatusCode::OK, self.telegram_storage_settings_wire())
     }
 
@@ -1701,6 +1741,13 @@ impl AdminUiState {
             chunk_size: self.object_format.chunk_size(),
             min_chunk_size: crate::config::MIN_CHUNK_SIZE,
             max_chunk_size: crate::config::MAX_CHUNK_SIZE,
+            recovery_verify_enabled: self.object_format.recovery_verifier_enabled(),
+            recovery_verify_interval_secs: self.object_format.recovery_verify_interval_secs(),
+            min_recovery_verify_interval_secs: crate::config::MIN_RECOVERY_VERIFY_INTERVAL_SECS,
+            max_recovery_verify_interval_secs: crate::config::MAX_RECOVERY_VERIFY_INTERVAL_SECS,
+            recovery_verify_chunks: self.object_format.recovery_verify_chunks(),
+            min_recovery_verify_chunks: crate::config::MIN_RECOVERY_VERIFY_CHUNKS,
+            max_recovery_verify_chunks: crate::config::MAX_RECOVERY_VERIFY_CHUNKS,
             source: "database".to_string(),
         }
     }
@@ -1849,10 +1896,17 @@ impl AdminUiState {
             .metadata_store()
             .recovery_acknowledgements()
             .unwrap_or_default();
-        let recovery = match self.object_format.cached_recovery_snapshot() {
+        let recovery_snapshot = self.object_format.cached_recovery_snapshot();
+        let recovery = match recovery_snapshot.clone() {
             Ok(snapshot) => RecoveryWire::from_snapshot(snapshot, &acknowledgements),
             Err(error) => RecoveryWire::failed(error),
         };
+        let verifier = VerifierWire::from_recovery(
+            &recovery,
+            self.object_format.recovery_verifier_enabled(),
+            self.object_format.recovery_verify_interval_secs(),
+            self.object_format.recovery_verify_chunks(),
+        );
         let connection_removal = self
             .object_format
             .metadata_store()
@@ -1906,6 +1960,7 @@ impl AdminUiState {
                 "transfers": durable,
                 "traffic": traffic,
                 "recovery": recovery,
+                "verifier": verifier,
                 "telegram": telegram,
                 "connection_removal": connection_removal,
                 "checks": checks,
@@ -2519,6 +2574,72 @@ struct RecoveryWire {
     issues: Vec<RecoveryIssueWire>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct VerifierWire {
+    enabled: bool,
+    interval_secs: u64,
+    chunks_per_object: u64,
+    status: String,
+    broken_files: u64,
+    last_run_at: Option<String>,
+    next_run_at: Option<String>,
+    problems: Vec<RecoveryIssueWire>,
+}
+
+impl VerifierWire {
+    fn from_recovery(
+        recovery: &RecoveryWire,
+        enabled: bool,
+        interval_secs: u64,
+        chunks_per_object: u64,
+    ) -> Self {
+        let mut broken_objects = std::collections::HashSet::new();
+        for issue in &recovery.issues {
+            if matches!(
+                issue.kind.as_str(),
+                "invalid_manifest"
+                    | "missing_chunk"
+                    | "corrupted_chunk"
+                    | "object_recovery_required"
+            ) && let Some(object_id) = &issue.object_id
+            {
+                broken_objects.insert(object_id.clone());
+            }
+        }
+        let next_run_at = enabled
+            .then_some(recovery.checked_at.as_deref())
+            .flatten()
+            .and_then(|checked_at| {
+                OffsetDateTime::parse(checked_at, &time::format_description::well_known::Rfc3339)
+                    .ok()
+                    .and_then(|value| value.checked_add(Duration::seconds(interval_secs as i64)))
+                    .map(rfc3339)
+            });
+        let status = if !enabled {
+            "disabled"
+        } else if recovery.scan_error.is_some() {
+            "unavailable"
+        } else if !broken_objects.is_empty() {
+            "attention"
+        } else if recovery.checked_at.is_none() {
+            "pending"
+        } else {
+            "healthy"
+        };
+        Self {
+            enabled,
+            interval_secs,
+            chunks_per_object,
+            status: status.to_string(),
+            broken_files: broken_objects.len() as u64,
+            last_run_at: recovery.checked_at.clone(),
+            next_run_at,
+            problems: recovery.issues.clone(),
+        }
+    }
+}
+
 impl RecoveryWire {
     fn from_snapshot(
         snapshot: crate::object_format::RecoverySnapshot,
@@ -2588,6 +2709,9 @@ struct TelegramSettingsWire {
 #[serde(rename_all = "snake_case")]
 struct StorageSettingsRequest {
     chunk_size: Option<u64>,
+    recovery_verify_enabled: Option<bool>,
+    recovery_verify_interval_secs: Option<u64>,
+    recovery_verify_chunks: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2596,6 +2720,13 @@ struct StorageSettingsWire {
     chunk_size: u64,
     min_chunk_size: u64,
     max_chunk_size: u64,
+    recovery_verify_enabled: bool,
+    recovery_verify_interval_secs: u64,
+    min_recovery_verify_interval_secs: u64,
+    max_recovery_verify_interval_secs: u64,
+    recovery_verify_chunks: u64,
+    min_recovery_verify_chunks: u64,
+    max_recovery_verify_chunks: u64,
     source: String,
 }
 

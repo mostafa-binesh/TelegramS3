@@ -284,10 +284,12 @@ cargo build --release
 ## Configuration
 
 Runtime configuration is mostly environment-driven, but Telegram bootstrap
-settings and the upload chunk policy are managed from the authenticated admin
-panel and persisted in `metadata.sqlite`. `TELEGRAM_CHUNK_SIZE` is imported
-when no database policy exists; after that, the database value is authoritative
-and can be changed live from **Telegram settings → Storage policy**. Telegram
+settings, upload chunk policy, and recovery-verifier policy are managed from the
+authenticated admin panel and persisted in `metadata.sqlite`.
+`TELEGRAM_CHUNK_SIZE` is imported when no database policy exists; after that,
+the database value is authoritative. The verifier defaults to one random chunk
+per committed object every five minutes and can be changed or disabled live
+from **Telegram settings → Storage policy**. Telegram
 API IDs and storage chat IDs are validated as numeric values
 before persistence; connection refresh failures are returned as JSON warnings
 from the admin API rather than as proxy-level failures.
@@ -302,6 +304,9 @@ the most important variables:
 | `TELEGRAM_S3_BIND_ADDR` | no | S3 listener address (default `127.0.0.1:9000`) |
 | `TELEGRAM_ADMIN_BIND_ADDR` | no | Health/metrics listener, loopback only |
 | `TELEGRAM_METADATA_PATH` / `TELEGRAM_DATA_DIR` | no | Durable state locations (`TELEGRAM_DATA_DIR` is scratch, staging, and quarantine, not committed payload storage) |
+| `TELEGRAM_RECOVERY_VERIFY_ENABLED` | no | Initial automatic verifier state when no database policy exists (default `true`; accepts `true`/`false`) |
+| `TELEGRAM_RECOVERY_VERIFY_INTERVAL_SECS` | no | Initial sampled-verifier interval when no database policy exists (default `300`, minimum `60`) |
+| `TELEGRAM_RECOVERY_VERIFY_CHUNKS` | no | Initial random chunks checked per committed object (default `1`, maximum `1024`) |
 
 Passwords and session material must come from the environment or the database —
 never from source. Secrets are redacted from logs and diagnostics.

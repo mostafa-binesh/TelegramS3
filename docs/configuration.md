@@ -14,6 +14,9 @@ TELEGRAM_ADMIN_BOOTSTRAP_SECRET=<generate_secure_random_value>
 TELEGRAM_ADMIN_UI_DIST_DIR=frontend/dist
 
 TELEGRAM_CHUNK_SIZE=1048576
+TELEGRAM_RECOVERY_VERIFY_ENABLED=true
+TELEGRAM_RECOVERY_VERIFY_INTERVAL_SECS=300
+TELEGRAM_RECOVERY_VERIFY_CHUNKS=1
 TELEGRAM_CONNECTION_TIMEOUT_SECS=30
 TELEGRAM_REQUEST_TIMEOUT_SECS=30
 TELEGRAM_TRANSFER_TIMEOUT_SECS=900
@@ -70,6 +73,9 @@ Defaults used by the current scaffold:
 - S3 bind addr: `127.0.0.1:9000`
 - admin bind addr: `127.0.0.1:9001`
 - chunk size: `1 MiB`
+- recovery verifier: enabled
+- recovery verifier interval: `300s` (5 minutes)
+- recovery verifier sample: `1` random chunk per committed object
 - connection timeout: `30s`
 - request timeout: `30s`
 - transfer timeout: `900s`
@@ -103,6 +109,21 @@ console exposes it under **Telegram settings → Storage policy** and applies a
 new value immediately to new uploads and resumable receptions. Existing
 manifests and active transfers retain their recorded chunk boundaries; no
 rechunking or Telegram migration is performed.
+
+The same policy page controls the sampled recovery verifier. When enabled, it
+runs once at startup and then at the configured interval, selecting the
+requested number of distinct chunk indexes uniformly at random for each healthy
+committed object. The verifier can be disabled completely; while disabled it
+does not run automatic remote checks or quarantine objects from verifier scans,
+and the existing interval/sample values remain saved for the next enablement.
+The sample is without replacement within one scan, but coverage across scans is
+probabilistic. `TELEGRAM_RECOVERY_VERIFY_ENABLED`,
+`TELEGRAM_RECOVERY_VERIFY_INTERVAL_SECS`, and
+`TELEGRAM_RECOVERY_VERIFY_CHUNKS` are one-time import defaults for databases
+that have no stored policy; the database values are authoritative afterward.
+The overview shows the enabled/disabled state, next scheduled scan, sample
+size, distinct confirmed broken-file count, and the current verifier problem
+list.
 
 ## Required Runtime Settings
 

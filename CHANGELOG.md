@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.7.3-rc.7 - 2026-09-26
+
+Done jobs:
+
+- Added a database-backed sampled recovery verifier. Each healthy committed
+  object is checked at a configurable interval using a fresh, uniformly random
+  sample of distinct chunk indexes, without downloading every chunk on every
+  pass.
+- Added Storage policy controls for the verifier enabled state, interval, and
+  random chunks per file. Disabling it stops automatic scans while preserving
+  the saved policy and existing recovery findings.
+- Added verifier status to Overview: enabled/disabled state, next-run timer,
+  sample policy, distinct broken-file total, and the current problem list.
+- Confirmed missing, undecryptable, or checksum-invalid chunks now quarantine
+  the object as `recovery_required`, remove it from active listings, and retain
+  durable recovery details. Temporary Telegram/network failures remain
+  retryable and do not quarantine objects.
+- Added the `TELEGRAM_RECOVERY_VERIFY_ENABLED` seed setting and documented that
+  all verifier settings use existing metadata tables, so existing databases
+  require no schema bump or destructive migration.
+- Added Rust migration-preservation, random-sampling, quarantine, frontend
+  settings, disabled-state, Overview, and regression coverage.
+
 ## 0.7.3 - 2026-09-26
 
 - Promoted the validated `v0.7.3-rc.6` build to stable.
