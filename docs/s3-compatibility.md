@@ -54,7 +54,9 @@ features, so they are documented separately.
   the sign-in screen; every management API requires a session bound to a user.
 - Login is rate-limited with per-account lockout; passwords/session state are
   not stored in browser storage.
-- The dashboard reports storage overview, endpoint details, capacity, Telegram
+- The dashboard reports storage overview, endpoint details, capacity, live
+  transfer-pipeline analytics, five-second process-scoped client/Telegram
+  traffic telemetry, system checks, storage safeguards, Telegram
   readiness, operator accounts (superadmin-only add/remove), in-app bucket
   creation, and a bucket/object browser (prefix folders + directory markers +
   delete + per-file **upload/download**). Binary content is streamed through
@@ -118,6 +120,6 @@ features, so they are documented separately.
   the S3 server. Its Vite-built hashed chunks are served from the UI dist
   directory's `assets/` subdirectory; a failed lazy-view load is surfaced with
   a retry action rather than an unbounded loading skeleton. Folder transitions
-  keep the foreground object request authoritative while the background poll
-  waits for it, so slow admin responses do not strand the browser in a loading
-  state.
+  keep the last successful listing visible with a loading affordance while the
+  foreground object request remains authoritative and the background poll waits
+  for it, so slow admin responses do not strand the browser in a loading state.

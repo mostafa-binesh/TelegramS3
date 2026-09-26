@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatCount } from '../lib/format';
+  import { formatBytes, formatCount } from '../lib/format';
   import LoadError from './LoadError.svelte';
   import type { OverviewState } from '../lib/types';
 
@@ -10,6 +10,37 @@
   export let acknowledgedCount = 0;
   export let onRefresh: () => void = () => {};
   export let onRecovery: () => void = () => {};
+
+  const emptyTransferMetrics = {
+    pending_jobs: 0,
+    oldest_pending_age_seconds: 0,
+    retries: 0,
+    failed_jobs: 0,
+    staging_bytes: 0,
+    cleanup_backlog: 0,
+    cleanup_recovery_required: 0
+  };
+
+  const emptyTrafficMetrics = {
+    client_upload_bytes: 0,
+    client_download_bytes: 0,
+    telegram_upload_bytes: 0,
+    telegram_download_bytes: 0
+  };
+
+  function formatAge(seconds: number) {
+    if (!seconds) return 'No pending work';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m oldest`;
+    const hours = Math.floor(minutes / 60);
+    const remainder = minutes % 60;
+    return `${hours}h ${remainder}m oldest`;
+  }
+
+  $: transferMetrics = overview?.transfers ?? emptyTransferMetrics;
+  $: trafficMetrics = overview?.traffic ?? emptyTrafficMetrics;
+  $: checks = overview?.checks ?? [];
+  $: passingChecks = checks.filter((check) => check.ok).length;
 </script>
 
 <section class="section-head overview-head">
@@ -55,13 +86,109 @@
       {#if loading || !overview}<div class="skeleton" style="height:80px"></div>{:else}<div class="signal-track"><span style={`width:${Math.min(corruptedCount * 10, 100)}%`}></span></div><p class="fine-print">{acknowledgedCount ? `${formatCount(acknowledgedCount)} acknowledged issue(s) remain reviewable.` : 'No acknowledged issues.'}</p>{/if}
     </article>
   </section>
+  <section class="layout insight-grid">
+    <article class="card surface analytics-card">
+      <div class="analytics-heading"><div><p class="card-label">Live queue snapshot</p><h2>Transfer pipeline</h2></div><span class:clear={transferMetrics.pending_jobs === 0 && transferMetrics.failed_jobs === 0} class="score-chip">{transferMetrics.failed_jobs ? 'Needs attention' : transferMetrics.pending_jobs ? 'In progress' : 'Clear'}</span></div>
+      {#if loading || !overview}<div class="skeleton" style="height:132px"></div>{:else}
+        {@const pipelineTotal = Math.max(transferMetrics.pending_jobs + transferMetrics.failed_jobs + transferMetrics.cleanup_backlog, 1)}
+        <div class="pipeline-chart" role="img" aria-label="Transfer pipeline chart"><span class="pipeline-segment pending" style={`width:${(transferMetrics.pending_jobs / pipelineTotal) * 100}%`}></span><span class="pipeline-segment failed" style={`width:${(transferMetrics.failed_jobs / pipelineTotal) * 100}%`}></span><span class="pipeline-segment cleanup" style={`width:${(transferMetrics.cleanup_backlog / pipelineTotal) * 100}%`}></span></div>
+        <div class="legend pipeline-legend"><span><i class="pending"></i>Pending {formatCount(transferMetrics.pending_jobs)}</span><span><i class="failed"></i>Failed {formatCount(transferMetrics.failed_jobs)}</span><span><i class="cleanup"></i>Cleanup {formatCount(transferMetrics.cleanup_backlog)}</span></div>
+        <div class="metric-strip"><div><strong>{formatCount(transferMetrics.retries)}</strong><small>retry attempts</small></div><div><strong>{formatBytes(transferMetrics.staging_bytes)}</strong><small>staged locally</small></div><div><strong>{formatAge(transferMetrics.oldest_pending_age_seconds)}</strong><small>oldest pending</small></div></div>
+      {/if}
+    </article>
+    <article class="card surface checks-card">
+      <div class="analytics-heading"><div><p class="card-label">Readiness</p><h2>System checks</h2></div><span class:healthy={checks.length > 0 && passingChecks === checks.length} class="score-chip">{passingChecks}/{checks.length}</span></div>
+      {#if loading || !overview}<div class="skeleton" style="height:132px"></div>{:else if checks.length === 0}<p class="fine-print">No health checks were reported in this snapshot.</p>{:else}<div class="check-list">{#each checks as check (check.label)}<div class="check-row"><span class:ok={check.ok} class="check-dot" aria-hidden="true"></span><div><strong>{check.label}</strong><small>{check.detail}</small></div><span class:ok={check.ok} class="check-state">{check.ok ? 'Ready' : 'Review'}</span></div>{/each}</div>{/if}
+    </article>
+    <article class="card surface traffic-card">
+      <div class="analytics-heading"><div><p class="card-label">Network usage</p><h2>Traffic since process start</h2></div><span class="live-chip"><span aria-hidden="true"></span>Refreshes every 5s</span></div>
+      {#if loading || !overview}<div class="skeleton" style="height:154px"></div>{:else}
+        {@const clientPeak = Math.max(trafficMetrics.client_upload_bytes, trafficMetrics.client_download_bytes, 1)}
+        {@const telegramPeak = Math.max(trafficMetrics.telegram_upload_bytes, trafficMetrics.telegram_download_bytes, 1)}
+        <div class="traffic-grid">
+          <div class="traffic-channel">
+            <div class="traffic-channel-heading"><div><strong>Clients</strong><small>S3 and admin connections</small></div><span class="traffic-badge client">API</span></div>
+            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon download" aria-hidden="true">↓</span><span>Download<small>Server → clients</small></span></span><div class="traffic-meter"><span class="download" style={`width:${(trafficMetrics.client_download_bytes / clientPeak) * 100}%`}></span></div><strong>{formatBytes(trafficMetrics.client_download_bytes)}</strong></div>
+            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon upload" aria-hidden="true">↑</span><span>Upload<small>Clients → server</small></span></span><div class="traffic-meter"><span class="upload" style={`width:${(trafficMetrics.client_upload_bytes / clientPeak) * 100}%`}></span></div><strong>{formatBytes(trafficMetrics.client_upload_bytes)}</strong></div>
+          </div>
+          <div class="traffic-channel">
+            <div class="traffic-channel-heading"><div><strong>Telegram server</strong><small>Storage chat payloads</small></div><span class="traffic-badge telegram">TG</span></div>
+            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon download" aria-hidden="true">↓</span><span>Download<small>Telegram → server</small></span></span><div class="traffic-meter"><span class="download" style={`width:${(trafficMetrics.telegram_download_bytes / telegramPeak) * 100}%`}></span></div><strong>{formatBytes(trafficMetrics.telegram_download_bytes)}</strong></div>
+            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon upload" aria-hidden="true">↑</span><span>Upload<small>Server → Telegram</small></span></span><div class="traffic-meter"><span class="upload" style={`width:${(trafficMetrics.telegram_upload_bytes / telegramPeak) * 100}%`}></span></div><strong>{formatBytes(trafficMetrics.telegram_upload_bytes)}</strong></div>
+          </div>
+        </div>
+        <p class="fine-print traffic-note">Payload totals only; protocol overhead is excluded. Counters reset when the server process restarts.</p>
+      {/if}
+    </article>
+    <article class="card surface posture-card">
+      <div class="analytics-heading"><div><p class="card-label">Operational posture</p><h2>Storage safeguards</h2></div><span class="fine-print">Current snapshot</span></div>
+      {#if loading || !overview}<div class="skeleton" style="height:72px"></div>{:else}<div class="posture-grid"><div><span>Recovery markers</span><strong>{formatCount(overview.storage?.recovery_markers ?? 0)}</strong></div><div><span>Recovery-required objects</span><strong>{formatCount(overview.storage?.recovery_required_objects ?? 0)}</strong></div><div><span>Cleanup requiring review</span><strong>{formatCount(transferMetrics.cleanup_recovery_required)}</strong></div><div><span>Configured chunk size</span><strong>{formatBytes(overview.storage?.chunk_size ?? 0)}</strong></div></div>{/if}
+    </article>
+  </section>
 {/if}
 
 <style>
   .overview-head { margin-bottom: .25rem; }
   .overview-head h2 { margin: .25rem 0 0; }
   .analysis-grid { grid-template-columns: 1.25fr .75fr; }
+  .insight-grid { grid-template-columns: 1.15fr .85fr; align-items: stretch; }
   .chart-card h2 { margin: .25rem 0 1.2rem; }
+  .analytics-card, .checks-card, .posture-card { display: grid; align-content: start; gap: 18px; }
+  .analytics-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+  .analytics-heading h2 { margin: .25rem 0 0; }
+  .live-chip { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; padding: 6px 9px; border: 1px solid #b8dfce; border-radius: 999px; background: #effaf5; color: #197658; font-size: .7rem; font-weight: 800; }
+  .live-chip span { width: 7px; height: 7px; border-radius: 50%; background: #2e9a73; box-shadow: 0 0 0 4px rgba(46,154,115,.12); }
+  .score-chip { flex: 0 0 auto; padding: 6px 9px; border: 1px solid #efc88b; border-radius: 999px; background: #fff8e9; color: #9a630f; font-size: .7rem; font-weight: 800; }
+  .score-chip.clear, .score-chip.healthy { border-color: #b8dfce; background: #effaf5; color: #197658; }
+  .pipeline-chart { display: flex; height: 18px; overflow: hidden; border-radius: 999px; background: #edf1f5; }
+  .pipeline-segment { min-width: 0; }
+  .pipeline-segment.pending, .pipeline-legend .pending { background: #3d8ac5; }
+  .pipeline-segment.failed, .pipeline-legend .failed { background: #c35a5a; }
+  .pipeline-segment.cleanup, .pipeline-legend .cleanup { background: #d59a47; }
+  .pipeline-legend { margin-top: -4px; }
+  .metric-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding-top: 15px; border-top: 1px solid var(--border); }
+  .metric-strip div { min-width: 0; }
+  .metric-strip strong { display: block; overflow-wrap: anywhere; color: #203b57; font-size: 1rem; }
+  .metric-strip small { display: block; margin-top: 3px; color: var(--muted); font-size: .68rem; }
+  .check-list { display: grid; gap: 11px; }
+  .check-row { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: center; gap: 9px; }
+  .check-dot { width: 8px; height: 8px; border-radius: 50%; background: #d59a47; box-shadow: 0 0 0 4px rgba(213,154,71,.12); }
+  .check-dot.ok { background: #2e9a73; box-shadow: 0 0 0 4px rgba(46,154,115,.12); }
+  .check-row strong, .check-row small { display: block; }
+  .check-row strong { font-size: .78rem; }
+  .check-row small { margin-top: 2px; overflow-wrap: anywhere; color: var(--muted); font-size: .68rem; }
+  .check-state { color: #a66a0b; font-size: .65rem; font-weight: 800; text-transform: uppercase; }
+  .check-state.ok { color: #197658; }
+  .traffic-card { grid-column: 1 / -1; }
+  .traffic-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .traffic-channel { min-width: 0; padding: 15px; border: 1px solid #e1e9f0; border-radius: 14px; background: #fbfcfe; }
+  .traffic-channel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 16px; }
+  .traffic-channel-heading strong, .traffic-channel-heading small { display: block; }
+  .traffic-channel-heading strong { color: #203b57; font-size: .9rem; }
+  .traffic-channel-heading small { margin-top: 3px; color: var(--muted); font-size: .7rem; }
+  .traffic-badge { padding: 5px 7px; border-radius: 7px; font-size: .64rem; font-weight: 800; letter-spacing: .06em; }
+  .traffic-badge.client { background: #eaf3fb; color: #2779bc; }
+  .traffic-badge.telegram { background: #edf8f3; color: #197658; }
+  .traffic-row { display: grid; grid-template-columns: 145px minmax(60px, 1fr) auto; align-items: center; gap: 10px; min-width: 0; }
+  .traffic-row + .traffic-row { margin-top: 13px; }
+  .traffic-label { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: #334b63; font-size: .75rem; font-weight: 750; }
+  .traffic-label > span:last-child { min-width: 0; }
+  .traffic-label small { display: block; margin-top: 2px; color: var(--muted); font-size: .63rem; font-weight: 500; white-space: nowrap; }
+  .traffic-icon { display: inline-grid; width: 23px; height: 23px; place-items: center; border-radius: 7px; font-size: 1rem; font-weight: 800; }
+  .traffic-icon.download { background: #eaf3fb; color: #2779bc; }
+  .traffic-icon.upload { background: #fff3df; color: #a66a0b; }
+  .traffic-meter { height: 7px; overflow: hidden; border-radius: 999px; background: #e8edf2; }
+  .traffic-meter span { display: block; height: 100%; min-width: 2px; border-radius: inherit; transition: width .35s ease; }
+  .traffic-meter span.download { background: #3d8ac5; }
+  .traffic-meter span.upload { background: #d59a47; }
+  .traffic-row > strong { min-width: 60px; color: #203b57; font-size: .76rem; text-align: right; }
+  .traffic-note { margin: 0; }
+  .posture-card { grid-column: 1 / -1; }
+  .posture-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .posture-grid div { padding: 12px 13px; border: 1px solid #e1e9f0; border-radius: 12px; background: #fbfcfe; }
+  .posture-grid span, .posture-grid strong { display: block; }
+  .posture-grid span { color: var(--muted); font-size: .7rem; line-height: 1.35; }
+  .posture-grid strong { margin-top: 6px; color: #203b57; font-size: 1.02rem; }
   .bar-chart { height: 22px; display: flex; overflow: hidden; border-radius: 999px; background: #edf1f5; }
   .bar-segment { min-width: 0; }
   .bar-segment.committed, .legend .committed { background: #2779bc; }
@@ -77,5 +204,6 @@
   .corrupted.attention { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); background: color-mix(in srgb, var(--danger) 5%, var(--surface)); }
   .corrupted.attention strong { color: var(--danger); }
   .card-link { margin-top: .6rem; font-size: .85rem; }
-  @media (max-width: 760px) { .analysis-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) { .analysis-grid, .insight-grid, .traffic-grid { grid-template-columns: 1fr; } .posture-card, .traffic-card { grid-column: auto; } .posture-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 480px) { .metric-strip { grid-template-columns: 1fr; gap: 8px; } .posture-grid { grid-template-columns: 1fr; } .traffic-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; } .traffic-label { grid-column: 1 / -1; } .traffic-meter { grid-column: 1; } }
 </style>

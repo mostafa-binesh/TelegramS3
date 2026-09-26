@@ -34,13 +34,32 @@ const overview = {
     scan_ok: true,
     issues: []
   },
+  transfers: {
+    pending_jobs: 2,
+    oldest_pending_age_seconds: 3720,
+    retries: 5,
+    failed_jobs: 1,
+    staging_bytes: 4_194_304,
+    cleanup_backlog: 3,
+    cleanup_recovery_required: 1
+  },
+  traffic: {
+    client_upload_bytes: 1_048_576,
+    client_download_bytes: 8_388_608,
+    telegram_upload_bytes: 4_194_304,
+    telegram_download_bytes: 16_777_216
+  },
   telegram: {
     session_state: 'authorized',
     connection_state: 'connected',
     detail: 'mock storage chat reachable',
     storage_chat_id: '-1001234567890'
   },
-  checks: []
+  checks: [
+    { label: 'Telegram storage', ok: true, detail: 'mock storage chat reachable' },
+    { label: 'Storage chat', ok: true, detail: 'resolved from Telegram bootstrap settings' },
+    { label: 'UI assets', ok: true, detail: 'Svelte build output present' }
+  ]
 };
 
 async function mockAdminApi(
@@ -50,6 +69,7 @@ async function mockAdminApi(
     storageSettingsFailure?: boolean;
     recoveryIssues?: Array<Record<string, unknown>>;
     delayFirstObjectListMs?: number;
+    delayNestedObjectListMs?: number;
   } = {}
 ) {
   let loggedIn = false;
@@ -60,6 +80,7 @@ async function mockAdminApi(
   const buckets = [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }];
   const users = [user];
   let delayedFirstObjectList = false;
+  let delayedNestedObjectList = false;
   await page.route('**/_admin/api/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace('/_admin/api', '');
@@ -163,11 +184,15 @@ async function mockAdminApi(
       return route.fulfill({ json: { ok: true } });
     }
     if (path === '/objects' && request.method() === 'GET') {
+      const prefix = new URL(request.url()).searchParams.get('prefix') ?? '';
       if (options.delayFirstObjectListMs && !delayedFirstObjectList) {
         delayedFirstObjectList = true;
         await new Promise((resolve) => setTimeout(resolve, options.delayFirstObjectListMs));
       }
-      const prefix = new URL(request.url()).searchParams.get('prefix') ?? '';
+      if (prefix && options.delayNestedObjectListMs && !delayedNestedObjectList) {
+        delayedNestedObjectList = true;
+        await new Promise((resolve) => setTimeout(resolve, options.delayNestedObjectListMs));
+      }
       const rootObjects = [{ key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }];
       const nestedObjects = [{ key: 'docs/report.txt', name: 'report.txt', size: 24, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }];
       return route.fulfill({ json: { prefix, folders: prefix ? [] : ['docs'], objects: (prefix ? nestedObjects : rootObjects).filter((object) => !deletedKeys.has(object.key)) } });
@@ -229,10 +254,36 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
   await page.getByRole('button', { name: 'Sign in' }).click();
 
   await expect(page.getByRole('heading', { name: 'Storage at a glance' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Transfer pipeline' })).toBeVisible();
+  await expect(page.getByLabel('Transfer pipeline chart')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Traffic since process start' })).toBeVisible();
+  await expect(page.getByText('Clients → server')).toBeVisible();
+  await expect(page.getByText('Telegram → server')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'System checks' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Storage safeguards' })).toBeVisible();
+  await expect(page.locator('.account-avatar')).toHaveText('A');
+  await expect(page.locator('.account-kicker')).toHaveText('Signed in as');
+  await expect(page.getByRole('button', { name: 'Sign out' }).locator('svg')).toBeVisible();
   await page.getByRole('button', { name: 'Telegram settings' }).click();
   await expect(page.getByRole('heading', { name: 'Your storage connection, beautifully in sync.' })).toBeVisible();
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page.getByRole('heading', { name: 'Sign in to manage storage' })).toBeVisible();
+});
+
+test('overview refreshes traffic telemetry every five seconds', async ({ page }) => {
+  let overviewRequests = 0;
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.endsWith('/_admin/api/overview')) overviewRequests += 1;
+  });
+  await mockAdminApi(page);
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.getByRole('heading', { name: 'Traffic since process start' })).toBeVisible();
+
+  const requestsAfterInitialLoad = overviewRequests;
+  await expect.poll(() => overviewRequests, { timeout: 6_500 }).toBeGreaterThan(requestsAfterInitialLoad);
 });
 
 test('responsive navigation remains usable on a narrow viewport', async ({ page }) => {
@@ -322,6 +373,26 @@ test('a slow folder load is not replaced by the background poll', async ({ page 
 
   await expect(page.getByText('readme.txt')).toBeVisible({ timeout: 20_000 });
   await expect(page.getByLabel('Loading files')).toBeHidden();
+});
+
+test('folder navigation keeps the current listing visible while loading the next folder', async ({ page }) => {
+  await mockAdminApi(page, { delayNestedObjectListMs: 1_200 });
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Buckets' }).click();
+  await page.getByRole('button', { name: /^release-test created/ }).click();
+
+  await expect(page.getByText('readme.txt')).toBeVisible();
+  await page.getByRole('button', { name: 'docs/' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Bucket / release-test / docs' })).toBeVisible();
+  await expect(page.getByText('Loading folder contents…')).toBeVisible();
+  await expect(page.locator('[aria-busy="true"]')).toBeVisible();
+  await expect(page.getByText('readme.txt')).toBeVisible();
+  await expect(page.getByText('report.txt')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('Loading folder contents…')).toBeHidden();
 });
 
 test('recovery transfer is visible and retry removes it after reconciliation', async ({ page }) => {
@@ -479,6 +550,13 @@ test('connection removal clears recovery attention items from the panel', async 
   await page.getByRole('button', { name: 'Sign in' }).click();
   await page.getByRole('button', { name: 'Telegram settings' }).click();
   await page.getByRole('button', { name: 'Remove connection' }).first().click();
+  const checkboxRow = page.locator('.checkbox-row');
+  const checkboxBox = await checkboxRow.locator('input').boundingBox();
+  const checkboxTextBox = await checkboxRow.locator('span').boundingBox();
+  expect(checkboxBox).not.toBeNull();
+  expect(checkboxTextBox).not.toBeNull();
+  if (!checkboxBox || !checkboxTextBox) throw new Error('delete-files checkbox did not render');
+  expect(Math.abs((checkboxBox.y + checkboxBox.height / 2) - (checkboxTextBox.y + checkboxTextBox.height / 2))).toBeLessThanOrEqual(2);
   await page.getByLabel('Type the displayed account number').fill('+15551234567');
   await page.locator('.compact-modal').getByRole('button', { name: 'Remove connection' }).click();
 
@@ -486,4 +564,5 @@ test('connection removal clears recovery attention items from the panel', async 
   await expect(page.getByText('No transfers yet. Upload a file from Buckets to get started.')).toBeVisible();
   await page.getByRole('button', { name: 'Recovery' }).click();
   await expect(page.getByText('No missing or corrupted files were detected.')).toBeVisible();
+  await expect(page.locator('.health')).toContainText('Telegram · needs reauth');
 });

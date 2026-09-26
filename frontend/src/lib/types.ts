@@ -79,6 +79,23 @@ export interface StorageCard {
   data_dir?: string;
 }
 
+export interface DurableMetrics {
+  pending_jobs: number;
+  oldest_pending_age_seconds: number;
+  retries: number;
+  failed_jobs: number;
+  staging_bytes: number;
+  cleanup_backlog: number;
+  cleanup_recovery_required: number;
+}
+
+export interface TrafficMetrics {
+  client_upload_bytes: number;
+  client_download_bytes: number;
+  telegram_upload_bytes: number;
+  telegram_download_bytes: number;
+}
+
 export interface RecoveryIssue {
   /** Stable fingerprint used to acknowledge this issue. */
   id: string;
@@ -109,6 +126,8 @@ export interface OverviewState {
   checked_at?: string;
   session?: { authenticated: boolean; user?: UserInfo };
   storage?: StorageCard;
+  transfers?: DurableMetrics;
+  traffic?: TrafficMetrics;
   recovery?: RecoveryState;
   telegram?: {
     session_state: string;

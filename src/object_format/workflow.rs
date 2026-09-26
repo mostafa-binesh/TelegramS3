@@ -26,13 +26,14 @@ impl ObjectFormatService {
     /// Drain a duplicate S3 request without staging it. The already-durable
     /// multipart job remains the source of truth, so a broken retry body must
     /// not discard or poison that earlier job.
-    pub(super) async fn discard_duplicate_body(mut body: Option<StreamingBlob>) {
+    pub(super) async fn discard_duplicate_body(&self, mut body: Option<StreamingBlob>) {
         let Some(body) = body.as_mut() else {
             return;
         };
         while let Some(frame) = body.next().await {
-            if frame.is_err() {
-                break;
+            match frame {
+                Ok(bytes) => self.add_client_upload_bytes(bytes.len() as u64),
+                Err(_) => break,
             }
         }
     }
@@ -120,6 +121,7 @@ impl ObjectFormatService {
                         "request body interrupted; resend source file".into(),
                     )
                 })?;
+                self.add_client_upload_bytes(bytes.len() as u64);
                 let mut remaining = bytes.as_ref();
                 while !remaining.is_empty() {
                     let take = remaining

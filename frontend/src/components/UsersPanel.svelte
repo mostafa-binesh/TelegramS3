@@ -23,7 +23,7 @@
     <p class="empty-state"><span class="empty-mark" aria-hidden="true">+</span>No operator accounts yet.</p>
   {:else}
     <div class="table-scroll"><table class="kv-table"><thead><tr><th>Username</th><th>Role</th><th>State</th><th></th></tr></thead><tbody>
-    {#each users as user (user.id)}<tr><td>{user.username}{#if user.display_name} <small>({user.display_name})</small>{/if}</td><td><span class="role-tag" class:role-super={user.role === 'superadmin'}>{user.role}</span></td><td>{user.disabled ? 'disabled' : 'enabled'}</td><td class="row-actions">{#if canManage}<ActionIcon name="trash" label={`Remove operator ${user.username}`} tone="danger" on:click={() => onRemove(user.id)} disabled={busy}/>{/if}</td></tr>{/each}
+    {#each users as user (user.id)}<tr><td>{user.username}{#if user.display_name} <small>({user.display_name})</small>{/if}</td><td><span class="role-tag" class:role-super={user.role === 'superadmin'}>{user.role}</span></td><td>{user.disabled ? 'disabled' : 'enabled'}</td><td><div class="row-actions">{#if canManage}<ActionIcon name="trash" label={`Remove operator ${user.username}`} tone="danger" on:click={() => onRemove(user.id)} disabled={busy}/>{/if}</div></td></tr>{/each}
     </tbody></table></div>
   {/if}
   <div class="nested-form operator-actions">{#if canManage}<button class="primary" on:click={onAdd}>＋ Add operator</button>{:else}<p class="fine-print">Only superadmins can add or remove operator accounts.</p>{/if}</div>
@@ -36,6 +36,7 @@
   .kv-table th, .kv-table td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--border); }
   .role-tag { display: inline-block; padding: .15rem .55rem; border-radius: 999px; font-size: .8rem; background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--muted); }
   .role-super { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 38px; white-space: nowrap; }
   .operator-actions { display: flex; justify-content: flex-end; }
   .nested-form { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
 </style>

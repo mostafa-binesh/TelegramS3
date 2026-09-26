@@ -264,10 +264,19 @@ key to the committed object index. Partial or recovery-required data therefore
 remains unavailable to download until completion or explicit repair.
 
 The authenticated browser keeps a foreground folder listing authoritative while
-that request is pending. Its silent multipart/activity poll waits rather than
-superseding the listing request, so a slow Telegram-backed response cannot leave
-the UI displaying an indefinite loading state. This affects presentation only;
-manifest visibility and committed-object rules remain unchanged.
+that request is pending and leaves the last successful rows visible with a
+loading affordance during the transition. Its silent multipart/activity poll
+waits rather than superseding the listing request, so a slow Telegram-backed
+response cannot leave the UI displaying an indefinite loading state. This affects
+presentation only; manifest visibility and committed-object rules remain
+unchanged.
+
+The authenticated overview also reports process-scoped payload telemetry: bytes
+received from and sent to clients, plus bytes received from and sent to
+Telegram. These counters are atomic in the shared object-format service, are
+refreshed by the UI every five seconds, exclude protocol overhead, and reset
+when the server process restarts. They do not participate in manifest recovery
+or object visibility.
 
 ## Recovery Rules
 

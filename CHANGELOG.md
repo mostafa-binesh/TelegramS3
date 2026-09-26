@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.7.3-rc.6 - 2026-09-26
+
+Done jobs:
+
+- Smoothed folder navigation by keeping the last successful listing visible
+  while the next prefix loads, preventing the browser from falling into an
+  indefinite loading skeleton when navigation and silent polling overlap.
+- Added regression coverage for slow folder responses, stale polling races,
+  and re-entering a bucket after navigation.
+- Reworked bucket-table geometry so modified timestamps, row action icons, and
+  row bottoms stay aligned; widened the action column to prevent icon overlap
+  and kept the layout usable on narrow screens.
+- Added labeled Delete and Move icons to the bulk-selection toolbar and fixed
+  nested-object deletion so it sends the complete key without duplicating the
+  current folder prefix.
+- Refined the operator shell with a polished account card and sign-out action,
+  restored the Telegram connection badge on Recovery, and aligned the
+  destructive-action checkbox with its label.
+- Expanded Overview with storage composition, recovery signal, transfer
+  pipeline, system checks, and storage-safeguard analytics.
+- Added process-scoped client/Telegram payload counters for upload and download
+  directions, exposed them through the overview API, visualized them separately
+  on Overview, and refreshed the snapshot every five seconds. Counters exclude
+  protocol overhead and reset when the server process restarts.
+- Updated operator, roadmap, compatibility, storage-format, recovery, and
+  frontend regression documentation for the shipped behavior.
+
 ## 0.7.3-rc.4 - 2026-09-26
 
 Done jobs:

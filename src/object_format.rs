@@ -24,6 +24,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
@@ -375,6 +376,27 @@ pub struct ObjectFormatService {
     recovery_snapshot: Arc<RwLock<RecoverySnapshot>>,
     staging_budget: u64,
     encryption: ObjectEncryption,
+    traffic: Arc<TrafficCounters>,
+}
+
+/// Process-scoped payload counters used by the operator overview. They are
+/// intentionally not persisted: the dashboard describes traffic observed by
+/// this server process, while object durability remains in the metadata and
+/// Telegram manifests.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TrafficMetrics {
+    pub client_upload_bytes: u64,
+    pub client_download_bytes: u64,
+    pub telegram_upload_bytes: u64,
+    pub telegram_download_bytes: u64,
+}
+
+#[derive(Default)]
+struct TrafficCounters {
+    client_upload_bytes: AtomicU64,
+    client_download_bytes: AtomicU64,
+    telegram_upload_bytes: AtomicU64,
+    telegram_download_bytes: AtomicU64,
 }
 
 #[derive(Default)]
@@ -505,6 +527,7 @@ impl ObjectFormatService {
             ))),
             staging_budget: 10 * 1024 * 1024 * 1024,
             encryption,
+            traffic: Arc::new(TrafficCounters::default()),
         })
     }
 
@@ -514,6 +537,39 @@ impl ObjectFormatService {
 
     pub fn durable_metrics(&self) -> Result<crate::durable::DurableMetrics, ObjectFormatError> {
         Ok(self.metadata.durable_metrics()?)
+    }
+
+    pub fn traffic_metrics(&self) -> TrafficMetrics {
+        TrafficMetrics {
+            client_upload_bytes: self.traffic.client_upload_bytes.load(Ordering::Relaxed),
+            client_download_bytes: self.traffic.client_download_bytes.load(Ordering::Relaxed),
+            telegram_upload_bytes: self.traffic.telegram_upload_bytes.load(Ordering::Relaxed),
+            telegram_download_bytes: self.traffic.telegram_download_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn add_client_upload_bytes(&self, bytes: u64) {
+        self.traffic
+            .client_upload_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn add_client_download_bytes(&self, bytes: u64) {
+        self.traffic
+            .client_download_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn add_telegram_upload_bytes(&self, bytes: u64) {
+        self.traffic
+            .telegram_upload_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn add_telegram_download_bytes(&self, bytes: u64) {
+        self.traffic
+            .telegram_download_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
     }
 
     pub fn staging_budget(&self) -> u64 {
@@ -804,7 +860,7 @@ impl ObjectFormatService {
             // Dokploy retries UploadPart after a timed-out response. Reuse the
             // earliest durable job for that part rather than staging and
             // publishing a second copy to Telegram.
-            Self::discard_duplicate_body(body).await;
+            self.discard_duplicate_body(body).await;
             if existing.state == "recovery_required" {
                 return Err(ObjectFormatError::InvalidPlan(existing.error.unwrap_or_else(
                     || {
@@ -1982,7 +2038,10 @@ impl ObjectFormatService {
                     ));
                 }
                 Some((
-                    Ok(Bytes::copy_from_slice(&plaintext[start..end])),
+                    Ok({
+                        object_format.add_client_download_bytes(span.length);
+                        Bytes::copy_from_slice(&plaintext[start..end])
+                    }),
                     (object_format, manifest, index + 1, spans, false, pin),
                 ))
             },
@@ -2566,6 +2625,7 @@ impl ObjectFormatService {
             fs::create_dir_all(&mock_dir)?;
             let destination = mock_dir.join(format!("{message_id}.bin"));
             fs::copy(path, &destination)?;
+            self.add_telegram_upload_bytes(fs::metadata(path)?.len());
             fs::write(
                 mock_dir.join(format!("{message_id}.json")),
                 serde_json::to_vec(&serde_json::json!({ "file_name": file_name }))?,
@@ -2605,6 +2665,7 @@ impl ObjectFormatService {
                     "upload_file({file_name}) failed: {error}"
                 )))
             })?;
+        self.add_telegram_upload_bytes(size);
         let message = client
             .send_message(
                 storage_peer,
@@ -2652,7 +2713,9 @@ impl ObjectFormatService {
                     "telegram message not found: {message_id}"
                 )));
             }
-            return Ok(fs::read(path)?);
+            let bytes = fs::read(path)?;
+            self.add_telegram_download_bytes(bytes.len() as u64);
+            return Ok(bytes);
         }
         let client = transport.client()?;
         let storage_peer = transport.storage_peer().await?;
@@ -2677,6 +2740,7 @@ impl ObjectFormatService {
                 error.to_string(),
             ))
         })? {
+            self.add_telegram_download_bytes(chunk.len() as u64);
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)

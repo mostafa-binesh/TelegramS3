@@ -204,7 +204,9 @@ Rejected alternatives this phase (see `docs/adr/0006-...md`): keeping MinIO-time
 Completed in this increment:
 
 - the admin console now uses full-width responsive layout, loading skeletons,
-  animated dismissible notifications, recovery sub-tabs, and analysis cards
+  animated dismissible notifications, recovery sub-tabs, and analysis cards for
+  storage composition, transfer pipeline, system checks, storage safeguards, and
+  process-scoped client/Telegram traffic refreshed every five seconds
 - browser uploads are serialized, retried after transient request failures, and
   follow the durable transfer job through chunk progress in the upload queue
 - the admin console now has history-routed bucket/folder locations, SVG
@@ -236,9 +238,10 @@ Completed in this increment:
   operator-owned flow id; reopening replaces the operator's unfinished attempt,
   while other operators remain isolated by the single-flow lock
 - invalid Telegram codes remain retryable, and the bucket browser now provides
-  empty-bucket deletion, parent navigation, and skeleton loading on refresh and
-  folder transitions; foreground folder loads are not superseded by silent
-  background polling, so a slow response cannot leave the browser on an
+  empty-bucket deletion, parent navigation, and skeleton loading on refresh;
+  folder transitions keep the last successful listing visible with a loading
+  affordance while the foreground request remains authoritative and silent
+  background polling waits, so a slow response cannot leave the browser on an
   unbounded loading skeleton
 - bucket/object deletion now reports only committed local deletes, returns a
   conflict for non-empty folders, and keeps folder and file action columns

@@ -190,9 +190,9 @@
         await refreshOverview({silent:true});
         if(view === 'buckets' && selectedBucket) await refreshObjects(selectedBucket, currentPrefix, {silent:true});
       }
-      if(!disposed)timer=setTimeout(poll, view === 'buckets' && selectedBucket ? 2000 : 10000);
+      if(!disposed)timer=setTimeout(poll, view === 'buckets' && selectedBucket ? 2000 : 5000);
     };
-    timer=setTimeout(poll,10000);
+    timer=setTimeout(poll,5000);
     return ()=>{disposed=true;clearTimeout(timer);};
   });
 
@@ -558,7 +558,6 @@
     const csrf = session?.csrf_token;
     const requestSerial = ++objectsRequestSerial;
     const routeKey = `${bucket}|${prefix}`;
-    if (!options.silent) listing = null;
     objectsError = '';
     if (!options.silent) {
       selectedKeys = [];
@@ -626,13 +625,11 @@
   }
 
   function enterFolder(name: string) {
-    listing = null;
     selectedKeys = [];
     navigate({ view: 'buckets', bucket: selectedBucket, prefix: `${currentPrefix}${name}/` });
   }
 
   function gotoCrumb(i: number) {
-    listing = null;
     selectedKeys = [];
     const parts = currentPrefix.split('/').filter(Boolean).slice(0, i);
     navigate({ view: 'buckets', bucket: selectedBucket, prefix: parts.map((p) => p + '/').join('') });
@@ -666,6 +663,10 @@
 
   async function removeKey(obj: ObjectEntry | string, folder = false) {
     const key = typeof obj === 'string' ? `${currentPrefix}${obj}${folder ? '/' : ''}` : obj.key;
+    await removeObjectKey(key);
+  }
+
+  async function removeObjectKey(key: string) {
     busy = true;
     try {
       const result = await removeObject(session?.csrf_token, selectedBucket, key);
@@ -693,7 +694,8 @@
     if (target.type === 'bucket') await dropBucket(target.name);
     else if (target.type === 'selection') await deleteSelected();
     else if (target.type === 'operator') await dropUser(target.key ?? target.name);
-    else await removeKey(target.key ?? target.name, target.type === 'folder');
+    else if (target.type === 'folder') await removeKey(target.name, true);
+    else await removeObjectKey(target.key ?? target.name);
   }
 
   async function openShareModal(obj: ObjectEntry) {
@@ -883,7 +885,7 @@
           {#each crumbs() as crumb, i (crumb + i)}<span>/</span><button class="btn-link" type="button" on:click={() => gotoCrumb(i + 1)}>{crumb}</button>{/each}
         </div>
       {:else}<h1>{view==='users'?'Operators':view==='telegram'?'Telegram settings':view.charAt(0).toUpperCase()+view.slice(1)}</h1>{/if}
-    </div>{#if view !== 'recovery'}<HealthBadge state={overviewLoading || !overview ? 'checking' : overview.telegram?.connection_state ?? 'checking'} detail={overviewLoading || !overview ? 'Checking Telegram connection…' : overview.telegram?.detail ?? 'Waiting for a connection check'} checkedAt={overviewLoading ? undefined : overview?.checked_at}/>{/if}</header>
+    </div><HealthBadge state={overviewLoading || !overview ? 'checking' : overview.telegram?.connection_state ?? 'checking'} detail={overviewLoading || !overview ? 'Checking Telegram connection…' : overview.telegram?.detail ?? 'Waiting for a connection check'} checkedAt={overviewLoading ? undefined : overview?.checked_at}/></header>
   {/if}
   {#if loading}
     <section class="card surface"><p>Loading…</p></section>

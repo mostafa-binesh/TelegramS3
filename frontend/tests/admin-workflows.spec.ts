@@ -130,7 +130,10 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
     if (path === '/objects' && request.method() === 'GET') {
       const prefix = new URL(request.url()).searchParams.get('prefix') ?? '';
       const objects = prefix
-        ? [{ key: 'docs/report.txt', name: 'report.txt', size: 24, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }]
+        ? [
+            { key: 'docs/report.txt', name: 'report.txt', size: 24, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 },
+            { key: 'docs/Hoomaan - Khatere (SPOTISAVER).mp3', name: 'Hoomaan - Khatere (SPOTISAVER).mp3', size: 28, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }
+          ]
         : [
             { key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z', shared_links: shareLinksByKey.get('readme.txt')?.length ?? 0 },
             { key: 'archive.bin', name: 'archive.bin', size: 28, last_modified: '2026-01-01T00:00:00Z', shared_links: shareLinksByKey.get('archive.bin')?.length ?? 0 }
@@ -445,6 +448,21 @@ test('object deletion hides the item, while non-empty folder deletion is rejecte
   await expect(page.getByRole('button', { name: 'Delete folder docs' })).toBeVisible();
 });
 
+test('nested object deletion does not duplicate the folder prefix', async ({ page }) => {
+  await mockAdminApi(page);
+  await signIn(page);
+  await openBucket(page);
+
+  await page.getByRole('button', { name: 'docs/' }).click();
+  const key = 'docs/Hoomaan - Khatere (SPOTISAVER).mp3';
+  await expect(page.getByText('Hoomaan - Khatere (SPOTISAVER).mp3')).toBeVisible();
+
+  const deletion = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/delete') && candidate.method() === 'POST');
+  await page.getByRole('button', { name: 'Delete Hoomaan - Khatere (SPOTISAVER).mp3' }).click();
+  await page.locator('.compact-modal').getByRole('button', { name: 'Delete', exact: true }).click();
+  expect((await deletion).postDataJSON()).toMatchObject({ bucket: 'release-test', key });
+});
+
 test('bucket toolbar creates a folder and folder navigation updates the breadcrumb', async ({ page }) => {
   await mockAdminApi(page);
   await signIn(page);
@@ -452,6 +470,18 @@ test('bucket toolbar creates a folder and folder navigation updates the breadcru
   await expect(page.getByRole('button', { name: 'Refresh' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'New folder' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Upload' })).toBeVisible();
+  const objectRow = page.locator('.kv-table tbody tr').filter({ hasText: 'readme.txt' });
+  const cellBottoms = await objectRow.locator('td').evaluateAll((cells) => cells.map((cell) => Math.round(cell.getBoundingClientRect().bottom)));
+  expect(Math.max(...cellBottoms) - Math.min(...cellBottoms)).toBeLessThanOrEqual(1);
+  const actionLayout = await objectRow.locator('td').evaluateAll((cells) => {
+    const modifiedCell = cells[3].getBoundingClientRect();
+    const actionContent = cells[4].querySelector('.row-actions')?.getBoundingClientRect();
+    return {
+      modifiedRight: modifiedCell.right,
+      actionContentLeft: actionContent?.left ?? modifiedCell.right
+    };
+  });
+  expect(actionLayout.actionContentLeft).toBeGreaterThanOrEqual(actionLayout.modifiedRight - 1);
 
   await page.getByRole('button', { name: 'docs/' }).click();
   await expect(page.getByRole('heading', { name: 'Bucket / release-test / docs' })).toBeVisible();
@@ -494,6 +524,8 @@ test('bucket creation, bucket deletion, and multi-selection deletion use guarded
   await page.getByRole('button', { name: /^release-test created/ }).click();
   await page.getByLabel('Select readme.txt').check();
   await page.getByLabel('Select archive.bin').check();
+  await expect(page.locator('.selection-bar').getByRole('button', { name: 'Delete', exact: true }).locator('svg')).toBeVisible();
+  await expect(page.locator('.selection-bar').getByRole('button', { name: 'Move', exact: true }).locator('svg')).toBeVisible();
   await page.locator('.selection-bar').getByRole('button', { name: 'Delete', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Delete selected items?' })).toBeVisible();
   await page.locator('.compact-modal').getByRole('button', { name: 'Delete', exact: true }).click();

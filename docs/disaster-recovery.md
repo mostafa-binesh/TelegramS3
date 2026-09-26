@@ -73,8 +73,9 @@ normal worker/reconciliation path.
 The authenticated bucket browser polls those durable jobs while a bucket is open.
 An active S3 key can therefore remain visible as an uploading row with completed
 and total part counts, even though it is not yet a committed/downloadable object.
-While a foreground folder listing is still loading, the silent activity poll
-waits for that request instead of replacing its loading state; this prevents a
+While a foreground folder listing is still loading, the browser keeps the last
+successful rows visible with a loading affordance, and the silent activity poll
+waits for that request instead of replacing its loading state. This prevents a
 slow browser response from becoming an infinite skeleton without changing the
 durable job or manifest state.
 If the row changes to `recovery_required`, preserve the Telegram payloads and
@@ -200,6 +201,9 @@ object actions until the final manifest is published.
 6. Use the authenticated `/_admin` dashboard to recheck storage overview,
    capacity, Telegram readiness, bucket visibility (including buckets created
    from the UI), and bootstrap status before resuming writes.
+   The overview's client/Telegram traffic counters are process-scoped and
+   start a new baseline after the restored server process starts; they are not
+   durable recovery evidence.
 7. If a console view remains on a loading skeleton, inspect the response for
    its hashed file under `/_admin/assets/`. Rebuild/redeploy the image with the
    complete UI `assets/` directory, then use the view's Retry action; this is a

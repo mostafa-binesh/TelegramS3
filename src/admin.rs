@@ -1843,6 +1843,7 @@ impl AdminUiState {
             .status()
             .unwrap_or_else(|_| empty_object());
         let durable = self.object_format.durable_metrics().unwrap_or_default();
+        let traffic = self.object_format.traffic_metrics();
         let acknowledgements = self
             .object_format
             .metadata_store()
@@ -1903,6 +1904,7 @@ impl AdminUiState {
                 "session": {"authenticated": true, "user": UserWire::from_user(&principal.user)},
                 "storage": storage,
                 "transfers": durable,
+                "traffic": traffic,
                 "recovery": recovery,
                 "telegram": telegram,
                 "connection_removal": connection_removal,

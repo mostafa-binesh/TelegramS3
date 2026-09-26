@@ -60,7 +60,8 @@ staging, and recovery artifacts, not committed payloads.
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
   operator account management, in-app bucket creation, bucket/object browser
   with per-file upload, ranged download, guarded folder deletion, and resilient
-  folder transitions, plus the Telegram setup wizard.
+  folder transitions that keep the last listing visible while the next folder
+  loads, plus the Telegram setup wizard.
 - **Operational tooling** — a `telegram-s3` CLI (`users`, `config check`,
   `doctor`, `db`, `index`, `repair`, `gc --dry-run`), loopback-only health and
   metrics endpoints, and a production Docker image published to GHCR.
@@ -341,7 +342,9 @@ See [SECURITY.md](SECURITY.md), [THREAT_MODEL.md](THREAT_MODEL.md), and
 
 `/_admin` is an authenticated Svelte single-page app served by the Rust server
 on the public listener. It provides a storage overview, endpoint and capacity
-details, Telegram readiness, operator account management (superadmin-only),
+details, live transfer-pipeline analytics, five-second network-traffic telemetry
+split between clients and Telegram payloads, system-readiness checks, Telegram
+readiness, operator account management (superadmin-only),
 in-app bucket creation and deletion (deletion remains empty-bucket-only), a routed
 bucket/object browser with Unicode-preserving names, per-file upload, move, and full/range download -
 streamed through the same bounded, checksum-verified chunk paths as the S3 data
@@ -358,7 +361,9 @@ being paced automatically. At `269/269`, for example, the row says that the
 final manifest is being published instead of implying that more parts remain.
 Partial objects stay non-downloadable, and the browser retains its last
 successful activity snapshot through a short activity-poll outage so an
-in-flight row does not disappear and reappear.
+in-flight row does not disappear and reappear. Folder navigation keeps the last
+successful listing in place with a non-blocking loading indicator until the
+next prefix response arrives.
 
 Browser uploads use reception-only resumable sessions. A dropped connection can
 continue from the server-reported chunk offset while the 120-second reception

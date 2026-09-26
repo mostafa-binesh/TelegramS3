@@ -104,11 +104,16 @@
     {:else if buckets.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">+</span>No buckets yet. Create one above to start the file browser.</p>
     {:else}<ul class="checks">{#each buckets as bucket (bucket.name)}<li><div class="bucket-row"><button type="button" class="btn-link" on:click={() => onOpenBucket(bucket.name)}>{bucket.name}<small>created {formatTimestamp(bucket.created_at)}</small></button><ActionIcon name="trash" label={`Delete bucket ${bucket.name}`} tone="danger" on:click={() => onRemoveBucket(bucket.name)} disabled={busy}/></div></li>{/each}</ul>{/if}
   {:else}
-    {#if objectsLoading}<div class="skeleton-stack" aria-label="Loading files"><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div></div>
-    {:else if objectsError}<LoadError title="Could not load this folder" message={objectsError} onRetry={onRefresh} />
-    {:else if listing && listing.folders.length === 0 && listing.objects.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">↑</span>This folder is empty. Drop files above to upload the first one.</p>
-    {:else}<div class="table-scroll"><table class="kv-table"><colgroup><col class="selection-column"/><col class="name-column"/><col class="size-column"/><col class="modified-column"/><col class="actions-column"/></colgroup><thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={allVisibleSelected} on:change={onToggleAll}/></th><th>Name</th><th>Size</th><th>Modified</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
-      {#each listing?.folders ?? [] as folder (folder)}<tr><td></td><td><button class="btn-link" on:click={() => onEnterFolder(folder)}>{folder}/</button></td><td class="muted">folder</td><td class="muted">—</td><td class="row-actions"><ActionIcon name="trash" label={`Delete folder ${folder}`} tone="danger" on:click={() => onRemoveKey(folder)} disabled={busy}/></td></tr>{/each}
+    {#if listing}
+      <div class="listing-frame" class:loading={objectsLoading} aria-busy={objectsLoading}>
+        {#if objectsLoading}
+          <div class="listing-status" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span>Loading folder contents…</div>
+        {:else if objectsError}
+          <div class="listing-status error" role="alert"><span>{objectsError}</span><button class="ghost" type="button" on:click={onRefresh}>Retry</button></div>
+        {/if}
+        {#if listing.folders.length === 0 && listing.objects.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">↑</span>This folder is empty. Drop files above to upload the first one.</p>
+        {:else}<div class="table-scroll" class:listing-dimmed={objectsLoading}><table class="kv-table"><colgroup><col class="selection-column"/><col class="name-column"/><col class="size-column"/><col class="modified-column"/><col class="actions-column"/></colgroup><thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={allVisibleSelected} on:change={onToggleAll}/></th><th>Name</th><th>Size</th><th>Modified</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
+      {#each listing?.folders ?? [] as folder (folder)}<tr><td></td><td><button class="btn-link" on:click={() => onEnterFolder(folder)}>{folder}/</button></td><td class="muted">folder</td><td class="muted">—</td><td><div class="row-actions"><ActionIcon name="trash" label={`Delete folder ${folder}`} tone="danger" on:click={() => onRemoveKey(folder)} disabled={busy}/></div></td></tr>{/each}
       {#each listing?.objects ?? [] as obj (obj.key)}
         <tr class:uploading-row={obj.uploading} class:upload-attention={obj.uploading && uploadKind(obj) === 'attention'}>
           <td>
@@ -154,27 +159,40 @@
           </td>
           <td>{#if obj.uploading}<span class="upload-size"><strong>Multipart</strong><small>S3 upload</small></span>{:else}{formatBytes(obj.size)}{/if}</td>
           <td>{#if obj.uploading}<span class="upload-state"><strong>{uploadLabel(obj)}</strong><small>{formatTimestamp(obj.last_modified)}</small></span>{:else}{formatTimestamp(obj.last_modified)}{/if}</td>
-          <td class="row-actions">{#if obj.uploading}<span class="uploading-actions" class:needs-action={uploadKind(obj) === 'attention'} title={uploadTitle(obj)}><span aria-hidden="true"></span>{uploadKind(obj) === 'attention' ? 'Needs action' : 'Working'}</span>{:else}<ActionIcon name="download" label={`Download ${obj.name}`} href={contentUrl(selectedBucket, obj.key)}/><ActionIcon name="share" label={`Share ${obj.name}`} on:click={() => onShare(obj)} disabled={busy}/><ActionIcon name="links" badge={obj.shared_links} label={`Manage shared links for ${obj.name}`} on:click={() => onOpenShareLinks(obj)} disabled={busy}/><ActionIcon name="trash" label={`Delete ${obj.name}`} tone="danger" on:click={() => onRemoveKey(obj)} disabled={busy}/>{/if}</td>
+          <td><div class="row-actions">{#if obj.uploading}<span class="uploading-actions" class:needs-action={uploadKind(obj) === 'attention'} title={uploadTitle(obj)}><span aria-hidden="true"></span>{uploadKind(obj) === 'attention' ? 'Needs action' : 'Working'}</span>{:else}<ActionIcon name="download" label={`Download ${obj.name}`} href={contentUrl(selectedBucket, obj.key)}/><ActionIcon name="share" label={`Share ${obj.name}`} on:click={() => onShare(obj)} disabled={busy}/><ActionIcon name="links" badge={obj.shared_links} label={`Manage shared links for ${obj.name}`} on:click={() => onOpenShareLinks(obj)} disabled={busy}/><ActionIcon name="trash" label={`Delete ${obj.name}`} tone="danger" on:click={() => onRemoveKey(obj)} disabled={busy}/>{/if}</div></td>
         </tr>
       {/each}
     </tbody></table></div>{/if}
-    {#if selectedKeys.length}<div class="selection-bar"><strong>{selectedKeys.length} selected</strong><button class="ghost" on:click={onRemoveSelected}>Delete</button><button class="ghost" on:click={onOpenMove}>→ Move</button></div>{/if}
+      </div>
+    {:else if objectsLoading}<div class="skeleton-stack" aria-label="Loading files"><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div></div>
+    {:else if objectsError}<LoadError title="Could not load this folder" message={objectsError} onRetry={onRefresh} />
+    {/if}
+    {#if selectedKeys.length}<div class="selection-bar"><strong>{selectedKeys.length} selected</strong><button class="ghost bulk-action bulk-delete" type="button" on:click={onRemoveSelected}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16m-10 4v6m4-6v6M9 7V4h6v3m-9 0 1 13h10l1-13"/></svg><span>Delete</span></button><button class="ghost bulk-action" type="button" on:click={onOpenMove}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18m0-18-3 3m3-3 3 3M12 21l-3-3m3 3 3-3M3 12h18m0 0-3-3m3 3-3 3M3 12l3-3m-3 3 3 3"/></svg><span>Move</span></button></div>{/if}
   {/if}
 </section>
 <style>
   .heading-row { display: flex; align-items: center; gap: .75rem; }
   .back-button { flex: 0 0 auto; }
+  .listing-frame { position: relative; min-height: 72px; }
+  .listing-status { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 34px; margin: 0 0 8px; padding: 7px 10px; border: 1px solid #cfe4f1; border-radius: 10px; background: #f3faff; color: #2d6789; font-size: .78rem; font-weight: 750; }
+  .listing-status.error { justify-content: space-between; gap: 12px; border-color: #f0c9c9; background: #fff7f7; color: var(--danger, #b00020); }
+  .listing-status .ghost { flex: 0 0 auto; padding: 5px 10px; }
+  .listing-frame .table-scroll { transition: opacity 180ms ease, filter 180ms ease; }
+  .listing-frame .listing-dimmed { opacity: .48; filter: saturate(.7); pointer-events: none; }
   .bucket-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .expiry-note { display:block; color:var(--muted); font-size:.75rem; }
   .kv-table { table-layout: fixed; min-width: 940px; }
   .selection-column { width: 44px; }
   .size-column { width: 120px; }
   .modified-column { width: 172px; }
-  .actions-column { width: 128px; }
+  .actions-column { width: 200px; }
   .kv-table th, .kv-table td { vertical-align: middle; }
   .kv-table th:nth-child(2), .kv-table td:nth-child(2) { overflow-wrap: anywhere; }
-  .row-actions { justify-content: flex-end; }
+  .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 38px; white-space: nowrap; }
   .row-actions :global(.action-icon) { flex: 0 0 38px; }
+  .selection-bar .bulk-action { display: inline-flex; align-items: center; gap: 6px; }
+  .selection-bar .bulk-action svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .selection-bar .bulk-delete { color: var(--danger, #b00020); }
   .uploading-row { background: linear-gradient(90deg, rgba(237,247,255,.82), rgba(250,253,255,.45)); }
   .uploading-row td { padding-top: 16px; padding-bottom: 16px; border-color: #dcebf5; }
   .uploading-row.upload-attention { background: linear-gradient(90deg, rgba(255,247,231,.88), rgba(255,252,246,.5)); }
@@ -210,6 +228,6 @@
   @keyframes beacon { 70%,100% { box-shadow: 0 0 0 7px rgba(40,167,131,0); } }
   @keyframes shimmer { from { transform: translateX(-160%); } to { transform: translateX(380%); } }
   @keyframes indeterminate { 0% { transform: translateX(-110%); } 55%,100% { transform: translateX(270%); } }
-  @media (prefers-reduced-motion: reduce) { .status-beacon, .upload-fill, .upload-fill::after { animation: none!important; transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .status-beacon, .upload-fill, .upload-fill::after { animation: none!important; transition: none; } .listing-frame .table-scroll { transition: none; } }
   .visually-hidden { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
 </style>

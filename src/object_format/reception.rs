@@ -115,6 +115,7 @@ impl ObjectFormatService {
         if !final_chunk && bytes.len() as u64 != state.chunk_size {
             return Err(ObjectFormatError::ReceptionChunkSizeMismatch);
         }
+        self.add_client_upload_bytes(bytes.len() as u64);
         if !bytes.is_empty() {
             let object_id = state.object_id;
             let ReceptionState {

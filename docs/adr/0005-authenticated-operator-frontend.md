@@ -37,6 +37,9 @@ the object-store contract or imply extra S3 semantics.
 - Admin-side Telegram settings changes are validated before persistence and
   refresh failures are reported as JSON API warnings, keeping operator mistakes
   visible without weakening the S3 data-plane contract.
+- Folder navigation preserves the last successful listing with an explicit
+  loading affordance while the next prefix is fetched, so slow admin responses
+  do not make the browser appear to reset or freeze.
 - The S3 compatibility matrix stays focused on S3 behavior, while operator UI
   behavior is documented separately.
 
