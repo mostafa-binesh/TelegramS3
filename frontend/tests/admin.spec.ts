@@ -49,6 +49,7 @@ async function mockAdminApi(
     telegramSettingsFailure?: boolean;
     storageSettingsFailure?: boolean;
     recoveryIssues?: Array<Record<string, unknown>>;
+    delayFirstObjectListMs?: number;
   } = {}
 ) {
   let loggedIn = false;
@@ -58,6 +59,7 @@ async function mockAdminApi(
   const deletedKeys = new Set<string>();
   const buckets = [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }];
   const users = [user];
+  let delayedFirstObjectList = false;
   await page.route('**/_admin/api/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace('/_admin/api', '');
@@ -161,6 +163,10 @@ async function mockAdminApi(
       return route.fulfill({ json: { ok: true } });
     }
     if (path === '/objects' && request.method() === 'GET') {
+      if (options.delayFirstObjectListMs && !delayedFirstObjectList) {
+        delayedFirstObjectList = true;
+        await new Promise((resolve) => setTimeout(resolve, options.delayFirstObjectListMs));
+      }
       const prefix = new URL(request.url()).searchParams.get('prefix') ?? '';
       const rootObjects = [{ key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }];
       const nestedObjects = [{ key: 'docs/report.txt', name: 'report.txt', size: 24, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }];
@@ -303,6 +309,19 @@ test('re-entering a bucket reloads its objects', async ({ page }) => {
 
   await expect(page.getByText('readme.txt')).toBeVisible();
   expect(objectListRequests).toBe(2);
+});
+
+test('a slow folder load is not replaced by the background poll', async ({ page }) => {
+  await mockAdminApi(page, { delayFirstObjectListMs: 10_500 });
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Buckets' }).click();
+  await page.getByRole('button', { name: /^release-test created/ }).click();
+
+  await expect(page.getByText('readme.txt')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByLabel('Loading files')).toBeHidden();
 });
 
 test('recovery transfer is visible and retry removes it after reconciliation', async ({ page }) => {

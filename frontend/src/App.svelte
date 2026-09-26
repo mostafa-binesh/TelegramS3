@@ -551,6 +551,10 @@
     options: { silent?: boolean } = {}
   ) {
     if (!bucket) return;
+    // A background poll must not supersede the foreground load that owns the
+    // skeleton. If it did, the foreground request would become stale and its
+    // finally block would no longer be allowed to clear objectsLoading.
+    if (options.silent && objectsLoading) return;
     const csrf = session?.csrf_token;
     const requestSerial = ++objectsRequestSerial;
     const routeKey = `${bucket}|${prefix}`;

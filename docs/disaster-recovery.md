@@ -64,6 +64,10 @@ normal worker/reconciliation path.
 The authenticated bucket browser polls those durable jobs while a bucket is open.
 An active S3 key can therefore remain visible as an uploading row with completed
 and total part counts, even though it is not yet a committed/downloadable object.
+While a foreground folder listing is still loading, the silent activity poll
+waits for that request instead of replacing its loading state; this prevents a
+slow browser response from becoming an infinite skeleton without changing the
+durable job or manifest state.
 If the row changes to `recovery_required`, preserve the Telegram payloads and
 metadata until reconciliation determines whether the acknowledgement can be
 matched exactly; do not delete the visible Telegram files just because the browser

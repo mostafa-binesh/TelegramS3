@@ -257,6 +257,12 @@ resume automatically. This is operational visibility only and does not add the
 key to the committed object index. Partial or recovery-required data therefore
 remains unavailable to download until completion or explicit repair.
 
+The authenticated browser keeps a foreground folder listing authoritative while
+that request is pending. Its silent multipart/activity poll waits rather than
+superseding the listing request, so a slow Telegram-backed response cannot leave
+the UI displaying an indefinite loading state. This affects presentation only;
+manifest visibility and committed-object rules remain unchanged.
+
 ## Recovery Rules
 
 - A manifest without a local commit row is not visible until reconciliation.

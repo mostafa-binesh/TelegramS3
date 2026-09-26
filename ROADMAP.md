@@ -236,7 +236,9 @@ Completed in this increment:
   while other operators remain isolated by the single-flow lock
 - invalid Telegram codes remain retryable, and the bucket browser now provides
   empty-bucket deletion, parent navigation, and skeleton loading on refresh and
-  folder transitions
+  folder transitions; foreground folder loads are not superseded by silent
+  background polling, so a slow response cannot leave the browser on an
+  unbounded loading skeleton
 - bucket/object deletion now reports only committed local deletes, returns a
   conflict for non-empty folders, and keeps folder and file action columns
   aligned in the browser table

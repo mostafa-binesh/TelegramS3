@@ -117,4 +117,7 @@ features, so they are documented separately.
   controller only reflects committed S3 object data through the same store as
   the S3 server. Its Vite-built hashed chunks are served from the UI dist
   directory's `assets/` subdirectory; a failed lazy-view load is surfaced with
-  a retry action rather than an unbounded loading skeleton.
+  a retry action rather than an unbounded loading skeleton. Folder transitions
+  keep the foreground object request authoritative while the background poll
+  waits for it, so slow admin responses do not strand the browser in a loading
+  state.

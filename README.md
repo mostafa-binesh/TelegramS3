@@ -58,8 +58,8 @@ staging, and recovery artifacts, not committed payloads.
   no whole-object RAM buffering (an explicit project invariant).
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
   operator account management, in-app bucket creation, bucket/object browser
-  with per-file upload, ranged download, and guarded folder deletion, plus the
-  Telegram setup wizard.
+  with per-file upload, ranged download, guarded folder deletion, and resilient
+  folder transitions, plus the Telegram setup wizard.
 - **Operational tooling** — a `telegram-s3` CLI (`users`, `config check`,
   `doctor`, `db`, `index`, `repair`, `gc --dry-run`), loopback-only health and
   metrics endpoints, and a production Docker image published to GHCR.
