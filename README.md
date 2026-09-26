@@ -160,7 +160,7 @@ recovery procedures.
 The published image is `ghcr.io/mostafa-binesh/telegrams3`
 (built on `v*` tags and manual workflow dispatch; see
 [.github/workflows/publish-docker-image.yml](.github/workflows/publish-docker-image.yml)).
-Pinning a version tag such as `v0.7.1-rc.8` is recommended when validating a
+Pinning a version tag such as `v0.7.3-rc.4` is recommended when validating a
 release. Release-candidate tags publish only their explicit RC tags;
 the floating `latest`, major, and major-minor tags are reserved for stable
 version tags without a prerelease suffix.

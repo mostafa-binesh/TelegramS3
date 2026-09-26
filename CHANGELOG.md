@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.7.3-rc.4 - 2026-09-26
+
+Done jobs:
+
+- Prevented a slow folder listing from being superseded by the silent browser
+  activity poll, which could leave the bucket browser on an infinite loading
+  skeleton despite successful API responses.
+- Added a Playwright regression covering the slow-listing and polling race.
+- Documented the admin-browser loading guarantee across the operator, storage,
+  compatibility, and recovery guides.
+
 ## 0.7.3-rc.3 - 2026-09-25
 
 Done jobs:
