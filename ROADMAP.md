@@ -227,6 +227,9 @@ Completed in this increment:
   failures with object/chunk context, and advertise byte-range resume support
   so clients can continue after a disconnect without restarting the complete
   object
+- download streams now support a bounded, database-backed parallel prefetch
+  window of `0–4` extra verified chunks, configurable from Telegram settings;
+  output order, checksum boundaries, and memory use remain bounded
 - browser reception now supports bounded resumable chunks, authoritative offset
   re-sync, pause/resume while the reception lease remains active, and explicit
   cancellation cleanup; server restart resumption remains intentionally

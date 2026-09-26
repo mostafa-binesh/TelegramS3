@@ -183,6 +183,15 @@ I/O failure discards the partial fetch and retries the same message under the
 configured bounded retry/flood-wait policy. The server never emits a partial or
 unverified chunk before retrying.
 
+The shared reader supports bounded parallel prefetching. The database-backed
+`telegram_download_prefetch_chunks` policy allows `0–4` extra chunks in flight
+and defaults to `1`; `0` keeps the reader serial. Prefetched chunks remain
+ordered behind the current output, and every prefetched chunk is fully fetched,
+decrypted, and checksum-verified before emission. This reduces normal
+chunk-boundary idle gaps without buffering a whole object; the maximum active
+window is `prefetch + 1` chunks. Dropping the client stream drops outstanding
+prefetch work as well.
+
 Public share and authenticated admin responses advertise `Accept-Ranges: bytes`
 and support a single `Range` request with `Content-Range`. During a streamed
 read, transient Telegram/proxy failures keep the response open while the same

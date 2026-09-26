@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## 0.7.5-rc.3 - 2026-09-27
+
+### Bounded parallel download prefetching
+
+- Added a database-backed `telegram_download_prefetch_chunks` policy for
+  smoothing Telegram-backed downloads. The default fetches one additional
+  chunk while the current chunk is delivered; setting it to `0` restores
+  serial reads, and values up to `4` are accepted.
+- The S3, authenticated admin, and public-share readers now prefetch only a
+  bounded number of verified chunks concurrently, preserve manifest order,
+  and emit client traffic counters only when bytes are actually delivered.
+- Prefetched chunks are fully downloaded, decrypted, and checksum-verified
+  before they can reach the client. A failure still aborts the stream rather
+  than exposing partial or unverified bytes, and dropping a stream cancels the
+  remaining prefetch work.
+- Added Storage policy controls, preset values, validation feedback, and
+  browser coverage for changing and persisting the prefetch window.
+
+### Migration, tests, and documentation
+
+- Bumped the metadata schema to v13. Existing databases receive the default
+  prefetch value through an idempotent migration; existing manifests and
+  active transfers remain unchanged.
+- Added migration, settings round-trip, bounded-stream ordering, validation,
+  admin API, and persistence coverage.
+- Documented the memory/parallelism trade-off and download behavior across the
+  README, roadmap, configuration, S3 compatibility, storage-format,
+  disaster-recovery, metadata-store, and architecture decision documents.
+
 ## 0.7.5-rc.2 - 2026-09-27
 
 ### Download stream recovery

@@ -196,6 +196,15 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
     .await;
     assert_eq!(storage_settings.status_code, 200, "storage settings GET");
     assert_eq!(storage_settings.bytes_json["chunk_size"], 1_048_576);
+    assert_eq!(storage_settings.bytes_json["download_prefetch_chunks"], 1);
+    assert_eq!(
+        storage_settings.bytes_json["min_download_prefetch_chunks"],
+        0
+    );
+    assert_eq!(
+        storage_settings.bytes_json["max_download_prefetch_chunks"],
+        4
+    );
     let storage_update = json_request(
         &client,
         &bind_addr,
@@ -206,11 +215,26 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
             ("X-CSRF-Token", &csrf),
             ("Content-Type", "application/json"),
         ],
-        br#"{"chunk_size":2097152}"#,
+        br#"{"chunk_size":2097152,"download_prefetch_chunks":2}"#,
     )
     .await;
     assert_eq!(storage_update.status_code, 200, "storage settings update");
     assert_eq!(storage_update.bytes_json["chunk_size"], 2_097_152);
+    assert_eq!(storage_update.bytes_json["download_prefetch_chunks"], 2);
+    let invalid_storage_update = json_request(
+        &client,
+        &bind_addr,
+        "POST",
+        "/_admin/api/telegram/storage-settings",
+        &[
+            ("Cookie", &cookie),
+            ("X-CSRF-Token", &csrf),
+            ("Content-Type", "application/json"),
+        ],
+        br#"{"chunk_size":2097152,"download_prefetch_chunks":5}"#,
+    )
+    .await;
+    assert_eq!(invalid_storage_update.status_code, 400, "invalid prefetch rejected");
 
     // ---- content route, backed by a freshly created S3 bucket ----------------
     let bucket = format!("wiz-{}", uuid::Uuid::new_v4().simple());

@@ -181,6 +181,9 @@ export interface StorageSettings {
   chunk_size: number;
   min_chunk_size: number;
   max_chunk_size: number;
+  download_prefetch_chunks: number;
+  min_download_prefetch_chunks: number;
+  max_download_prefetch_chunks: number;
   recovery_verify_enabled: boolean;
   recovery_verify_interval_secs: number;
   min_recovery_verify_interval_secs: number;

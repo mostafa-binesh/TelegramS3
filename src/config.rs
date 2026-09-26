@@ -10,6 +10,9 @@ const DEFAULT_DATA_DIR: &str = "data";
 pub const MIN_CHUNK_SIZE: u64 = 1;
 pub const MAX_CHUNK_SIZE: u64 = 2_000_000_000;
 pub const DEFAULT_CHUNK_SIZE: u64 = 1_048_576;
+pub const MIN_DOWNLOAD_PREFETCH_CHUNKS: u64 = 0;
+pub const MAX_DOWNLOAD_PREFETCH_CHUNKS: u64 = 4;
+pub const DEFAULT_DOWNLOAD_PREFETCH_CHUNKS: u64 = 1;
 pub const MIN_RECOVERY_VERIFY_INTERVAL_SECS: u64 = 60;
 pub const MAX_RECOVERY_VERIFY_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
 pub const DEFAULT_RECOVERY_VERIFY_INTERVAL_SECS: u64 = 300;
@@ -141,6 +144,13 @@ impl AppConfig {
     pub fn validate_chunk_size(value: u64) -> Result<u64, ConfigError> {
         if !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&value) {
             return Err(ConfigError::Invalid("TELEGRAM_CHUNK_SIZE"));
+        }
+        Ok(value)
+    }
+
+    pub fn validate_download_prefetch_chunks(value: u64) -> Result<u64, ConfigError> {
+        if !(MIN_DOWNLOAD_PREFETCH_CHUNKS..=MAX_DOWNLOAD_PREFETCH_CHUNKS).contains(&value) {
+            return Err(ConfigError::Invalid("TELEGRAM_DOWNLOAD_PREFETCH_CHUNKS"));
         }
         Ok(value)
     }
@@ -626,6 +636,23 @@ mod tests {
         assert!(config.recovery_verify_enabled().expect("enabled"));
         assert_eq!(config.retry_count().expect("retry"), 5);
         assert!(config.respect_flood_wait().expect("respect"));
+    }
+
+    #[test]
+    fn download_prefetch_chunks_are_bounded() {
+        assert_eq!(
+            AppConfig::validate_download_prefetch_chunks(MIN_DOWNLOAD_PREFETCH_CHUNKS)
+                .expect("minimum"),
+            MIN_DOWNLOAD_PREFETCH_CHUNKS
+        );
+        assert_eq!(
+            AppConfig::validate_download_prefetch_chunks(MAX_DOWNLOAD_PREFETCH_CHUNKS)
+                .expect("maximum"),
+            MAX_DOWNLOAD_PREFETCH_CHUNKS
+        );
+        assert!(
+            AppConfig::validate_download_prefetch_chunks(MAX_DOWNLOAD_PREFETCH_CHUNKS + 1).is_err()
+        );
     }
 
     #[test]

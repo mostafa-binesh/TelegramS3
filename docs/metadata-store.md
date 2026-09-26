@@ -9,7 +9,7 @@ Telegram alone to answer read/write consistency questions.
 
 ## Schema Version
 
-- Current schema version: `12`
+- Current schema version: `13`
 - Version contract: migrations are applied on startup and are also available
   through the `telegram-s3 db migrate` command.
 - Startup behavior: the store opens the configured SQLite file, creates the
@@ -19,11 +19,17 @@ Telegram alone to answer read/write consistency questions.
   tombstoned rows, and bucket state before `doctor` or `server` report
   success.
 
+Schema v13 adds the database-backed `telegram_download_prefetch_chunks`
+setting. The migration seeds existing databases with `1` extra prefetched
+chunk; it is idempotent and does not alter manifests, Telegram documents, or
+active transfer boundaries.
+
 ## Tables
 
 - `schema_version`
   - single-row version table
   - stores the current schema version and the last applied timestamp
+
 - `object_manifests`
   - one row per object manifest revision
   - stores the full manifest JSON and commit state

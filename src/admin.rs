@@ -1680,6 +1680,7 @@ impl AdminUiState {
     async fn telegram_save_storage_settings(&self, request: Request<Incoming>) -> Response<Body> {
         let StorageSettingsRequest {
             chunk_size,
+            download_prefetch_chunks,
             recovery_verify_enabled,
             recovery_verify_interval_secs,
             recovery_verify_chunks,
@@ -1693,6 +1694,11 @@ impl AdminUiState {
             return json_error(StatusCode::BAD_REQUEST, "chunk_size is required");
         };
         if let Err(error) = crate::config::AppConfig::validate_chunk_size(chunk_size) {
+            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+        let prefetch_chunks = download_prefetch_chunks
+            .unwrap_or_else(|| self.object_format.download_prefetch_chunks());
+        if let Err(error) = AppConfig::validate_download_prefetch_chunks(prefetch_chunks) {
             return json_error(StatusCode::BAD_REQUEST, &error.to_string());
         }
         let interval_secs = recovery_verify_interval_secs
@@ -1711,6 +1717,18 @@ impl AdminUiState {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
         }
         if let Err(error) = self.object_format.set_chunk_size(chunk_size) {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self
+            .store()
+            .set_telegram_download_prefetch_chunks(prefetch_chunks)
+        {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self
+            .object_format
+            .set_download_prefetch_chunks(prefetch_chunks)
+        {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
         }
         if let Err(error) = self
@@ -1744,6 +1762,9 @@ impl AdminUiState {
             chunk_size: self.object_format.chunk_size(),
             min_chunk_size: crate::config::MIN_CHUNK_SIZE,
             max_chunk_size: crate::config::MAX_CHUNK_SIZE,
+            download_prefetch_chunks: self.object_format.download_prefetch_chunks(),
+            min_download_prefetch_chunks: crate::config::MIN_DOWNLOAD_PREFETCH_CHUNKS,
+            max_download_prefetch_chunks: crate::config::MAX_DOWNLOAD_PREFETCH_CHUNKS,
             recovery_verify_enabled: self.object_format.recovery_verifier_enabled(),
             recovery_verify_interval_secs: self.object_format.recovery_verify_interval_secs(),
             min_recovery_verify_interval_secs: crate::config::MIN_RECOVERY_VERIFY_INTERVAL_SECS,
@@ -2712,6 +2733,7 @@ struct TelegramSettingsWire {
 #[serde(rename_all = "snake_case")]
 struct StorageSettingsRequest {
     chunk_size: Option<u64>,
+    download_prefetch_chunks: Option<u64>,
     recovery_verify_enabled: Option<bool>,
     recovery_verify_interval_secs: Option<u64>,
     recovery_verify_chunks: Option<u64>,
@@ -2723,6 +2745,9 @@ struct StorageSettingsWire {
     chunk_size: u64,
     min_chunk_size: u64,
     max_chunk_size: u64,
+    download_prefetch_chunks: u64,
+    min_download_prefetch_chunks: u64,
+    max_download_prefetch_chunks: u64,
     recovery_verify_enabled: bool,
     recovery_verify_interval_secs: u64,
     min_recovery_verify_interval_secs: u64,

@@ -17,7 +17,7 @@ features, so they are documented separately.
 | Head bucket | implemented | cargo test | Reflects bucket metadata from the local store | Telegram metadata is indirect | 4 |
 | Put object | implemented | cargo test / release-test.ps1 | Chunk upload plus manifest commit through the Telegram-backed object-format service; ambiguous sends are token-reconciled before safe retry, including restart recovery for stale sending attempts | 2 GiB Telegram file limit and bounded recovery scan | 4 |
 | Per-object expiry (extension) | implemented | cargo test | PUT and multipart initiation accept `x-amz-meta-telegram-s3-expires-at` (RFC3339) or `x-amz-meta-telegram-s3-expires-in` (seconds); expired objects are hidden from reads and listings, then swept into tombstone cleanup | Background expiry sweep runs with the cleanup worker; remote deletion remains evidence-first and retention-aware | 11 |
-| Get object | implemented | cargo test | Streams from Telegram-backed manifest and chunk references with checksum verification; transient Telegram reads retry per chunk while keeping the response open for up to 120 seconds | Requires chunk fetch and verification; clients should resume with a byte range after an exhausted stream | 4 |
+| Get object | implemented | cargo test | Streams from Telegram-backed manifest and chunk references with checksum verification; transient Telegram reads retry per chunk while keeping the response open for up to 120 seconds; a bounded `0–4` extra-chunk prefetch window smooths delivery without reordering output | Requires chunk fetch and verification; clients should resume with a byte range after an exhausted stream; higher prefetch uses more parallel Telegram traffic | 4 |
 | Head object | implemented | cargo test | Returns committed metadata only | Manifest rebuild may be needed | 4 |
 | Delete object | implemented | cargo test | Tombstones before evidence-first cleanup | Telegram removal is asynchronous but due immediately | 4 |
 | List objects v1 | implemented | cargo test | Uses the same ordered local manifest index and delimiter grouping as v2 so older clients can interoperate | Remote reconciliation lag exists | 4 |
@@ -102,7 +102,8 @@ features, so they are documented separately.
   `Accept-Ranges: bytes` and honor single byte ranges. A client can resume a
   disconnected download using `Range` and `Content-Range`; the shared reader
   retries transient Telegram/network failures while fetching the current chunk
-  and keeps the response open for up to 120 seconds. Missing messages,
+  and keeps a bounded number of additional verified chunks ready in order
+  while keeping the response open for up to 120 seconds. Missing messages,
   decryption failures, and checksum failures are not retried.
 - The object browser shows object expiry, accepts seconds-based expiry for
   browser uploads, and creates opaque `/_public/` share URLs with an optional expiry.

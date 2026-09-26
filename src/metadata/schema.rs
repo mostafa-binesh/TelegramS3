@@ -1,5 +1,6 @@
 use super::rows::{count_rows, parse_rfc3339_timestamp, timestamp_now};
 use super::{MetadataError, MetadataStatus, MetadataStore, SCHEMA_VERSION};
+use crate::config::DEFAULT_DOWNLOAD_PREFETCH_CHUNKS;
 use rusqlite::{Connection, OptionalExtension, params};
 
 impl MetadataStore {
@@ -92,6 +93,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_phase10_schema(connection)?;
         ensure_connection_removal_schema(connection)?;
         ensure_share_schema(connection)?;
+        ensure_download_prefetch_setting(connection)?;
         return Ok(());
     }
 
@@ -314,6 +316,14 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         "#,
     )?;
     tx.execute(
+        "INSERT OR IGNORE INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            super::settings::DOWNLOAD_PREFETCH_CHUNKS_SETTING,
+            DEFAULT_DOWNLOAD_PREFETCH_CHUNKS.to_string(),
+            timestamp_now()?
+        ],
+    )?;
+    tx.execute(
         r#"
         INSERT INTO schema_version (id, version, applied_at)
         VALUES (1, ?1, ?2)
@@ -327,6 +337,19 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_phase10_schema(connection)?;
     ensure_connection_removal_schema(connection)?;
     ensure_share_schema(connection)?;
+    ensure_download_prefetch_setting(connection)?;
+    Ok(())
+}
+
+fn ensure_download_prefetch_setting(connection: &mut Connection) -> Result<(), MetadataError> {
+    connection.execute(
+        "INSERT OR IGNORE INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)",
+        params![
+            super::settings::DOWNLOAD_PREFETCH_CHUNKS_SETTING,
+            DEFAULT_DOWNLOAD_PREFETCH_CHUNKS.to_string(),
+            timestamp_now()?
+        ],
+    )?;
     Ok(())
 }
 
@@ -640,6 +663,37 @@ mod tests {
         let store = MetadataStore::open(&path).expect("open");
         assert_eq!(store.schema_version().expect("schema"), SCHEMA_VERSION);
         assert_eq!(store.status().expect("status").active_objects, 0);
+    }
+
+    #[test]
+    fn migration_from_version_twelve_adds_download_prefetch_policy() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("metadata.sqlite");
+        {
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE schema_version (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        version INTEGER NOT NULL,
+                        applied_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_version (id, version, applied_at)
+                    VALUES (1, 12, '2026-09-26T00:00:00Z');
+                    "#,
+                )
+                .expect("seed");
+        }
+
+        let store = MetadataStore::open(&path).expect("migrate");
+        assert_eq!(store.schema_version().expect("schema"), SCHEMA_VERSION);
+        assert_eq!(
+            store
+                .telegram_download_prefetch_chunks()
+                .expect("prefetch setting"),
+            Some(DEFAULT_DOWNLOAD_PREFETCH_CHUNKS)
+        );
     }
 
     #[test]

@@ -73,6 +73,7 @@ Defaults used by the current scaffold:
 - S3 bind addr: `127.0.0.1:9000`
 - admin bind addr: `127.0.0.1:9001`
 - chunk size: `1 MiB`
+- download prefetch: `1` extra verified chunk (`0–4`)
 - recovery verifier: enabled
 - recovery verifier interval: `300s` (5 minutes)
 - recovery verifier sample: `1` random chunk per committed object
@@ -87,9 +88,11 @@ Defaults used by the current scaffold:
 Telegram-backed reads use `retry count`, `retry backoff`, and flood-wait
 settings for transient chunk-download failures. Each retry re-fetches the
 current complete chunk before it is emitted, so partial or unverified data is
-never forwarded. Public share responses advertise `Accept-Ranges: bytes`; a
-client can resume an exhausted stream with a single byte range without any
-additional setting.
+never forwarded. The reader may also prefetch the configured number of extra
+chunks in parallel, but preserves output order and never emits a prefetched
+chunk before its decryption and checksum verification complete. Public share
+responses advertise `Accept-Ranges: bytes`; a client can resume an exhausted
+stream with a single byte range without any additional setting.
 
 ## Operator accounts
 
@@ -116,6 +119,15 @@ console exposes it under **Telegram settings → Storage policy** and applies a
 new value immediately to new uploads and resumable receptions. Existing
 manifests and active transfers retain their recorded chunk boundaries; no
 rechunking or Telegram migration is performed.
+
+The same page controls `telegram_download_prefetch_chunks`, the number of
+extra complete chunks allowed in flight while a client download is streaming.
+Its database default is `1`; `0` disables prefetching and `4` is the maximum.
+The setting is introduced by metadata schema v13 and is safe to change without
+rewriting existing objects or changing active transfer chunk boundaries. A
+larger value can reduce visible zero-speed gaps at the cost of additional
+parallel Telegram traffic and up to `(prefetch + 1) × chunk size` of transient
+per-stream plaintext/ciphertext work.
 
 The same policy page controls the sampled recovery verifier. When enabled, it
 runs once at startup and then at the configured interval, selecting the

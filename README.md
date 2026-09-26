@@ -294,12 +294,15 @@ cargo build --release
 ## Configuration
 
 Runtime configuration is mostly environment-driven, but Telegram bootstrap
-settings, upload chunk policy, and recovery-verifier policy are managed from the
-authenticated admin panel and persisted in `metadata.sqlite`.
+settings, download prefetch policy, upload chunk policy, and recovery-verifier
+policy are managed from the authenticated admin panel and persisted in
+`metadata.sqlite`.
 `TELEGRAM_CHUNK_SIZE` is imported when no database policy exists; after that,
 the database value is authoritative. The verifier defaults to one random chunk
 per committed object every five minutes and can be changed or disabled live
-from **Telegram settings → Storage policy**. Telegram
+from **Telegram settings → Storage policy**. Download smoothing defaults to one
+extra verified chunk prefetched in parallel, accepts `0–4` extra chunks, and
+can also be changed live. Telegram
 API IDs and storage chat IDs are validated as numeric values
 before persistence; connection refresh failures are returned as JSON warnings
 from the admin API rather than as proxy-level failures.

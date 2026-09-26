@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 const CHUNK_SIZE_SETTING: &str = "telegram_chunk_size";
+pub(crate) const DOWNLOAD_PREFETCH_CHUNKS_SETTING: &str = "telegram_download_prefetch_chunks";
 const RECOVERY_VERIFY_ENABLED_SETTING: &str = "telegram_recovery_verify_enabled";
 const RECOVERY_VERIFY_INTERVAL_SETTING: &str = "telegram_recovery_verify_interval_secs";
 const RECOVERY_VERIFY_CHUNKS_SETTING: &str = "telegram_recovery_verify_chunks";
@@ -51,6 +52,14 @@ impl MetadataStore {
             )?;
             Ok(())
         })
+    }
+
+    pub fn telegram_download_prefetch_chunks(&self) -> Result<Option<u64>, MetadataError> {
+        self.read_numeric_setting(DOWNLOAD_PREFETCH_CHUNKS_SETTING)
+    }
+
+    pub fn set_telegram_download_prefetch_chunks(&self, chunks: u64) -> Result<(), MetadataError> {
+        self.set_numeric_setting(DOWNLOAD_PREFETCH_CHUNKS_SETTING, chunks)
     }
 
     pub fn telegram_recovery_verify_interval_secs(&self) -> Result<Option<u64>, MetadataError> {
@@ -413,7 +422,7 @@ mod tests {
             store.telegram_chunk_size().expect("read"),
             Some(8 * 1024 * 1024)
         );
-        assert_eq!(store.schema_version().expect("schema"), 12);
+        assert_eq!(store.schema_version().expect("schema"), 13);
     }
 
     #[test]
@@ -467,7 +476,7 @@ mod tests {
         );
 
         store.migrate().expect("idempotent migration");
-        assert_eq!(store.schema_version().expect("schema"), 12);
+        assert_eq!(store.schema_version().expect("schema"), 13);
         assert_eq!(
             store
                 .telegram_recovery_verify_interval_secs()
@@ -485,6 +494,33 @@ mod tests {
                 .object_recovery_marker(object_id)
                 .expect("marker after migration"),
             Some("[]".to_string())
+        );
+    }
+
+    #[test]
+    fn download_prefetch_setting_defaults_and_round_trips() {
+        let store = MetadataStore::open_in_memory().expect("metadata");
+        assert_eq!(
+            store
+                .telegram_download_prefetch_chunks()
+                .expect("prefetch read"),
+            Some(1)
+        );
+        store
+            .set_telegram_download_prefetch_chunks(4)
+            .expect("prefetch write");
+        assert_eq!(
+            store
+                .telegram_download_prefetch_chunks()
+                .expect("prefetch read"),
+            Some(4)
+        );
+        store.migrate().expect("idempotent migration");
+        assert_eq!(
+            store
+                .telegram_download_prefetch_chunks()
+                .expect("prefetch after migration"),
+            Some(4)
         );
     }
 

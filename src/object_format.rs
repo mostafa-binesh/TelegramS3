@@ -377,6 +377,7 @@ pub struct ObjectFormatService {
     transport_manager: std::sync::Arc<TelegramTransportManager>,
     data_dir: PathBuf,
     chunk_size: Arc<RwLock<u64>>,
+    download_prefetch_chunks: Arc<RwLock<u64>>,
     recovery_verify_enabled: Arc<RwLock<bool>>,
     recovery_verify_interval_secs: Arc<RwLock<u64>>,
     recovery_verify_chunks: Arc<RwLock<u64>>,
@@ -495,6 +496,14 @@ impl ObjectFormatService {
                 chunk_size
             }
         };
+        let download_prefetch_chunks = match metadata.telegram_download_prefetch_chunks()? {
+            Some(value) => AppConfig::validate_download_prefetch_chunks(value)?,
+            None => {
+                let value = crate::config::DEFAULT_DOWNLOAD_PREFETCH_CHUNKS;
+                metadata.set_telegram_download_prefetch_chunks(value)?;
+                value
+            }
+        };
         let recovery_verify_interval_secs =
             match metadata.telegram_recovery_verify_interval_secs()? {
                 Some(value) => AppConfig::validate_recovery_verify_interval_secs(value)?,
@@ -525,6 +534,7 @@ impl ObjectFormatService {
             transport_manager,
             config.data_dir(),
             chunk_size,
+            download_prefetch_chunks,
             storage_chat_id,
             ObjectEncryption::from_master_key(&master_key),
         )?;
@@ -542,6 +552,7 @@ impl ObjectFormatService {
         transport_manager: std::sync::Arc<TelegramTransportManager>,
         data_dir: impl AsRef<Path>,
         chunk_size: u64,
+        download_prefetch_chunks: u64,
         storage_chat_id: String,
         encryption: ObjectEncryption,
     ) -> Result<Self, ObjectFormatError> {
@@ -557,6 +568,7 @@ impl ObjectFormatService {
             transport_manager,
             data_dir,
             chunk_size: Arc::new(RwLock::new(chunk_size)),
+            download_prefetch_chunks: Arc::new(RwLock::new(download_prefetch_chunks)),
             recovery_verify_enabled: Arc::new(RwLock::new(
                 crate::config::DEFAULT_RECOVERY_VERIFY_ENABLED,
             )),
@@ -634,6 +646,23 @@ impl ObjectFormatService {
         crate::config::AppConfig::validate_chunk_size(chunk_size)
             .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
         *self.chunk_size.write().expect("chunk size lock") = chunk_size;
+        Ok(())
+    }
+
+    pub fn download_prefetch_chunks(&self) -> u64 {
+        *self
+            .download_prefetch_chunks
+            .read()
+            .expect("download prefetch chunks lock")
+    }
+
+    pub fn set_download_prefetch_chunks(&self, chunks: u64) -> Result<(), ObjectFormatError> {
+        AppConfig::validate_download_prefetch_chunks(chunks)
+            .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+        *self
+            .download_prefetch_chunks
+            .write()
+            .expect("download prefetch chunks lock") = chunks;
         Ok(())
     }
 
@@ -2072,7 +2101,8 @@ impl ObjectFormatService {
     }
 
     /// Emit one decrypted + checksum-verified slice per [`ReadSpan`], bounded by
-    /// the chunk size and never allocating a whole object in memory.
+    /// the chunk size and configured prefetch window, and never allocating a
+    /// whole object in memory.
     ///
     /// This is the single shared streaming reader used by both the S3
     /// `get_object` path and the `/_admin` download endpoint so their byte
@@ -2084,122 +2114,34 @@ impl ObjectFormatService {
         spans: Vec<ReadSpan>,
     ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + 'static + use<> {
         let pin = this.pin_object(manifest.object_id);
+        let concurrency = usize::try_from(this.download_prefetch_chunks().saturating_add(1))
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let buffered = futures::stream::iter(spans)
+            .map({
+                let object_format = Arc::clone(&this);
+                let manifest = manifest.clone();
+                move |span| read_stream_span(Arc::clone(&object_format), manifest.clone(), span)
+            })
+            .buffered(concurrency);
+        let buffered = Box::pin(buffered);
         futures::stream::unfold(
-            (
-                Arc::clone(&this),
-                manifest.clone(),
-                0usize,
-                spans,
-                false,
-                pin,
-            ),
-            move |(object_format, manifest, index, spans, done, pin)| async move {
+            (buffered, this, pin, false),
+            |(mut buffered, object_format, pin, done)| async move {
                 if done {
                     return None;
                 }
-                let span = spans.get(index)?.clone();
-                let chunk = match manifest.chunks.get(span.order as usize) {
-                    Some(chunk) => chunk,
-                    None => {
-                        return Some((
-                            Err(io::Error::new(
-                                io::ErrorKind::NotFound,
-                                format!("missing chunk {}", span.order),
-                            )),
-                            (object_format, manifest, index + 1, spans, true, pin),
-                        ));
-                    }
-                };
-                let message_id = match i32::try_from(chunk.telegram_message_id) {
-                    Ok(message_id) => message_id,
-                    Err(_) => {
-                        return Some((
-                            Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!(
-                                    "telegram message id out of range for chunk {}",
-                                    span.order
-                                ),
-                            )),
-                            (object_format, manifest, index + 1, spans, true, pin),
-                        ));
-                    }
-                };
-                let ciphertext = match object_format
-                    .download_message_bytes_for_stream(message_id)
-                    .await
-                {
-                    Ok(value) => value,
-                    Err(error) => {
-                        warn!(
-                            object_id = %manifest.object_id,
-                            chunk_order = span.order,
-                            telegram_message_id = message_id,
-                            error = %error,
-                            "object stream chunk failed"
-                        );
-                        return Some((
-                            Err(io::Error::other(error.to_string())),
-                            (object_format, manifest, index + 1, spans, true, pin),
-                        ));
-                    }
-                };
-                let plaintext = if manifest.encryption.enabled {
-                    let (source_object_id, source_order) =
-                        chunk.payload_identity(manifest.object_id);
-                    match object_format.decrypt_chunk(source_object_id, source_order, &ciphertext) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            return Some((
-                                Err(io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    error.to_string(),
-                                )),
-                                (object_format, manifest, index + 1, spans, true, pin),
-                            ));
-                        }
-                    }
-                } else {
-                    ciphertext
-                };
-                if sha256_hex(&plaintext) != span.checksum {
-                    return Some((
-                        Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "checksum mismatch for chunk {}: expected {}, got {}",
-                                span.order,
-                                span.checksum,
-                                sha256_hex(&plaintext)
-                            ),
-                        )),
-                        (object_format, manifest, index + 1, spans, true, pin),
-                    ));
+                match buffered.as_mut().next().await {
+                    Some(Ok((length, bytes))) => Some((
+                        Ok({
+                            object_format.add_client_download_bytes(length);
+                            bytes
+                        }),
+                        (buffered, object_format, pin, false),
+                    )),
+                    Some(Err(error)) => Some((Err(error), (buffered, object_format, pin, true))),
+                    None => None,
                 }
-                let start = span.offset_within_chunk as usize;
-                let end = start + span.length as usize;
-                if plaintext.len() < end {
-                    return Some((
-                        Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            format!(
-                                "chunk {} shorter than planned span (len {}, need {}-{})",
-                                span.order,
-                                plaintext.len(),
-                                start,
-                                end
-                            ),
-                        )),
-                        (object_format, manifest, index + 1, spans, true, pin),
-                    ));
-                }
-                Some((
-                    Ok({
-                        object_format.add_client_download_bytes(span.length);
-                        Bytes::copy_from_slice(&plaintext[start..end])
-                    }),
-                    (object_format, manifest, index + 1, spans, false, pin),
-                ))
             },
         )
     }
@@ -3131,6 +3073,71 @@ where
     }
 }
 
+async fn read_stream_span(
+    object_format: Arc<ObjectFormatService>,
+    manifest: ObjectManifest,
+    span: ReadSpan,
+) -> Result<(u64, Bytes), io::Error> {
+    let chunk = manifest.chunks.get(span.order as usize).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("missing chunk {}", span.order),
+        )
+    })?;
+    let message_id = i32::try_from(chunk.telegram_message_id).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("telegram message id out of range for chunk {}", span.order),
+        )
+    })?;
+    let ciphertext = object_format
+        .download_message_bytes_for_stream(message_id)
+        .await
+        .map_err(|error| {
+            warn!(
+                object_id = %manifest.object_id,
+                chunk_order = span.order,
+                telegram_message_id = message_id,
+                error = %error,
+                "object stream chunk failed"
+            );
+            io::Error::other(error.to_string())
+        })?;
+    let plaintext = if manifest.encryption.enabled {
+        let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
+        object_format
+            .decrypt_chunk(source_object_id, source_order, &ciphertext)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?
+    } else {
+        ciphertext
+    };
+    let actual_checksum = sha256_hex(&plaintext);
+    if actual_checksum != span.checksum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "checksum mismatch for chunk {}: expected {}, got {}",
+                span.order, span.checksum, actual_checksum
+            ),
+        ));
+    }
+    let start = span.offset_within_chunk as usize;
+    let end = start + span.length as usize;
+    if plaintext.len() < end {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!(
+                "chunk {} shorter than planned span (len {}, need {}-{})",
+                span.order,
+                plaintext.len(),
+                start,
+                end
+            ),
+        ));
+    }
+    Ok((span.length, Bytes::copy_from_slice(&plaintext[start..end])))
+}
+
 fn verify_staged_chunks(
     staging_dir: &Path,
     manifest: &ObjectManifest,
@@ -3472,6 +3479,43 @@ mod tests {
             service.plan_upload(2500).expect("new plan").chunk_size,
             2048
         );
+    }
+
+    #[tokio::test]
+    async fn bounded_prefetch_stream_preserves_order_and_setting() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = Arc::new(sample_service(&tempdir).await);
+        service.set_chunk_size(1024).expect("small chunks");
+        service
+            .set_download_prefetch_chunks(2)
+            .expect("prefetch setting");
+        assert_eq!(service.download_prefetch_chunks(), 2);
+
+        let payload = (0..4097)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let manifest = service
+            .put_bytes(
+                "bucket",
+                "prefetch.bin",
+                "application/octet-stream",
+                &payload,
+            )
+            .await
+            .expect("put");
+        let plan =
+            ObjectFormatService::plan_read(&manifest, 0..payload.len() as u64).expect("read plan");
+        let pieces =
+            ObjectFormatService::read_spans_to_stream(Arc::clone(&service), &manifest, plan.chunks)
+                .collect::<Vec<_>>()
+                .await;
+        let actual = pieces
+            .into_iter()
+            .map(|piece| piece.expect("stream piece"))
+            .flat_map(|piece| piece.to_vec())
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, payload);
     }
 
     #[test]

@@ -91,6 +91,13 @@ RPC or transport failure while reading the current chunk is retried while the
 response remains open for up to 120 seconds. The partially fetched chunk is
 discarded, so no unverified bytes are sent to the client.
 
+Normal downloads may prefetch a bounded number of additional complete chunks in
+parallel. The policy is stored in metadata schema v13, defaults to one extra
+chunk, and can be set from zero through four in Telegram settings. Prefetching
+does not change object durability or manifest layout: each chunk is still
+verified before delivery, output remains ordered, and outstanding work is
+cancelled when the client stream ends.
+
 Public and admin responses advertise `Accept-Ranges: bytes`. If the recovery
 window is exhausted after earlier bytes were sent, a capable client can resume
 with a single `Range: bytes=<offset>-` request. Missing messages, decryption
