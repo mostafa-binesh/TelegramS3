@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.7.3-rc.8 - 2026-09-26
+
+Done jobs:
+
+- Restored the storage-policy page layout styles that were accidentally omitted
+  when the recovery verifier controls were added. The chunk policy and verifier
+  controls now render in their intended cards, grids, input wrappers, badges,
+  preset buttons, action row, and impact panel.
+- Added browser regression assertions for the storage-policy grid, card, and
+  input-wrapper layout.
+- Revalidated the complete frontend Playwright suite.
+
 ## 0.7.3-rc.7 - 2026-09-26
 
 Done jobs:

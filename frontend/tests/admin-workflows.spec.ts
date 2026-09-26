@@ -596,6 +596,9 @@ test('storage policy tab loads, applies MiB to bytes, and reports a save failure
   await page.getByRole('button', { name: 'Telegram settings' }).click();
   await page.getByRole('tab', { name: /Storage policy/ }).click();
   await expect(page.getByRole('heading', { name: 'Give every upload the right-sized runway.' })).toBeVisible();
+  await expect(page.locator('.policy-grid')).toHaveCSS('display', 'grid');
+  await expect(page.locator('.policy-card').first()).toHaveCSS('border-radius', '22px');
+  await expect(page.locator('.chunk-input-wrap').first()).toHaveCSS('display', 'flex');
   await expect(page.getByLabel('New upload chunk size')).toHaveValue('1');
   await page.getByRole('button', { name: '8 MiB', exact: true }).click();
   await expect(page.getByLabel('New upload chunk size')).toHaveValue('8');
