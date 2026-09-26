@@ -278,6 +278,11 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
         "content-disposition should be an attachment, got {:?}",
         full.headers.get("content-disposition")
     );
+    assert_eq!(
+        header(&full, "accept-ranges"),
+        "bytes",
+        "authenticated downloads must advertise resumable byte ranges"
+    );
 
     // Byte range GET: bytes=4-8 -> start offset 4 through end offset 8 inclusive
     // (5 bytes served). Content-Range advertises "bytes 4-8/<len>".

@@ -1270,6 +1270,9 @@ impl AdminUiState {
             HeaderValue::from_str(&manifest.content_type)
                 .unwrap_or(HeaderValue::from_static("application/octet-stream")),
         );
+        response
+            .headers_mut()
+            .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
         if let Ok(value) = HeaderValue::from_str(&manifest.checksum.whole_object) {
             response.headers_mut().insert(header::ETAG, value);
         }

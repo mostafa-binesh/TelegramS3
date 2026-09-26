@@ -85,17 +85,17 @@ request was interrupted.
 
 ### Interrupted Public Download
 
-Public downloads are streamed from Telegram-backed chunks rather than copied
-to a local whole-object buffer. A transient Telegram RPC or transport failure
-while reading the current chunk is retried with the configured retry and
-flood-wait policy. The partially fetched chunk is discarded, so no unverified
-bytes are sent to the client.
+Public and authenticated admin downloads are streamed from Telegram-backed
+chunks rather than copied to a local whole-object buffer. A transient Telegram
+RPC or transport failure while reading the current chunk is retried while the
+response remains open for up to 120 seconds. The partially fetched chunk is
+discarded, so no unverified bytes are sent to the client.
 
-Public responses advertise `Accept-Ranges: bytes`. If bounded retries are
-exhausted after earlier bytes were sent, a capable client can resume with a
-single `Range: bytes=<offset>-` request. Missing messages, decryption failures,
-and checksum mismatches are not retried as network failures; they remain object
-recovery issues and must be handled through the recovery workflow.
+Public and admin responses advertise `Accept-Ranges: bytes`. If the recovery
+window is exhausted after earlier bytes were sent, a capable client can resume
+with a single `Range: bytes=<offset>-` request. Missing messages, decryption
+failures, and checksum mismatches are not retried as network failures; they
+remain object recovery issues and must be handled through the recovery workflow.
 
 ### Telegram Rate Limit (`FLOOD_WAIT`)
 

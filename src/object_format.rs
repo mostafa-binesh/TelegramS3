@@ -30,6 +30,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration as StdDuration, Instant as StdInstant};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tokio::fs as async_fs;
@@ -53,6 +54,9 @@ const QUARANTINE_ROOT: &str = "quarantine";
 const MULTIPART_ROOT: &str = "multipart";
 const MOCK_TELEGRAM_ROOT: &str = "mock-telegram";
 const CLEANUP_EVIDENCE_ROOT: &str = "cleanup-evidence";
+pub const TELEGRAM_STREAM_RECOVERY_WINDOW_SECS: u64 = 120;
+const TELEGRAM_STREAM_RECOVERY_WINDOW: StdDuration =
+    StdDuration::from_secs(TELEGRAM_STREAM_RECOVERY_WINDOW_SECS);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkPlan {
@@ -2121,7 +2125,10 @@ impl ObjectFormatService {
                         ));
                     }
                 };
-                let ciphertext = match object_format.download_message_bytes(message_id).await {
+                let ciphertext = match object_format
+                    .download_message_bytes_for_stream(message_id)
+                    .await
+                {
                     Ok(value) => value,
                     Err(error) => {
                         warn!(
@@ -2869,6 +2876,29 @@ impl ObjectFormatService {
         .await
     }
 
+    async fn download_message_bytes_for_stream(
+        &self,
+        message_id: i32,
+    ) -> Result<Vec<u8>, ObjectFormatError> {
+        let current_transport = self.transport_manager.current().await;
+        if current_transport
+            .as_ref()
+            .is_ok_and(|transport| transport.is_mock())
+        {
+            return self.download_message_bytes_once(message_id).await;
+        }
+        let retry_policy = current_transport
+            .map(|transport| transport.retry_policy())
+            .unwrap_or_default();
+        retry_telegram_read_for_stream(
+            retry_policy,
+            message_id,
+            TELEGRAM_STREAM_RECOVERY_WINDOW,
+            || self.download_message_bytes_once(message_id),
+        )
+        .await
+    }
+
     async fn download_message_bytes_once(
         &self,
         message_id: i32,
@@ -2924,6 +2954,9 @@ impl ObjectFormatService {
             error,
             ObjectFormatError::Telegram(TelegramTransportError::Rpc(_))
                 | ObjectFormatError::Telegram(TelegramTransportError::Io(_))
+                | ObjectFormatError::Telegram(TelegramTransportError::Proxy(
+                    crate::telegram::ProxyError::BridgeFailed(_),
+                ))
         )
     }
 
@@ -3019,6 +3052,80 @@ where
                 );
                 tokio::time::sleep(delay).await;
                 attempt += 1;
+            }
+        }
+    }
+}
+
+async fn retry_telegram_read_for_stream<F, Fut>(
+    retry_policy: RetryPolicy,
+    message_id: i32,
+    recovery_window: StdDuration,
+    mut read: F,
+) -> Result<Vec<u8>, ObjectFormatError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, ObjectFormatError>>,
+{
+    let deadline = StdInstant::now() + recovery_window;
+    let mut attempt = 1_u32;
+    loop {
+        let remaining = deadline.saturating_duration_since(StdInstant::now());
+        if remaining.is_zero() {
+            return Err(ObjectFormatError::Telegram(TelegramTransportError::Io(
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "Telegram chunk download recovery window expired for message {message_id}"
+                    ),
+                ),
+            )));
+        }
+        let result = match tokio::time::timeout(remaining, read()).await {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(ObjectFormatError::Telegram(TelegramTransportError::Io(
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "Telegram chunk download recovery window expired for message {message_id}"
+                        ),
+                    ),
+                )));
+            }
+        };
+        match result {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) => {
+                if !ObjectFormatService::is_retryable_telegram_read_error(&error) {
+                    return Err(error);
+                }
+                let error_text = error.to_string();
+                let delay = if let Some(seconds) = parse_flood_wait_seconds(&error_text)
+                    && retry_policy.respect_flood_wait
+                {
+                    StdDuration::from_secs(seconds.max(1))
+                } else {
+                    retry_policy.backoff_for_attempt(attempt.saturating_add(1))
+                };
+                let remaining = deadline.saturating_duration_since(StdInstant::now());
+                if remaining.is_zero() {
+                    return Err(error);
+                }
+                let wait = delay.min(remaining);
+                warn!(
+                    telegram_message_id = message_id,
+                    attempt,
+                    retry_delay_ms = wait.as_millis() as u64,
+                    recovery_window_secs = TELEGRAM_STREAM_RECOVERY_WINDOW_SECS,
+                    error = %error_text,
+                    "holding Telegram-backed stream open while retrying chunk download"
+                );
+                tokio::time::sleep(wait).await;
+                if wait >= remaining {
+                    return Err(error);
+                }
+                attempt = attempt.saturating_add(1);
             }
         }
     }
@@ -3252,6 +3359,36 @@ mod tests {
 
         assert_eq!(result, vec![1, 2, 3]);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn stream_read_can_retry_beyond_the_normal_attempt_limit() {
+        let attempts = std::sync::Arc::new(AtomicUsize::new(0));
+        let result = retry_telegram_read_for_stream(
+            RetryPolicy::new(1, std::time::Duration::ZERO, true),
+            19,
+            std::time::Duration::from_secs(1),
+            {
+                let attempts = std::sync::Arc::clone(&attempts);
+                move || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if attempt < 5 {
+                            Err(ObjectFormatError::Telegram(TelegramTransportError::Rpc(
+                                "temporary stream disconnect".to_string(),
+                            )))
+                        } else {
+                            Ok(vec![4, 5, 6])
+                        }
+                    }
+                }
+            },
+        )
+        .await
+        .expect("stream read should recover within its window");
+
+        assert_eq!(result, vec![4, 5, 6]);
+        assert_eq!(attempts.load(Ordering::SeqCst), 6);
     }
 
     #[tokio::test]

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.7.5-rc.2 - 2026-09-27
+
+### Download stream recovery
+
+- Public-share, authenticated admin, and S3 download streams now keep the
+  response open for up to 120 seconds while retrying transient Telegram,
+  proxy-bridge, or transport I/O failures for the current chunk.
+- Stream recovery is deadline-based rather than limited to the normal
+  per-operation attempt count; a stalled Telegram read is also bounded by the
+  same 120-second window.
+- Authenticated admin downloads now advertise `Accept-Ranges: bytes`, matching
+  public-share responses and allowing capable clients to resume with
+  `Range`/`Content-Range` after the recovery window is exhausted.
+- Permanent missing-message, decryption, checksum, and invalid-configuration
+  errors still fail immediately and remain visible to recovery workflows.
+- Added coverage for stream retries beyond the normal attempt limit and for
+  resumable authenticated-download headers.
+
 ## 0.7.5-rc.1 - 2026-09-26
 
 Release candidate for resilient Telegram-backed downloads.

@@ -55,7 +55,8 @@ staging, and recovery artifacts, not committed payloads.
   hides local data immediately but retains the owning generation and transport
   until requested remote cleanup completes, never routing old cleanup through a
   new account. Transient Telegram reads are retried per chunk using the same
-  bounded policy before a download fails.
+  bounded policy before a download fails. A client stream remains open for up
+  to 120 seconds while a transient Telegram/proxy read is recovering.
 - **Bounded memory everywhere** — uploads and downloads stream chunk-by-chunk;
   no whole-object RAM buffering (an explicit project invariant).
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
@@ -259,11 +260,13 @@ aws --endpoint-url "$ENDPOINT" s3 ls s3://demo
 Multipart, range requests, conditional requests, and version-aware listings
 work through the same endpoint.
 
-Public `/_public/<token>` downloads advertise `Accept-Ranges: bytes` and honor
-single byte-range requests, so a client can resume after a disconnected stream
-instead of restarting the whole object. A transient Telegram/network failure
-while fetching one chunk is retried before the server terminates the response;
-missing messages and checksum failures remain hard recovery signals.
+Public `/_public/<token>` and authenticated admin downloads advertise
+`Accept-Ranges: bytes` and honor single byte-range requests, so a client can
+resume after a disconnected stream instead of restarting the whole object. A
+transient Telegram/network failure while fetching one chunk keeps the S3,
+admin, or public response open while the server retries for up to 120 seconds;
+missing messages, decryption failures, and checksum failures remain hard
+recovery signals.
 
 Per-object expiry is available as a Telegram S3 extension. Send either
 `x-amz-meta-telegram-s3-expires-at: <RFC3339 timestamp>` or

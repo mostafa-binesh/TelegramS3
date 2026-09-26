@@ -183,8 +183,10 @@ I/O failure discards the partial fetch and retries the same message under the
 configured bounded retry/flood-wait policy. The server never emits a partial or
 unverified chunk before retrying.
 
-Public share responses advertise `Accept-Ranges: bytes` and support a single
-`Range` request with `Content-Range`. If all retries for a chunk are exhausted,
+Public share and authenticated admin responses advertise `Accept-Ranges: bytes`
+and support a single `Range` request with `Content-Range`. During a streamed
+read, transient Telegram/proxy failures keep the response open while the same
+chunk is retried for up to 120 seconds. If that recovery window is exhausted,
 the response ends with the already-sent bytes intact; a capable client can
 request the remaining range and resume. Missing Telegram messages, decryption
 failures, and checksum mismatches are not treated as transient network errors

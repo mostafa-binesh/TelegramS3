@@ -15,26 +15,31 @@ signal, even though the handler already supported single byte ranges.
 
 ## Decision
 
-- Apply the configured bounded Telegram retry and flood-wait policy to
-  transient RPC and transport I/O failures while reading the current chunk.
+- Apply the configured retry backoff and flood-wait policy to transient RPC,
+  proxy-bridge, and transport I/O failures while reading the current chunk.
+  For an active S3, authenticated admin, or public-share stream, continue
+  retrying within a 120-second recovery window instead of ending the response
+  after the normal per-operation attempt limit.
 - Discard a partial remote fetch before retrying; emit no bytes from that chunk
   until the complete payload has passed the existing decrypt/checksum path.
 - Do not retry missing messages, decryption failures, checksum mismatches, or
   other permanent object-integrity errors as network failures.
-- Advertise `Accept-Ranges: bytes` on public-share responses and preserve the
-  existing `Range`/`Content-Range` behavior so clients can resume after retries
-  are exhausted.
+- Advertise `Accept-Ranges: bytes` on public-share and authenticated admin
+  responses and preserve the existing `Range`/`Content-Range` behavior so
+  clients can resume after the recovery window is exhausted.
 - Log exhausted object-stream chunk failures with object, chunk, and Telegram
   message identifiers without changing object visibility or recovery state.
 
 ## Consequences
 
 - Short Telegram/proxy interruptions no longer immediately break a client
-  download.
+  download, and the server keeps the response open for up to 120 seconds while
+  the current chunk recovers.
 - An exhausted stream can be resumed by a capable client without restarting
   the entire object.
 - Retrying a chunk may repeat its Telegram download traffic, and flood-wait
-  delays can extend the response duration. The retry count remains bounded by
-  the existing transport policy.
+  delays can extend the response duration. The stream recovery window is
+  bounded at 120 seconds; missing messages, integrity failures, and invalid
+  configuration still fail immediately.
 - No metadata migration is required. Existing manifests and chunk references
   remain unchanged, and integrity failures still fail closed for recovery.
