@@ -320,6 +320,11 @@ response cannot leave the UI displaying an indefinite loading state. This affect
 presentation only; manifest visibility and committed-object rules remain
 unchanged.
 
+The browser also treats a stale cookie-bound CSRF token as a session-sync event:
+it reads the current session and retries the rejected administrative request at
+most once. This affects only control-plane request handling and does not alter
+object manifests, chunk checksums, or Telegram storage layout.
+
 The authenticated overview also reports process-scoped payload telemetry: bytes
 received from and sent to clients, plus bytes received from and sent to
 Telegram. These counters are atomic in the shared object-format service, are

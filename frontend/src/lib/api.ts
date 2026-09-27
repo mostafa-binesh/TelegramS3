@@ -23,6 +23,51 @@ class ApiError extends Error {
   }
 }
 
+type SessionUpdateHandler = (session: SessionState) => void;
+
+let sessionUpdateHandler: SessionUpdateHandler | null = null;
+let csrfRecoveryPromise: Promise<SessionState | null> | null = null;
+
+/** Keep the SPA's in-memory session aligned with a cookie rotated elsewhere. */
+export function setSessionUpdateHandler(handler: SessionUpdateHandler | null) {
+  sessionUpdateHandler = handler;
+  return () => {
+    if (sessionUpdateHandler === handler) sessionUpdateHandler = null;
+  };
+}
+
+function isInvalidCsrfError(cause: unknown): cause is ApiError {
+  return cause instanceof ApiError
+    && cause.status === 403
+    && cause.message.trim().toLowerCase() === 'invalid csrf token';
+}
+
+async function synchronizeSession(): Promise<SessionState | null> {
+  if (!csrfRecoveryPromise) {
+    csrfRecoveryPromise = (async () => {
+      try {
+        // This endpoint is intentionally guest-safe and does not need the
+        // stale CSRF header that triggered the recovery.
+        const response = await fetch(`${API_PREFIX}/session`, {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+          headers: { Accept: 'application/json' }
+        });
+        if (!response.ok) return null;
+        const session = (await response.json()) as SessionState;
+        sessionUpdateHandler?.(session);
+        return session;
+      } catch {
+        return null;
+      }
+    })().finally(() => {
+      csrfRecoveryPromise = null;
+    });
+  }
+  return csrfRecoveryPromise;
+}
+
 function csrfHeaders(token?: string | null): CsrfHeaders {
   return token ? { 'X-CSRF-Token': token } : {};
 }
@@ -32,36 +77,50 @@ async function requestJson<T>(
   csrf?: string | null,
   options: { method?: string; body?: unknown } = {}
 ): Promise<T> {
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    ...csrfHeaders(csrf)
-  };
-  if (options.body !== undefined) {
-    headers['Content-Type'] = 'application/json';
-  }
-  const response = await fetch(`${API_PREFIX}${path}`, {
-    method: options.method ?? 'GET',
-    credentials: 'include',
-    cache: 'no-store',
-    headers,
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined
-  });
-
-  if (!response.ok) {
-    let message = `request failed with ${response.status}`;
-    try {
-      const payload = (await response.json()) as { error?: string };
-      if (payload?.error) message = payload.error;
-    } catch {
-      // keep HTTP status message
+  const send = async (token?: string | null) => {
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      ...csrfHeaders(token)
+    };
+    if (options.body !== undefined) {
+      headers['Content-Type'] = 'application/json';
     }
-    throw new ApiError(message, response.status);
-  }
+    const response = await fetch(`${API_PREFIX}${path}`, {
+      method: options.method ?? 'GET',
+      credentials: 'include',
+      cache: 'no-store',
+      headers,
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined
+    });
 
-  if (response.status === 204) {
-    return undefined as T;
+    if (!response.ok) {
+      let message = `request failed with ${response.status}`;
+      try {
+        const payload = (await response.json()) as { error?: string };
+        if (payload?.error) message = payload.error;
+      } catch {
+        // keep HTTP status message
+      }
+      throw new ApiError(message, response.status);
+    }
+
+    if (response.status === 204) {
+      return undefined as T;
+    }
+    return (await response.json()) as T;
+  };
+
+  try {
+    return await send(csrf);
+  } catch (cause) {
+    if (isInvalidCsrfError(cause)) {
+      const session = await synchronizeSession();
+      if (session?.authenticated && session.csrf_token) {
+        return await send(session.csrf_token);
+      }
+    }
+    throw cause;
   }
-  return (await response.json()) as T;
 }
 
 export function getSession() {
@@ -236,26 +295,45 @@ export async function putObjectContent(
   file: Blob,
   csrf?: string | null
 ) {
-  const response = await fetch(contentUrl(bucket, key), {
-    method: 'POST',
-    credentials: 'include',
-    headers: {
-      'Content-Type': file.type || 'application/octet-stream',
-      ...csrfHeaders(csrf)
-    },
-    body: file
-  });
-  if (!response.ok) {
-    let message = `request failed with ${response.status}`;
-    try {
-      const payload = (await response.json()) as { error?: string };
-      if (payload?.error) message = payload.error;
-    } catch {
-      // keep HTTP status message
+  return withCsrfRecovery(csrf, async (token) => {
+    const response = await fetch(contentUrl(bucket, key), {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+        ...csrfHeaders(token)
+      },
+      body: file
+    });
+    if (!response.ok) {
+      let message = `request failed with ${response.status}`;
+      try {
+        const payload = (await response.json()) as { error?: string };
+        if (payload?.error) message = payload.error;
+      } catch {
+        // keep HTTP status message
+      }
+      throw new ApiError(message, response.status);
     }
-    throw new ApiError(message, response.status);
+    return (await response.json()) as { size: number; etag: string; version_id: string };
+  });
+}
+
+async function withCsrfRecovery<T>(
+  csrf: string | null | undefined,
+  action: (token: string | null | undefined) => Promise<T>
+) {
+  try {
+    return await action(csrf);
+  } catch (cause) {
+    if (isInvalidCsrfError(cause)) {
+      const session = await synchronizeSession();
+      if (session?.authenticated && session.csrf_token) {
+        return await action(session.csrf_token);
+      }
+    }
+    throw cause;
   }
-  return (await response.json()) as { size: number; etag: string; version_id: string };
 }
 
 /** Absolute path for a content download/upload targeted at the given object key. */
@@ -276,12 +354,12 @@ export async function uploadObject(
   onProgress?: (sent: number, total: number) => void
 ): Promise<{job_id:string}> {
   const total = file.size;
-  const send = () => new Promise<{job_id:string}>((resolve, reject) => {
+  const send = (token?: string | null) => new Promise<{job_id:string}>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_PREFIX}/uploads?${new URLSearchParams({bucket,key})}`);
     xhr.responseType = 'json';
     xhr.withCredentials = true;
-    if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
+    if (token) xhr.setRequestHeader('X-CSRF-Token', token);
     if (onProgress) {
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable) onProgress(event.loaded, total);
@@ -303,7 +381,7 @@ export async function uploadObject(
         } catch {
           // fall back to HTTP status message
         }
-        reject(new Error(message));
+        reject(new ApiError(message, xhr.status));
       }
     };
     xhr.onerror = () => reject(new Error('upload request failed'));
@@ -312,10 +390,10 @@ export async function uploadObject(
   });
   let lastError: unknown;
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    try { return await send(); }
+    try { return await withCsrfRecovery(csrf, (token) => send(token)); }
     catch (cause) {
       lastError = cause;
-      if (attempt === 3) break;
+      if (attempt === 3 || isInvalidCsrfError(cause)) break;
       await new Promise((resolve) => setTimeout(resolve, 700 * 2 ** attempt));
     }
   }
@@ -379,7 +457,7 @@ export function abortResumableUpload(id: string, csrf?: string | null) {
   });
 }
 
-export function sendResumableChunk(
+function sendResumableChunkOnce(
   id: string,
   offset: number,
   bytes: Blob,
@@ -416,12 +494,26 @@ export function sendResumableChunk(
       let message = `upload chunk failed with ${xhr.status}`;
       if (xhr.response?.error) message = xhr.response.error;
       settled = true;
-      reject(new Error(message));
+      reject(new ApiError(message, xhr.status));
     };
     xhr.onerror = () => { cleanup(); if (!settled) reject(new Error('upload chunk request failed')); };
     xhr.onabort = () => { cleanup(); if (!settled) reject(new DOMException('upload aborted', 'AbortError')); };
     xhr.send(bytes);
   });
+}
+
+export function sendResumableChunk(
+  id: string,
+  offset: number,
+  bytes: Blob,
+  final: boolean,
+  csrf?: string | null,
+  signal?: AbortSignal,
+  onProgress?: (sent: number, total: number) => void
+) {
+  return withCsrfRecovery(csrf, (token) => sendResumableChunkOnce(
+    id, offset, bytes, final, token, signal, onProgress
+  ));
 }
 
 export async function uploadResumable(

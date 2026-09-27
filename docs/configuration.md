@@ -110,6 +110,12 @@ argon2id. There is no per-user `.env` entry.
   There is **no email/password-reset flow**; recovery is CLI-admin only.
 - Deleting the last remaining superadmin is refused.
 
+The authenticated browser keeps the CSRF header synchronized with the
+HTTP-only session cookie. If another tab rotates the session and an action
+receives `invalid csrf token`, the SPA reads the current session and retries
+that action once without requiring a page reload. This does not change the
+server-side CSRF requirement or session expiry behavior.
+
 ## Dynamic Storage Policy
 
 `TELEGRAM_CHUNK_SIZE` is used as the one-time import value when an existing

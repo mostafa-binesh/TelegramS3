@@ -203,6 +203,10 @@ Rejected alternatives this phase (see `docs/adr/0006-...md`): keeping MinIO-time
 
 Completed in this increment:
 
+- admin actions recover once from a stale CSRF token by synchronizing the
+  cookie-bound session before retrying, including raw and resumable uploads;
+  server-side CSRF validation remains unchanged
+
 - the admin console now uses full-width responsive layout, loading skeletons,
   animated dismissible notifications, recovery sub-tabs, and analysis cards for
   storage composition, transfer pipeline, system checks, storage safeguards, and

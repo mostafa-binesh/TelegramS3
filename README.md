@@ -370,6 +370,9 @@ plane. Each object row also includes a shared-link count and a polished link
 manager for description, copy, expiry, and revoke actions. Guests see only the
 sign-in screen; every management and content API is gated behind a user-bound
 session with CSRF protection.
+If a session cookie is rotated in another tab, the SPA automatically
+resynchronizes its CSRF token and retries the rejected action once; genuine
+authorization failures still remain visible to the operator.
 
 The bucket browser also includes active S3 transfer jobs before their final
 manifest is committed. A dedicated progress card shows completed/total parts,

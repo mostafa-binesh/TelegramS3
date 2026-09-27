@@ -248,6 +248,10 @@ object actions until the final manifest is published.
    its hashed file under `/_admin/assets/`. Rebuild/redeploy the image with the
    complete UI `assets/` directory, then use the view's Retry action; this is a
    UI-asset issue and does not alter the persisted Telegram settings.
+8. If an administrative action reports `invalid csrf token`, the current SPA
+   automatically re-reads the session cookie and retries that action once. If
+   the retry still fails, treat it as a real session expiry/revocation and sign
+   in again; do not disable CSRF protection or delete metadata to repair it.
 
 The Telegram account wizard owns an operator-scoped flow id. Leaving the wizard
 cancels that flow, and reopening it requests a fresh code. Settings are persisted

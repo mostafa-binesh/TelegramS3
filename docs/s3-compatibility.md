@@ -54,6 +54,10 @@ features, so they are documented separately.
   the sign-in screen; every management API requires a session bound to a user.
 - Login is rate-limited with per-account lockout; passwords/session state are
   not stored in browser storage.
+- The admin SPA resynchronizes its cookie-bound CSRF token after the specific
+  `invalid csrf token` response and retries that action once. This is an
+  operator-console convenience only; the server still requires the signed
+  session claim and matching CSRF header for every mutating endpoint.
 - The dashboard reports storage overview, endpoint details, capacity, live
   transfer-pipeline analytics, five-second process-scoped client/Telegram
   traffic telemetry, system checks, storage safeguards, Telegram

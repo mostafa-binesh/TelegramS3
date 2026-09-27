@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Admin session resilience
+
+- The admin SPA now detects the specific `invalid csrf token` response caused
+  by a stale in-memory session token, re-reads the current guest-safe session,
+  updates the live UI session, and retries the original request once. This
+  covers JSON actions, raw object writes, browser uploads, and resumable upload
+  chunks, so operators no longer need to refresh the page after a session
+  rotation in another tab or browser context.
+- CSRF validation remains enforced by the server. The client does not retry
+  unrelated authorization failures, does not weaken the cookie/header match,
+  and does not loop after the single recovery attempt.
+- Added browser coverage proving that a rejected bucket action is retried with
+  the refreshed token and succeeds without a page reload.
+
 ## 0.7.5 - 2026-09-27
 
 Stable release promoted from `v0.7.5-rc.3`.

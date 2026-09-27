@@ -32,6 +32,7 @@
     listShareLinks,
     updateShareLinkExpiry,
     revokeShareLink,
+    setSessionUpdateHandler,
   } from './lib/api';
   import {normalizeError} from './lib/format';
   import type {
@@ -191,6 +192,10 @@
     (overview?.recovery?.issue_count ?? 0) - (overview?.recovery?.unacknowledged_count ?? 0);
 
   onMount(() => {
+    const clearSessionUpdateHandler = setSessionUpdateHandler((next) => {
+      session = next;
+      if (!next.authenticated) overview = null;
+    });
     const canonical = routePath(currentRoute());
     if (window.location.pathname !== canonical) navigate(currentRoute(), { replace: true });
     void bootstrapApp();
@@ -203,7 +208,7 @@
       if(!disposed)timer=setTimeout(poll, view === 'buckets' && selectedBucket ? 2000 : 5000);
     };
     timer=setTimeout(poll,5000);
-    return ()=>{disposed=true;clearTimeout(timer);};
+    return ()=>{disposed=true;clearTimeout(timer);clearSessionUpdateHandler();};
   });
 
   function crumbs() {

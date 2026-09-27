@@ -70,9 +70,12 @@ async function mockAdminApi(
     recoveryIssues?: Array<Record<string, unknown>>;
     delayFirstObjectListMs?: number;
     delayNestedObjectListMs?: number;
+    staleCsrfOnce?: boolean;
   } = {}
 ) {
   let loggedIn = false;
+  let csrfToken = authenticated.csrf_token;
+  let staleCsrfRejected = false;
   let recoveryJobVisible = true;
   let connectionRemoved = false;
   let chunkSize = 1_048_576;
@@ -86,11 +89,12 @@ async function mockAdminApi(
     const request = route.request();
     const path = new URL(request.url()).pathname.replace('/_admin/api', '');
     if (path === '/session' && request.method() === 'GET') {
-      return route.fulfill({ json: loggedIn ? authenticated : { authenticated: false } });
+      return route.fulfill({ json: loggedIn ? { ...authenticated, csrf_token: csrfToken } : { authenticated: false } });
     }
     if (path === '/session/login' && request.method() === 'POST') {
       loggedIn = true;
-      return route.fulfill({ json: authenticated });
+      csrfToken = authenticated.csrf_token;
+      return route.fulfill({ json: { ...authenticated, csrf_token: csrfToken } });
     }
     if (path === '/session/logout' && request.method() === 'POST') {
       loggedIn = false;
@@ -175,6 +179,11 @@ async function mockAdminApi(
     }
     if (path === '/buckets' && request.method() === 'GET') return route.fulfill({ json: { buckets } });
     if (path === '/buckets' && request.method() === 'POST') {
+      if (options.staleCsrfOnce && !staleCsrfRejected) {
+        staleCsrfRejected = true;
+        csrfToken = 'csrf-refreshed-token';
+        return route.fulfill({ status: 403, json: { error: 'invalid csrf token' } });
+      }
       const body = request.postDataJSON() as { name: string };
       buckets.push({ name: body.name, created_at: '2026-01-01T00:00:00Z' });
       return route.fulfill({ json: buckets.at(-1) });
@@ -245,6 +254,30 @@ async function mockAdminApi(
     return route.fulfill({ json: {} });
   });
 }
+
+test('recovers from a stale CSRF token without requiring a page refresh', async ({ page }) => {
+  const bucketCsrfHeaders: string[] = [];
+  await mockAdminApi(page, { staleCsrfOnce: true });
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === '/_admin/api/buckets' && request.method() === 'POST') {
+      bucketCsrfHeaders.push(request.headers()['x-csrf-token'] ?? '');
+    }
+  });
+
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Buckets' }).click();
+  await expect(page.getByRole('heading', { name: 'Your buckets' })).toBeVisible();
+  await page.getByRole('button', { name: /Create bucket/ }).first().click();
+  await page.getByLabel('Bucket name').fill('csrf-recovered');
+  await page.getByRole('button', { name: 'Create bucket' }).last().click();
+
+  await expect(page.getByRole('button', { name: /csrf-recovered created/ })).toBeVisible();
+  expect(bucketCsrfHeaders).toEqual(['csrf-test-token', 'csrf-refreshed-token']);
+});
 
 test('guest is gated, authenticated navigation works, and logout revokes the session', async ({ page }) => {
   await mockAdminApi(page);
