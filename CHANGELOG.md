@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.7.6-rc.7 - 2026-09-27
+
+### Replica account badge accuracy
+
+- Corrected object and bucket account counts to include the active primary
+  connection alongside physical replicas and access-only accounts.
+- Split the Buckets badges into explicit `copies` and `access` counts so the
+  account distribution is immediately clear.
+
 ## 0.7.6-rc.6 - 2026-09-27
 
 ### Account pool, replication, and maintenance queues

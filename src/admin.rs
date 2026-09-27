@@ -1059,6 +1059,9 @@ impl AdminUiState {
     fn object_replica_summary(&self, object_id: Uuid) -> (u64, u64) {
         let mut replica = std::collections::HashSet::new();
         let mut access = std::collections::HashSet::new();
+        if let Ok(Some(active)) = self.store().active_connection_id() {
+            replica.insert(active);
+        }
         if let Ok(items) = self.store().list_account_access(None) {
             for item in items
                 .into_iter()
@@ -1082,6 +1085,24 @@ impl AdminUiState {
                 std::collections::HashSet<String>,
             ),
         > = std::collections::HashMap::new();
+        if let Ok(Some(active)) = self.store().active_connection_id()
+            && let Ok(buckets) = self.object_format.list_buckets()
+        {
+            for bucket in buckets {
+                if self
+                    .object_format
+                    .list_bucket_manifests(&bucket.name, None)
+                    .map(|manifests| !manifests.is_empty())
+                    .unwrap_or(false)
+                {
+                    by_bucket
+                        .entry(bucket.name)
+                        .or_default()
+                        .0
+                        .insert(active.clone());
+                }
+            }
+        }
         if let Ok(items) = self.store().list_account_access(None) {
             for item in items {
                 let entry = by_bucket.entry(item.bucket).or_default();
