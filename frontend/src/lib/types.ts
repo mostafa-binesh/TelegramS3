@@ -75,6 +75,7 @@ export interface StorageCard {
   recovery_markers: number;
   chunk_size: number;
   recovery_required_objects: number;
+  telegram_files_bytes?: number;
   metadata_path?: string;
   data_dir?: string;
 }

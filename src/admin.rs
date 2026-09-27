@@ -1957,6 +1957,7 @@ impl AdminUiState {
             recovery_markers: metadata_status.recovery_markers,
             chunk_size: object_status.chunk_size,
             recovery_required_objects: object_status.recovery_required_objects,
+            telegram_files_bytes: object_status.telegram_files_bytes,
         };
         let checks = vec![
             check("Telegram storage", session_usable, &health.detail),
@@ -2533,6 +2534,7 @@ fn empty_object() -> crate::object_format::ObjectFormatStatus {
         staged_objects: 0,
         recovery_required_objects: 0,
         orphaned_chunks: 0,
+        telegram_files_bytes: 0,
     }
 }
 
@@ -2564,6 +2566,7 @@ struct StorageWire {
     recovery_markers: u64,
     chunk_size: u64,
     recovery_required_objects: u64,
+    telegram_files_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

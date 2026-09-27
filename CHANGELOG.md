@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.7.6-rc.2 - 2026-09-27
+
+### Telegram storage size in Overview
+
+- The Overview now shows the total logical payload represented by unique
+  committed Telegram chunk files, formatted alongside the bucket/object
+  snapshot metrics.
+- Reused Telegram chunks are counted once, so multipart composition and
+  manifest references do not inflate the displayed total. Telegram protocol,
+  message, and encryption-envelope overhead are intentionally excluded.
+- Added backend API, object-format, and browser coverage for the metric; it is
+  derived from existing manifests and requires no metadata migration.
+
 ## 0.7.6-rc.1 - 2026-09-27
 
 ### Public media streaming

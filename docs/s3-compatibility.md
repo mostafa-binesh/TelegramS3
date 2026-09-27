@@ -63,6 +63,8 @@ features, so they are documented separately.
   traffic telemetry, system checks, storage safeguards, Telegram
   readiness, sampled recovery-verifier enabled/disabled state, timing, and
   broken-file problems,
+  plus the logical size of unique committed Telegram chunk payloads (reused
+  multipart references are counted once and protocol overhead is excluded),
   operator accounts (superadmin-only add/remove), in-app bucket
   creation, and a bucket/object browser (prefix folders + directory markers +
   delete + per-file **upload/download**). Binary content is streamed through

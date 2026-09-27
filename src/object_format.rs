@@ -116,6 +116,27 @@ pub struct ObjectFormatStatus {
     pub staged_objects: u64,
     pub recovery_required_objects: u64,
     pub orphaned_chunks: u64,
+    /// Logical bytes represented by unique committed Telegram chunk files.
+    /// Telegram protocol/envelope overhead is not part of the manifest data.
+    pub telegram_files_bytes: u64,
+}
+
+fn telegram_files_bytes(manifests: &[ObjectManifest]) -> u64 {
+    let mut telegram_files = HashMap::new();
+    for manifest in manifests
+        .iter()
+        .filter(|manifest| manifest.commit_state == CommitState::Committed)
+    {
+        for chunk in &manifest.chunks {
+            let key = (
+                chunk.telegram_peer_id.clone(),
+                chunk.telegram_message_id,
+                chunk.telegram_document_id.clone(),
+            );
+            telegram_files.entry(key).or_insert(chunk.size);
+        }
+    }
+    telegram_files.values().copied().sum()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1341,6 +1362,7 @@ impl ObjectFormatService {
             .iter()
             .filter(|manifest| manifest.commit_state == CommitState::Orphaned)
             .count() as u64;
+        let telegram_files_bytes = telegram_files_bytes(&manifests);
 
         Ok(ObjectFormatStatus {
             data_dir: self.data_dir.clone(),
@@ -1349,6 +1371,7 @@ impl ObjectFormatService {
             staged_objects,
             recovery_required_objects,
             orphaned_chunks,
+            telegram_files_bytes,
         })
     }
 
@@ -3907,6 +3930,57 @@ mod tests {
         let status = service.bootstrap().await.expect("bootstrap status");
         assert_eq!(status.committed_objects, 1);
         assert_eq!(status.recovery_required_objects, 0);
+        assert_eq!(status.telegram_files_bytes, 3);
+    }
+
+    #[test]
+    fn telegram_files_bytes_counts_unique_committed_chunk_locations() {
+        let reused = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "bucket".to_string(),
+            key: "one.txt".to_string(),
+            content_length: 3,
+            content_type: "text/plain".to_string(),
+            checksum_algorithm: CHECKSUM_ALGORITHM.to_string(),
+            whole_object: "one".to_string(),
+            peer_id: "-1001234567890".to_string(),
+            message_id: 1,
+        });
+        let duplicate_reference = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "bucket".to_string(),
+            key: "two.txt".to_string(),
+            content_length: 3,
+            content_type: "text/plain".to_string(),
+            checksum_algorithm: CHECKSUM_ALGORITHM.to_string(),
+            whole_object: "two".to_string(),
+            peer_id: "-1001234567890".to_string(),
+            message_id: 1,
+        });
+        let mut not_committed = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "bucket".to_string(),
+            key: "staged.txt".to_string(),
+            content_length: 9,
+            content_type: "text/plain".to_string(),
+            checksum_algorithm: CHECKSUM_ALGORITHM.to_string(),
+            whole_object: "staged".to_string(),
+            peer_id: "-1001234567890".to_string(),
+            message_id: 2,
+        });
+        not_committed.commit_state = CommitState::Staging;
+        let distinct = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "bucket".to_string(),
+            key: "three.txt".to_string(),
+            content_length: 4,
+            content_type: "text/plain".to_string(),
+            checksum_algorithm: CHECKSUM_ALGORITHM.to_string(),
+            whole_object: "three".to_string(),
+            peer_id: "-1001234567890".to_string(),
+            message_id: 3,
+        });
+
+        assert_eq!(
+            telegram_files_bytes(&[reused, duplicate_reference, not_committed, distinct]),
+            7
+        );
     }
 
     #[tokio::test]

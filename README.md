@@ -363,7 +363,8 @@ See [SECURITY.md](SECURITY.md), [THREAT_MODEL.md](THREAT_MODEL.md), and
 
 `/_admin` is an authenticated Svelte single-page app served by the Rust server
 on the public listener. It provides a storage overview, endpoint and capacity
-details, live transfer-pipeline analytics, five-second network-traffic telemetry
+details, committed Telegram-file payload size, live transfer-pipeline analytics,
+five-second network-traffic telemetry
 split between clients and Telegram payloads, system-readiness checks, Telegram
 readiness, operator account management (superadmin-only),
 in-app bucket creation and deletion (deletion remains empty-bucket-only), a routed

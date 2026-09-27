@@ -248,6 +248,9 @@ object actions until the final manifest is published.
    The overview's client/Telegram traffic counters are process-scoped and
    start a new baseline after the restored server process starts; they are not
    durable recovery evidence.
+   The Overview's Telegram-files size is manifest-derived and remains
+   meaningful after restart, but it represents logical committed chunk bytes,
+   not Telegram protocol overhead or a remote account quota.
 7. If a console view remains on a loading skeleton, inspect the response for
    its hashed file under `/_admin/assets/`. Rebuild/redeploy the image with the
    complete UI `assets/` directory, then use the view's Retry action; this is a

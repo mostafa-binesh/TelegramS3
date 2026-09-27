@@ -336,6 +336,12 @@ refreshed by the UI every five seconds, exclude protocol overhead, and reset
 when the server process restarts. They do not participate in manifest recovery
 or object visibility.
 
+The same overview snapshot reports the logical size of unique committed
+Telegram chunk payloads. It uses the remote chunk references in committed
+manifests, counts a reused payload once, and intentionally excludes Telegram
+protocol/message overhead; this is an operational estimate, not an account
+quota or billing measurement.
+
 ## Recovery Rules
 
 - A manifest without a local commit row is not visible until reconciliation.

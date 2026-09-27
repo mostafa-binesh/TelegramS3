@@ -520,6 +520,10 @@ fn print_object_format_status(label: &str, status: &ObjectFormatStatus) -> Resul
         status.recovery_required_objects
     );
     println!("{label}: orphaned chunks {}", status.orphaned_chunks);
+    println!(
+        "{label}: Telegram file bytes {}",
+        status.telegram_files_bytes
+    );
     Ok(())
 }
 

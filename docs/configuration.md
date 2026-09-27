@@ -153,6 +153,12 @@ The overview shows the enabled/disabled state, next scheduled scan, sample
 size, distinct confirmed broken-file count, and the current verifier problem
 list.
 
+The authenticated Overview also shows `Telegram files`, the logical byte total
+of unique committed Telegram chunk payloads. Reused chunk references are
+counted once; Telegram protocol, message, and encryption-envelope overhead are
+not included, and the value is derived from existing manifests without a
+database migration.
+
 ## Required Runtime Settings
 
 - chunk size

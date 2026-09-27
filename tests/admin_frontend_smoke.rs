@@ -247,6 +247,11 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
     assert_eq!(overview.status, 200);
     assert!(!overview.body.contains("\"endpoint\""));
     assert!(overview.body.contains("\"checks\""));
+    let overview_json: Value = serde_json::from_str(&overview.body).expect("overview json");
+    assert_eq!(
+        overview_json["storage"]["telegram_files_bytes"].as_u64(),
+        Some(0)
+    );
 
     // The startup scan runs concurrently with the listener, so give it a moment to land.
     let mut recovery = Value::Null;

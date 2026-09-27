@@ -26,7 +26,8 @@ const overview = {
     staged_objects: 0,
     recovery_markers: 0,
     chunk_size: 1_048_576,
-    recovery_required_objects: 0
+    recovery_required_objects: 0,
+    telegram_files_bytes: 256 * 1024 * 1024
   },
   recovery: {
     issue_count: 0,
@@ -292,6 +293,8 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
   await expect(page.getByRole('heading', { name: 'Transfer pipeline' })).toBeVisible();
   await expect(page.getByLabel('Transfer pipeline chart')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Traffic since process start' })).toBeVisible();
+  await expect(page.getByText('Telegram files')).toBeVisible();
+  await expect(page.getByText('256 MiB')).toBeVisible();
   await expect(page.getByText('Clients → server')).toBeVisible();
   await expect(page.getByText('Telegram → server')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'System checks' })).toBeVisible();

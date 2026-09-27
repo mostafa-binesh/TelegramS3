@@ -237,6 +237,8 @@ Completed in this increment:
 - public audio/video links now advertise inline media disposition while
   non-media links remain attachments, preserving range-based player probing
   without changing stored objects
+- the Overview reports the logical size of unique committed Telegram chunk
+  payloads without counting reused multipart references twice
 - browser reception now supports bounded resumable chunks, authoritative offset
   re-sync, pause/resume while the reception lease remains active, and explicit
   cancellation cleanup; server restart resumption remains intentionally

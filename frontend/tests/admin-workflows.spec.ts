@@ -26,7 +26,8 @@ const overview = {
     staged_objects: 0,
     recovery_markers: 0,
     chunk_size: 1_048_576,
-    recovery_required_objects: 0
+    recovery_required_objects: 0,
+    telegram_files_bytes: 128 * 1024 * 1024
   },
   recovery: { issue_count: 0, unacknowledged_count: 0, scan_ok: true, issues: [] },
   verifier: {

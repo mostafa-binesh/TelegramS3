@@ -80,11 +80,12 @@
 
   <section class="cards">
     {#if loading || !overview}
-      {#each [0, 1, 2, 3] as slot (slot)}<article class="card metric"><div class="skeleton" style="height:62px"></div></article>{/each}
+      {#each [0, 1, 2, 3, 4] as slot (slot)}<article class="card metric"><div class="skeleton" style="height:62px"></div></article>{/each}
     {:else}
       <article class="card metric"><p class="card-label">Buckets</p><strong>{formatCount(overview.storage?.buckets ?? 0)}</strong></article>
       <article class="card metric"><p class="card-label">Committed</p><strong>{formatCount(overview.storage?.committed_objects ?? 0)}</strong></article>
       <article class="card metric"><p class="card-label">Active</p><strong>{formatCount(overview.storage?.active_objects ?? 0)}</strong></article>
+      <article class="card metric"><p class="card-label">Telegram files</p><strong>{formatBytes(overview.storage?.telegram_files_bytes ?? 0)}</strong><small>committed remote payload</small></article>
       <article class="card metric corrupted" class:attention={corruptedCount > 0}>
         <p class="card-label">Corrupted files</p><strong>{formatCount(corruptedCount)}</strong>
         {#if overview.recovery?.scan_error}<small class="error-hint">Scan unavailable</small>
