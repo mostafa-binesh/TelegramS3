@@ -47,6 +47,22 @@ features, so they are documented separately.
 
 ## Operator UI
 
+### Account pool and maintenance extensions
+
+The operator API adds `/accounts`, `/replication`, `/replicas`, and `/rechunk`.
+These are management extensions rather than S3 operations. Replication is
+bucket-scoped and durable: `one_time` jobs finish once, while `automatic` jobs
+are rescheduled. `replica` mode uploads encrypted chunk bytes to the target
+connection; `access` mode records a shared-chat location without uploading a
+second copy. A chunk may have several account locations and the shared reader
+rotates across them; an access-only target must be able to resolve the source
+peer.
+
+Bulk re-chunking gives each selected object a durable job and temporary lock.
+Reads fail closed with a retry-later message until replacement chunks and the
+manifest are committed. The previous manifest remains recoverable until the
+normal evidence-first cleanup worker handles it.
+
 - `/_admin` and `/_admin/api/*` are implemented as an authenticated operator
   surface served by the same Rust process.
 - Login is credential-based: accounts are argon2id-hashed records in

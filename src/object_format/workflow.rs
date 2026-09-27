@@ -238,6 +238,7 @@ impl ObjectFormatService {
             telegram_document_id: Some(format!("local:{object_id}:{order}")),
             source_object_id: None,
             source_chunk_order: None,
+            replicas: Vec::new(),
         });
         *offset += bytes.len() as u64;
         Ok(())
@@ -348,6 +349,63 @@ impl ObjectFormatService {
             }
         });
         let service = self.clone();
+        let mut replication_shutdown = shutdown_rx.clone();
+        let replication_handle = tokio::spawn(async move {
+            loop {
+                if *replication_shutdown.borrow() {
+                    break;
+                }
+                match service.metadata.claim_replication_job() {
+                    Ok(Some(job)) => {
+                        if let Err(error) = service.process_replication_job(&job).await {
+                            let _ = service.metadata.finish_replication(
+                                &job.id,
+                                "failed",
+                                Some(&error.to_string()),
+                                job.mode == "automatic",
+                            );
+                        }
+                    }
+                    Ok(None) => tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {},
+                        _ = replication_shutdown.changed() => {},
+                    },
+                    Err(_) => tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {},
+                        _ = replication_shutdown.changed() => {},
+                    },
+                }
+            }
+        });
+        let service = self.clone();
+        let mut rechunk_shutdown = shutdown_rx.clone();
+        let rechunk_handle = tokio::spawn(async move {
+            loop {
+                if *rechunk_shutdown.borrow() {
+                    break;
+                }
+                match service.metadata.claim_rechunk_job() {
+                    Ok(Some(job)) => {
+                        if let Err(error) = service.process_rechunk_job(&job).await {
+                            let _ = service.metadata.finish_rechunk(
+                                &job.id,
+                                "failed",
+                                Some(&error.to_string()),
+                            );
+                        }
+                    }
+                    Ok(None) => tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {},
+                        _ = rechunk_shutdown.changed() => {},
+                    },
+                    Err(_) => tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {},
+                        _ = rechunk_shutdown.changed() => {},
+                    },
+                }
+            }
+        });
+        let service = self.clone();
         let mut recovery_shutdown = shutdown_rx.clone();
         let recovery_handle = tokio::spawn(async move {
             if service.recovery_verifier_enabled() {
@@ -414,9 +472,403 @@ impl ObjectFormatService {
         });
         if let Ok(mut handles) = self.worker_runtime.handles.lock() {
             handles.push(transfer_handle);
+            handles.push(replication_handle);
+            handles.push(rechunk_handle);
             handles.push(recovery_handle);
             handles.push(cleanup_handle);
         }
+    }
+
+    /// Re-chunk one committed object through the normal durable upload path.
+    /// The old manifest remains recoverable until the replacement is committed,
+    /// while the metadata lock makes reads return a clear temporary-unavailable
+    /// response instead of serving a mixed chunk layout.
+    async fn process_rechunk_job(
+        &self,
+        job: &crate::metadata::RechunkJob,
+    ) -> Result<(), ObjectFormatError> {
+        let old_id = Uuid::parse_str(&job.object_id)
+            .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+        let old_manifest = self.metadata.get_manifest(old_id)?.ok_or_else(|| {
+            ObjectFormatError::InvalidRead(format!(
+                "re-chunk source object not found: {}",
+                job.object_id
+            ))
+        })?;
+        let new_size = usize::try_from(job.new_chunk_size).map_err(|_| {
+            ObjectFormatError::InvalidPlan("new chunk size is too large for this platform".into())
+        })?;
+        if new_size == 0 {
+            return Err(ObjectFormatError::InvalidPlan(
+                "new chunk size must be non-zero".into(),
+            ));
+        }
+        let planned_total = Self::plan_chunks(old_manifest.content_length, job.new_chunk_size)?
+            .chunks
+            .len() as u64;
+        self.metadata
+            .update_rechunk_progress(&job.id, planned_total, 0, 0)?;
+        let new_id = Uuid::new_v4();
+        let dir = self.staging_dir(new_id);
+        async_fs::create_dir_all(&dir).await?;
+        let mut pending = Vec::with_capacity(new_size.min(16 * 1024 * 1024));
+        let mut chunks = Vec::new();
+        let mut hasher = Sha256::new();
+        let mut offset = 0_u64;
+        let mut bytes_done = 0_u64;
+        for source in &old_manifest.chunks {
+            let plaintext = self.read_manifest_chunk(&old_manifest, source).await?;
+            bytes_done = bytes_done.saturating_add(plaintext.len() as u64);
+            hasher.update(&plaintext);
+            pending.extend_from_slice(&plaintext);
+            while pending.len() >= new_size {
+                let remainder = pending.split_off(new_size);
+                self.stage_transfer_chunk(
+                    new_id,
+                    &pending,
+                    &mut chunks,
+                    &mut Sha256::new(),
+                    &mut offset,
+                )
+                .await?;
+                pending = remainder;
+                self.metadata.update_rechunk_progress(
+                    &job.id,
+                    planned_total,
+                    chunks.len() as u64,
+                    bytes_done,
+                )?;
+            }
+        }
+        if !pending.is_empty() {
+            self.stage_transfer_chunk(
+                new_id,
+                &pending,
+                &mut chunks,
+                &mut Sha256::new(),
+                &mut offset,
+            )
+            .await?;
+        }
+        let manifest_args = ManifestBuildArgs {
+            object_id: new_id,
+            bucket: old_manifest.bucket.clone(),
+            key: old_manifest.key.clone(),
+            content_type: old_manifest.content_type.clone(),
+            expires_at: old_manifest.expires_at,
+            commit_state: CommitState::Staging,
+            chunks,
+            whole_checksum: hex::encode(hasher.finalize()),
+        };
+        let transfer_id =
+            self.metadata
+                .begin_transfer(new_id, &old_manifest.bucket, &old_manifest.key)?;
+        let transfer = self.finalize_reception(&transfer_id, manifest_args, None)?;
+        let _replacement = self.wait_transfer(&transfer.id).await?;
+        self.metadata
+            .tombstone_manifest(old_id, "replaced by re-chunking")?;
+        self.metadata.finish_rechunk(&job.id, "completed", None)?;
+        let _ = async_fs::remove_dir_all(dir).await;
+        Ok(())
+    }
+
+    async fn process_replication_job(
+        &self,
+        job: &crate::metadata::ReplicationJob,
+    ) -> Result<(), ObjectFormatError> {
+        let active = self
+            .metadata
+            .active_connection_id()?
+            .unwrap_or_else(|| "legacy".to_string());
+        let source_manager = if job.source_account_id == active
+            || (job.source_account_id == "legacy" && active == "legacy")
+        {
+            Arc::clone(&self.transport_manager)
+        } else {
+            self.account_manager(&job.source_account_id).await?
+        };
+        let source_transport = source_manager.current().await?;
+        let manifests = self.list_bucket_manifests(&job.bucket, None)?;
+        let objects_total = manifests.len() as u64;
+        let chunks_total = manifests
+            .iter()
+            .map(|manifest| manifest.chunks.len() as u64)
+            .sum();
+        self.metadata
+            .update_replication_progress(&job.id, objects_total, 0, chunks_total, 0, 0)?;
+        let target_manager = if job.access_mode == "replica" {
+            Some(self.account_manager(&job.target_account_id).await?)
+        } else {
+            None
+        };
+        let target = if let Some(manager) = &target_manager {
+            Some(manager.current().await?)
+        } else {
+            None
+        };
+        let mut done_objects = 0_u64;
+        let mut done_chunks = 0_u64;
+        let mut bytes_done = 0_u64;
+        for mut manifest in manifests {
+            for chunk in &mut manifest.chunks {
+                let already_present = chunk.replicas.iter().any(|replica| {
+                    replica.account_id == job.target_account_id
+                        && ((job.access_mode == "access" && replica.mode == ReplicaMode::Access)
+                            || (job.access_mode == "replica"
+                                && replica.mode == ReplicaMode::Replica))
+                });
+                if already_present {
+                    done_chunks += 1;
+                    self.metadata.update_replication_progress(
+                        &job.id,
+                        objects_total,
+                        done_objects,
+                        chunks_total,
+                        done_chunks,
+                        bytes_done,
+                    )?;
+                    continue;
+                }
+                let location = if job.access_mode == "access" {
+                    self.metadata.insert_replica_location(
+                        manifest.object_id,
+                        chunk.order,
+                        &job.target_account_id,
+                        "access",
+                        &chunk.telegram_peer_id,
+                        chunk.telegram_message_id,
+                        chunk.telegram_document_id.as_deref(),
+                    )?;
+                    TelegramLocation {
+                        peer_id: chunk.telegram_peer_id.clone(),
+                        message_id: chunk.telegram_message_id,
+                        document_id: chunk.telegram_document_id.clone(),
+                    }
+                } else {
+                    let source_location = if job.source_account_id == active
+                        || (job.source_account_id == "legacy" && active == "legacy")
+                    {
+                        None
+                    } else {
+                        chunk
+                            .replicas
+                            .iter()
+                            .find(|replica| {
+                                replica.account_id == job.source_account_id
+                                    && replica.mode == ReplicaMode::Replica
+                            })
+                            .map(|replica| replica.telegram_message_id)
+                    };
+                    let source_message_id = match source_location {
+                        Some(message_id) => message_id,
+                        None if job.source_account_id == active
+                            || (job.source_account_id == "legacy" && active == "legacy") =>
+                        {
+                            chunk.telegram_message_id
+                        }
+                        None => {
+                            return Err(ObjectFormatError::InvalidPlan(format!(
+                                "source account {} has no physical replica for object {} chunk {}",
+                                job.source_account_id, manifest.key, chunk.order
+                            )));
+                        }
+                    };
+                    let message_id = i32::try_from(source_message_id).map_err(|_| {
+                        ObjectFormatError::InvalidRead("source message id is out of range".into())
+                    })?;
+                    let ciphertext = self
+                        .download_message_bytes_once_with_transport(
+                            Arc::clone(&source_transport),
+                            message_id,
+                        )
+                        .await?;
+                    bytes_done = bytes_done.saturating_add(ciphertext.len() as u64);
+                    let location = self
+                        .upload_replica_bytes(
+                            target.as_ref().ok_or_else(|| {
+                                ObjectFormatError::InvalidPlan(
+                                    "target transport is unavailable".into(),
+                                )
+                            })?,
+                            &job.id,
+                            chunk.order,
+                            &ciphertext,
+                            &job.target_account_id,
+                        )
+                        .await?;
+                    self.metadata.insert_replica_location(
+                        manifest.object_id,
+                        chunk.order,
+                        &job.target_account_id,
+                        "replica",
+                        &location.peer_id,
+                        location.message_id,
+                        location.document_id.as_deref(),
+                    )?;
+                    chunk
+                        .replicas
+                        .retain(|replica| replica.account_id != job.target_account_id);
+                    chunk.replicas.push(ChunkReplica {
+                        account_id: job.target_account_id.clone(),
+                        mode: ReplicaMode::Replica,
+                        telegram_peer_id: location.peer_id.clone(),
+                        telegram_message_id: location.message_id,
+                        telegram_document_id: location.document_id.clone(),
+                    });
+                    location
+                };
+                if job.access_mode == "access" {
+                    chunk
+                        .replicas
+                        .retain(|replica| replica.account_id != job.target_account_id);
+                    chunk.replicas.push(ChunkReplica {
+                        account_id: job.target_account_id.clone(),
+                        mode: ReplicaMode::Access,
+                        telegram_peer_id: location.peer_id.clone(),
+                        telegram_message_id: location.message_id,
+                        telegram_document_id: location.document_id.clone(),
+                    });
+                }
+                done_chunks += 1;
+                self.metadata.update_replication_progress(
+                    &job.id,
+                    objects_total,
+                    done_objects,
+                    chunks_total,
+                    done_chunks,
+                    bytes_done,
+                )?;
+            }
+            self.metadata.update_manifest(manifest)?;
+            done_objects += 1;
+            self.metadata.update_replication_progress(
+                &job.id,
+                objects_total,
+                done_objects,
+                chunks_total,
+                done_chunks,
+                bytes_done,
+            )?;
+        }
+        self.metadata.finish_replication(
+            &job.id,
+            if job.mode == "automatic" {
+                "scheduled"
+            } else {
+                "completed"
+            },
+            None,
+            job.mode == "automatic",
+        )?;
+        Ok(())
+    }
+
+    pub(super) async fn account_manager(
+        &self,
+        account_id: &str,
+    ) -> Result<Arc<TelegramTransportManager>, ObjectFormatError> {
+        let (_, settings) = self.metadata.telegram_account(account_id)?.ok_or_else(|| {
+            ObjectFormatError::InvalidPlan("target Telegram account is not configured".into())
+        })?;
+        let config = self.config.clone().ok_or_else(|| {
+            ObjectFormatError::InvalidPlan(
+                "account transports are unavailable in this service instance".into(),
+            )
+        })?;
+        let api_id = settings.telegram_api_id.ok_or_else(|| {
+            ObjectFormatError::InvalidPlan("target account API ID is missing".into())
+        })?;
+        let api_hash = settings.telegram_api_hash.ok_or_else(|| {
+            ObjectFormatError::InvalidPlan("target account API hash is missing".into())
+        })?;
+        let storage_chat_id = crate::config::normalize_telegram_storage_chat_id(
+            settings.telegram_storage_chat_id.as_deref(),
+        )
+        .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+        let session_path = settings
+            .telegram_session_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.data_dir.join(format!("telegram-{account_id}.session")));
+        let bootstrap = crate::config::ResolvedTelegramBootstrap {
+            telegram_api_id: api_id,
+            telegram_api_hash: api_hash,
+            telegram_session_path: session_path,
+            telegram_storage_chat_id: storage_chat_id,
+            telegram_proxy_url: settings.telegram_proxy_url,
+            telegram_proxy_username: settings.telegram_proxy_username,
+            telegram_proxy_password: settings.telegram_proxy_password,
+            telegram_proxy_mode: settings
+                .telegram_proxy_mode
+                .unwrap_or_else(|| "auto".into()),
+        };
+        Ok(TelegramTransportManager::open_for_bootstrap(config, bootstrap).await?)
+    }
+
+    async fn upload_replica_bytes(
+        &self,
+        transport: &Arc<crate::telegram::TelegramTransport>,
+        job_id: &str,
+        order: u32,
+        bytes: &[u8],
+        account_id: &str,
+    ) -> Result<TelegramLocation, ObjectFormatError> {
+        if transport.is_mock() {
+            let message_id = self.next_mock_message_id()?;
+            let dir = self.mock_telegram_dir();
+            fs::create_dir_all(&dir)?;
+            fs::write(dir.join(format!("{message_id}.bin")), bytes)?;
+            fs::write(
+                dir.join(format!("{message_id}.json")),
+                serde_json::to_vec(
+                    &serde_json::json!({"replica_job":job_id,"account_id":account_id,"chunk":order}),
+                )?,
+            )?;
+            self.add_telegram_upload_bytes(bytes.len() as u64);
+            return Ok(TelegramLocation {
+                peer_id: transport.status().await?.storage_chat_id,
+                message_id: i64::from(message_id),
+                document_id: Some(format!("mock-replica:{account_id}:{message_id}")),
+            });
+        }
+        let dir = self.data_dir.join("replica-staging").join(job_id);
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{order}.bin"));
+        fs::write(&path, bytes)?;
+        let location = transport
+            .upload_path(&path, &format!("replica-{account_id}-{order}.bin"))
+            .await?;
+        self.add_telegram_upload_bytes(bytes.len() as u64);
+        let _ = fs::remove_file(path);
+        Ok(location)
+    }
+
+    async fn read_manifest_chunk(
+        &self,
+        manifest: &ObjectManifest,
+        chunk: &ChunkRef,
+    ) -> Result<Vec<u8>, ObjectFormatError> {
+        let message_id = i32::try_from(chunk.telegram_message_id).map_err(|_| {
+            ObjectFormatError::InvalidRead(format!(
+                "telegram message id out of range for chunk {}",
+                chunk.order
+            ))
+        })?;
+        let ciphertext = self.download_message_bytes(message_id).await?;
+        let plaintext = if manifest.encryption.enabled {
+            let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
+            self.decrypt_chunk(source_object_id, source_order, &ciphertext)?
+        } else {
+            ciphertext
+        };
+        let actual = sha256_hex(&plaintext);
+        if actual != chunk.checksum {
+            return Err(ObjectFormatError::ChecksumMismatch {
+                scope: format!("chunk {}", chunk.order),
+                expected: chunk.checksum.clone(),
+                actual,
+            });
+        }
+        Ok(plaintext)
     }
 
     async fn finalize_connection_removal(&self) -> Result<(), ObjectFormatError> {

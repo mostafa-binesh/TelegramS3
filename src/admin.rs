@@ -176,6 +176,41 @@ struct TelegramDisconnectRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
+struct AccountRequest {
+    id: Option<String>,
+    label: String,
+    phone: Option<String>,
+    telegram_api_id: String,
+    telegram_api_hash: String,
+    telegram_session_path: Option<String>,
+    telegram_storage_chat_id: String,
+    telegram_proxy_url: Option<String>,
+    telegram_proxy_username: Option<String>,
+    telegram_proxy_password: Option<String>,
+    telegram_proxy_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ReplicationRequest {
+    source_account_id: String,
+    target_account_id: String,
+    bucket: String,
+    mode: String,
+    access_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RechunkRequest {
+    bucket: String,
+    #[serde(default)]
+    keys: Vec<String>,
+    new_chunk_size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
 struct BeginResumableRequest {
     bucket: String,
     key: String,
@@ -243,6 +278,9 @@ struct ObjectEntryWire {
     shared_links: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     location: Option<String>,
+    replica_accounts: u64,
+    access_accounts: u64,
+    rechunking: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -283,6 +321,8 @@ struct ShareLinksResponse {
 struct BucketEntryWire {
     name: String,
     created_at: String,
+    replica_accounts: u64,
+    access_accounts: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -493,6 +533,14 @@ impl AdminUiState {
             (Method::POST, "session/logout") => self.handle_logout(&principal).await,
             (Method::POST, "session/refresh") => self.handle_refresh(&principal).await,
             (Method::GET, "overview") => self.handle_overview(&principal).await,
+            (Method::GET, "accounts") => self.handle_list_accounts(),
+            (Method::POST, "accounts") => self.handle_save_account(request).await,
+            (Method::DELETE, p) if p.starts_with("accounts/") => self.handle_delete_account(p),
+            (Method::GET, "replication") => self.handle_list_replication(),
+            (Method::POST, "replication") => self.handle_queue_replication(request).await,
+            (Method::GET, "replicas") => self.handle_list_replicas(request),
+            (Method::GET, "rechunk") => self.handle_list_rechunk(),
+            (Method::POST, "rechunk") => self.handle_queue_rechunk(request).await,
             (Method::GET, "users") => self.handle_list_users(),
             (Method::POST, "users") => self.handle_create_user(request, &principal).await,
             (Method::POST, p) if p.starts_with("users/") => {
@@ -547,6 +595,159 @@ impl AdminUiState {
             (Method::POST, "telegram/disconnect") => self.telegram_disconnect(request).await,
             _ => json_error(StatusCode::NOT_FOUND, "not found"),
         }
+    }
+
+    fn handle_list_accounts(&self) -> Response<Body> {
+        match self.store().list_telegram_accounts() {
+            Ok(accounts) => {
+                json_response(StatusCode::OK, serde_json::json!({"accounts": accounts}))
+            }
+            Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        }
+    }
+
+    async fn handle_save_account(&self, request: Request<Incoming>) -> Response<Body> {
+        let body = match read_json::<AccountRequest>(request).await {
+            Ok(body) => body,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid account payload"),
+        };
+        let storage_chat_id =
+            match normalize_telegram_storage_chat_id(Some(&body.telegram_storage_chat_id)) {
+                Ok(value) => value,
+                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error.to_string()),
+            };
+        let settings = TelegramBootstrapSettings {
+            telegram_api_id: Some(body.telegram_api_id.trim().to_string()),
+            telegram_api_hash: Some(body.telegram_api_hash.trim().to_string()),
+            telegram_session_path: body
+                .telegram_session_path
+                .map(|value| value.trim().to_string()),
+            telegram_storage_chat_id: Some(storage_chat_id),
+            telegram_proxy_url: body
+                .telegram_proxy_url
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            telegram_proxy_username: body
+                .telegram_proxy_username
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            telegram_proxy_password: body
+                .telegram_proxy_password
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            telegram_proxy_mode: body
+                .telegram_proxy_mode
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        };
+        if let Err(error) = validate_telegram_bootstrap_settings(&settings) {
+            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+        if body.label.trim().is_empty() || body.label.len() > 120 {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "account label must be 1-120 characters",
+            );
+        }
+        match self.store().upsert_telegram_account(
+            body.id.as_deref(),
+            body.label.trim(),
+            &settings,
+            body.phone.as_deref(),
+        ) {
+            Ok(account) => json_response(StatusCode::OK, serde_json::json!({"account": account})),
+            Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        }
+    }
+
+    fn handle_delete_account(&self, path: &str) -> Response<Body> {
+        let id = path.trim_start_matches("accounts/");
+        match self.store().delete_telegram_account(id) {
+            Ok(true) => json_response(StatusCode::OK, serde_json::json!({"ok": true})),
+            Ok(false) => json_error(StatusCode::NOT_FOUND, "account not found"),
+            Err(error) => json_error(StatusCode::CONFLICT, &error.to_string()),
+        }
+    }
+
+    fn handle_list_replication(&self) -> Response<Body> {
+        match self.store().list_replication_jobs() {
+            Ok(jobs) => json_response(StatusCode::OK, serde_json::json!({"jobs": jobs})),
+            Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        }
+    }
+
+    async fn handle_queue_replication(&self, request: Request<Incoming>) -> Response<Body> {
+        let body = match read_json::<ReplicationRequest>(request).await {
+            Ok(body) => body,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid replication payload"),
+        };
+        if body.bucket.trim().is_empty() {
+            return json_error(StatusCode::BAD_REQUEST, "bucket is required");
+        }
+        match self.store().queue_replication(
+            &body.source_account_id,
+            &body.target_account_id,
+            body.bucket.trim(),
+            &body.mode,
+            &body.access_mode,
+        ) {
+            Ok(job) => {
+                self.object_format.ensure_workers();
+                json_response(StatusCode::ACCEPTED, serde_json::json!({"job": job}))
+            }
+            Err(error) => json_error(StatusCode::BAD_REQUEST, &error.to_string()),
+        }
+    }
+
+    fn handle_list_replicas(&self, request: Request<Incoming>) -> Response<Body> {
+        let query = parse_list_params(request.uri().query().unwrap_or(""));
+        match self
+            .store()
+            .list_account_access(query.get("bucket").map(String::as_str))
+        {
+            Ok(items) => json_response(StatusCode::OK, serde_json::json!({"replicas": items})),
+            Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        }
+    }
+
+    fn handle_list_rechunk(&self) -> Response<Body> {
+        match self.store().list_rechunk_jobs() {
+            Ok(jobs) => json_response(StatusCode::OK, serde_json::json!({"jobs": jobs})),
+            Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        }
+    }
+
+    async fn handle_queue_rechunk(&self, request: Request<Incoming>) -> Response<Body> {
+        let body = match read_json::<RechunkRequest>(request).await {
+            Ok(body) => body,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid re-chunk payload"),
+        };
+        if let Err(error) = AppConfig::validate_chunk_size(body.new_chunk_size) {
+            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+        let keys = body
+            .keys
+            .into_iter()
+            .filter(|key| !key.trim().is_empty())
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "at least one object must be selected",
+            );
+        }
+        let mut jobs = Vec::with_capacity(keys.len());
+        for key in keys {
+            match self
+                .store()
+                .queue_rechunk(&body.bucket, &key, body.new_chunk_size)
+            {
+                Ok(job) => jobs.push(job),
+                Err(error) => return json_error(StatusCode::CONFLICT, &error.to_string()),
+            }
+        }
+        self.object_format.ensure_workers();
+        json_response(StatusCode::ACCEPTED, serde_json::json!({"jobs": jobs}))
     }
 
     // ---- auth actions --------------------------------------------------------
@@ -855,6 +1056,50 @@ impl AdminUiState {
 
     // ---- file-management (JSON) ----------------------------------------------
 
+    fn object_replica_summary(&self, object_id: Uuid) -> (u64, u64) {
+        let mut replica = std::collections::HashSet::new();
+        let mut access = std::collections::HashSet::new();
+        if let Ok(items) = self.store().list_account_access(None) {
+            for item in items
+                .into_iter()
+                .filter(|item| item.object_id == object_id.to_string())
+            {
+                if item.mode == "access" {
+                    access.insert(item.account_id);
+                } else {
+                    replica.insert(item.account_id);
+                }
+            }
+        }
+        (replica.len() as u64, access.len() as u64)
+    }
+
+    fn bucket_replica_summary(&self) -> std::collections::HashMap<String, (u64, u64)> {
+        let mut by_bucket: std::collections::HashMap<
+            String,
+            (
+                std::collections::HashSet<String>,
+                std::collections::HashSet<String>,
+            ),
+        > = std::collections::HashMap::new();
+        if let Ok(items) = self.store().list_account_access(None) {
+            for item in items {
+                let entry = by_bucket.entry(item.bucket).or_default();
+                if item.mode == "access" {
+                    entry.1.insert(item.account_id);
+                } else {
+                    entry.0.insert(item.account_id);
+                }
+            }
+        }
+        by_bucket
+            .into_iter()
+            .map(|(bucket, (replica, access))| {
+                (bucket, (replica.len() as u64, access.len() as u64))
+            })
+            .collect()
+    }
+
     fn handle_list_buckets(&self, request: Request<Incoming>) -> Response<Body> {
         let query = parse_list_params(request.uri().query().unwrap_or(""));
         let search = query.get("search").cloned().unwrap_or_default();
@@ -876,6 +1121,7 @@ impl AdminUiState {
             Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
         };
         let search_lower = search.to_lowercase();
+        let replica_summary = self.bucket_replica_summary();
         let buckets = match self.object_format.list_buckets() {
             Ok(buckets) => buckets,
             Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
@@ -886,8 +1132,16 @@ impl AdminUiState {
                 search_lower.is_empty() || bucket.name.to_lowercase().contains(&search_lower)
             })
             .map(|bucket| BucketEntryWire {
-                name: bucket.name,
+                name: bucket.name.clone(),
                 created_at: rfc3339(bucket.created_at),
+                replica_accounts: replica_summary
+                    .get(&bucket.name)
+                    .map(|value| value.0)
+                    .unwrap_or(0),
+                access_accounts: replica_summary
+                    .get(&bucket.name)
+                    .map(|value| value.1)
+                    .unwrap_or(0),
             })
             .collect::<Vec<_>>();
         let total = wire.len();
@@ -974,9 +1228,18 @@ impl AdminUiState {
                     }
                 };
                 let location = key.rsplit_once('/').map(|(parent, _)| format!("{parent}/"));
+                let mut object = object_to_wire(&manifest, &key, shared_links, location);
+                let (replica_accounts, access_accounts) =
+                    self.object_replica_summary(manifest.object_id);
+                object.replica_accounts = replica_accounts;
+                object.access_accounts = access_accounts;
+                object.rechunking = self
+                    .store()
+                    .object_rechunk_locked(manifest.object_id)
+                    .unwrap_or(false);
                 matches.push(SearchResultWire {
                     bucket: bucket_name.clone(),
-                    object: object_to_wire(&manifest, &key, shared_links, location),
+                    object,
                 });
             }
         }
@@ -1023,6 +1286,8 @@ impl AdminUiState {
                 BucketEntryWire {
                     name: created.name,
                     created_at: rfc3339(created.created_at),
+                    replica_accounts: 0,
+                    access_accounts: 0,
                 },
             ),
             Err(error) => bucket_error_response(&error),
@@ -1151,7 +1416,16 @@ impl AdminUiState {
             } else {
                 key.rsplit_once('/').map(|(parent, _)| format!("{parent}/"))
             };
-            objects.push(object_to_wire(manifest, key, shared_links, location));
+            let mut object = object_to_wire(manifest, key, shared_links, location);
+            let (replica_accounts, access_accounts) =
+                self.object_replica_summary(manifest.object_id);
+            object.replica_accounts = replica_accounts;
+            object.access_accounts = access_accounts;
+            object.rechunking = self
+                .store()
+                .object_rechunk_locked(manifest.object_id)
+                .unwrap_or(false);
+            objects.push(object);
         }
         json_response(
             StatusCode::OK,
@@ -2634,6 +2908,9 @@ fn object_to_wire(
         }),
         shared_links,
         location,
+        replica_accounts: 0,
+        access_accounts: 0,
+        rechunking: false,
     }
 }
 

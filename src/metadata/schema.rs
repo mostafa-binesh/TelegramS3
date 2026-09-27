@@ -95,6 +95,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_share_schema(connection)?;
         ensure_download_prefetch_setting(connection)?;
         ensure_traffic_totals_schema(connection)?;
+        ensure_multi_account_schema(connection)?;
         return Ok(());
     }
 
@@ -358,6 +359,123 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_share_schema(connection)?;
     ensure_download_prefetch_setting(connection)?;
     ensure_traffic_totals_schema(connection)?;
+    ensure_multi_account_schema(connection)?;
+    Ok(())
+}
+
+/// Multi-account metadata is additive. Existing buckets/manifests keep their
+/// connection id; the migration only creates the registry and indexes and
+/// adopts the current bootstrap as the primary account when available.
+fn ensure_multi_account_schema(connection: &mut Connection) -> Result<(), MetadataError> {
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS telegram_accounts (
+            id TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            bootstrap_json TEXT NOT NULL,
+            phone TEXT,
+            state TEXT NOT NULL DEFAULT 'configured',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_telegram_accounts_state
+            ON telegram_accounts(state, updated_at);
+
+        CREATE TABLE IF NOT EXISTS replica_locations (
+            object_id TEXT NOT NULL,
+            chunk_order INTEGER NOT NULL,
+            account_id TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'replica',
+            peer_id TEXT NOT NULL,
+            message_id INTEGER NOT NULL,
+            document_id TEXT,
+            state TEXT NOT NULL DEFAULT 'ready',
+            error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(object_id, chunk_order, account_id),
+            FOREIGN KEY(account_id) REFERENCES telegram_accounts(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_replica_locations_object
+            ON replica_locations(object_id, chunk_order, state);
+        CREATE INDEX IF NOT EXISTS idx_replica_locations_account
+            ON replica_locations(account_id, state);
+
+        CREATE TABLE IF NOT EXISTS replication_jobs (
+            id TEXT PRIMARY KEY,
+            source_account_id TEXT NOT NULL,
+            target_account_id TEXT NOT NULL,
+            bucket TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            access_mode TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'queued',
+            objects_total INTEGER NOT NULL DEFAULT 0,
+            objects_done INTEGER NOT NULL DEFAULT 0,
+            chunks_total INTEGER NOT NULL DEFAULT 0,
+            chunks_done INTEGER NOT NULL DEFAULT 0,
+            bytes_done INTEGER NOT NULL DEFAULT 0,
+            next_run INTEGER,
+            last_run INTEGER,
+            error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY(source_account_id) REFERENCES telegram_accounts(id),
+            FOREIGN KEY(target_account_id) REFERENCES telegram_accounts(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_replication_jobs_due
+            ON replication_jobs(state, next_run, updated_at);
+
+        CREATE TABLE IF NOT EXISTS rechunk_jobs (
+            id TEXT PRIMARY KEY,
+            bucket TEXT NOT NULL,
+            object_key TEXT NOT NULL,
+            object_id TEXT NOT NULL,
+            new_chunk_size INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'queued',
+            chunks_total INTEGER NOT NULL DEFAULT 0,
+            chunks_done INTEGER NOT NULL DEFAULT 0,
+            bytes_done INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_rechunk_jobs_state
+            ON rechunk_jobs(state, updated_at);
+
+        CREATE TABLE IF NOT EXISTS rechunk_locks (
+            object_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL UNIQUE,
+            reason TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        "#,
+    )?;
+
+    let bootstrap: Option<String> = connection
+        .query_row(
+            "SELECT value FROM app_settings WHERE key='telegram_bootstrap'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let connection_id: Option<String> = connection
+        .query_row(
+            "SELECT value FROM app_settings WHERE key='telegram_active_connection_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let (Some(bootstrap), Some(connection_id)) = (bootstrap, connection_id) {
+        let now = crate::durable::now();
+        connection.execute(
+            "INSERT OR IGNORE INTO telegram_accounts(id,label,bootstrap_json,phone,state,created_at,updated_at) VALUES(?1,'Primary account',?2,NULL,'configured',?3,?3)",
+            params![connection_id, bootstrap, now],
+        )?;
+        connection.execute(
+            "UPDATE telegram_accounts SET bootstrap_json=?2,updated_at=?3 WHERE id=?1",
+            params![connection_id, bootstrap, now],
+        )?;
+    }
     Ok(())
 }
 
@@ -784,6 +902,32 @@ mod tests {
                 .telegram_download_bytes,
             42
         );
+    }
+
+    #[test]
+    fn schema_v15_adds_account_and_maintenance_tables() {
+        let store = MetadataStore::open_in_memory().expect("open");
+        store
+            .with_connection(|connection| {
+                for table in [
+                    "telegram_accounts",
+                    "replica_locations",
+                    "replication_jobs",
+                    "rechunk_jobs",
+                    "rechunk_locks",
+                ] {
+                    let found: Option<String> = connection
+                        .query_row(
+                            "SELECT name FROM sqlite_master WHERE type='table' AND name=?1",
+                            [table],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    assert_eq!(found.as_deref(), Some(table));
+                }
+                Ok(())
+            })
+            .expect("tables");
     }
 
     #[test]

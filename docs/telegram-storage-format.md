@@ -40,6 +40,19 @@ Each object is represented by:
 3. a local index row and journal entry
 4. optional multipart session and part rows while an upload is in progress
 
+Schema v15 additionally stores an account registry, durable replication jobs,
+replica/access locations, and re-chunk locks/jobs. These rows are additive and
+do not rewrite existing object ownership. `ChunkRef.replicas` is optional so
+schema-v2 manifests remain readable; each location identifies its account,
+mode (`replica` or `access`), peer, message, and document. The primary chunk
+location remains authoritative for legacy manifests.
+
+Replication copies encrypted chunk bytes, preserving the object checksum and
+encryption identity. Access-only replication records the source location and
+requires the target Telegram session to have access to that group/chat.
+Re-chunking stages a replacement object with a new chunk policy, then commits
+it through the normal transfer journal. A lock prevents mixed old/new reads.
+
 ## Default Chunk Size
 
 The initial default is `1 MiB`, matching the conservative Telegram Drive

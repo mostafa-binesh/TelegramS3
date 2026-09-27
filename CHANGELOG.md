@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.7.6-rc.6 - 2026-09-27
+
+### Account pool, replication, and maintenance queues
+
+- Added schema v15 migrations for multiple Telegram connections, replica/access
+  locations, durable replication jobs, re-chunk jobs, and temporary object
+  locks. Existing connection IDs and manifests are preserved.
+- Added an Accounts console section for independent Telegram transports,
+  one-time or automatic bucket replication, and physical-replica versus
+  access-only modes.
+- Added durable replication progress and account-access detail APIs, account
+  badges in Buckets, and a per-chunk account detail dialog.
+- Added optional per-chunk replica locations and deterministic round-robin
+  streaming across the primary and ready replica transports.
+- Added worker-backed bulk re-chunking from the bucket browser. It streams
+  chunks through bounded staging, publishes a replacement manifest through the
+  transfer journal, locks reads while active, and reports progress.
+- Added coverage for migration, account/job records, replica serialization,
+  account navigation/forms, replication payloads, and re-chunk confirmation.
+
 ## 0.7.6-rc.5 - 2026-09-27
 
 ### Download diagnostics and first-chunk delivery

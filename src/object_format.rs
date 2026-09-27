@@ -2,8 +2,8 @@ mod reception;
 mod workflow;
 use crate::config::AppConfig;
 use crate::manifest::{
-    ChunkRef, CommitState, MANIFEST_SCHEMA_VERSION, ObjectChecksum, ObjectManifest,
-    TelegramLocation,
+    ChunkRef, ChunkReplica, CommitState, MANIFEST_SCHEMA_VERSION, ObjectChecksum, ObjectManifest,
+    ReplicaMode, TelegramLocation,
 };
 use crate::metadata::{
     BucketRecord, JournalEntry, MetadataError, MetadataStatus, MetadataStore, OperationKind,
@@ -399,6 +399,7 @@ pub enum ObjectFormatError {
 #[derive(Clone)]
 pub struct ObjectFormatService {
     metadata: Arc<MetadataStore>,
+    config: Option<AppConfig>,
     transport_manager: std::sync::Arc<TelegramTransportManager>,
     data_dir: PathBuf,
     chunk_size: Arc<RwLock<u64>>,
@@ -762,6 +763,7 @@ impl ObjectFormatService {
             storage_chat_id,
             ObjectEncryption::from_master_key(&master_key),
         )?;
+        service.config = Some(config.clone());
         service.staging_budget = config.staging_budget()?;
         service.set_recovery_verification_settings(
             recovery_verify_interval_secs,
@@ -790,6 +792,7 @@ impl ObjectFormatService {
         fs::create_dir_all(data_dir.join(CLEANUP_EVIDENCE_ROOT))?;
         Ok(Self {
             metadata: Arc::new(metadata),
+            config: None,
             transport_manager,
             data_dir,
             chunk_size: Arc::new(RwLock::new(chunk_size)),
@@ -1098,10 +1101,19 @@ impl ObjectFormatService {
         bucket: &str,
         key: &str,
     ) -> Result<Option<ObjectManifest>, ObjectFormatError> {
-        Ok(self
+        let manifest = self
             .metadata
             .get_active_manifest(bucket, key)?
-            .filter(|manifest| !manifest.is_expired(OffsetDateTime::now_utc())))
+            .filter(|manifest| !manifest.is_expired(OffsetDateTime::now_utc()));
+        if let Some(manifest) = manifest {
+            if self.metadata.object_rechunk_locked(manifest.object_id)? {
+                return Err(ObjectFormatError::InvalidRead(
+                    "object is being re-chunked; try again later".to_string(),
+                ));
+            }
+            return Ok(Some(manifest));
+        }
+        Ok(None)
     }
 
     pub fn list_bucket_manifests(
@@ -1478,6 +1490,7 @@ impl ObjectFormatService {
                     telegram_document_id: source_chunk.telegram_document_id.clone(),
                     source_object_id: Some(source_object_id),
                     source_chunk_order: Some(source_chunk_order),
+                    replicas: source_chunk.replicas.clone(),
                 });
                 offset = offset.checked_add(source_chunk.size).ok_or_else(|| {
                     ObjectFormatError::InvalidPlan("multipart content length overflow".to_string())
@@ -1953,6 +1966,7 @@ impl ObjectFormatService {
                 telegram_document_id: Some(format!("local:{object_id}:{order}")),
                 source_object_id: None,
                 source_chunk_order: None,
+                replicas: Vec::new(),
             });
             chunk_plan.content_length =
                 chunk_plan.content_length.checked_add(size).ok_or_else(|| {
@@ -3128,13 +3142,21 @@ impl ObjectFormatService {
         &self,
         message_id: i32,
     ) -> Result<TelegramStreamRead, ObjectFormatError> {
+        let transport = self.transport_manager.current().await?;
+        self.download_message_bytes_for_stream_from_transport(transport, message_id)
+            .await
+    }
+
+    async fn download_message_bytes_for_stream_from_transport(
+        &self,
+        transport: Arc<crate::telegram::TelegramTransport>,
+        message_id: i32,
+    ) -> Result<TelegramStreamRead, ObjectFormatError> {
         let started = StdInstant::now();
-        let current_transport = self.transport_manager.current().await;
-        if current_transport
-            .as_ref()
-            .is_ok_and(|transport| transport.is_mock())
-        {
-            let bytes = self.download_message_bytes_once(message_id).await?;
+        if transport.is_mock() {
+            let bytes = self
+                .download_message_bytes_once_with_transport(transport, message_id)
+                .await?;
             return Ok(TelegramStreamRead {
                 telegram_us: started.elapsed().as_micros() as u64,
                 bytes,
@@ -3142,14 +3164,12 @@ impl ObjectFormatService {
                 retry_wait_us: 0,
             });
         }
-        let retry_policy = current_transport
-            .map(|transport| transport.retry_policy())
-            .unwrap_or_default();
+        let retry_policy = transport.retry_policy();
         retry_telegram_read_for_stream(
             retry_policy,
             message_id,
             TELEGRAM_STREAM_RECOVERY_WINDOW,
-            || self.download_message_bytes_once(message_id),
+            || self.download_message_bytes_once_with_transport(Arc::clone(&transport), message_id),
         )
         .await
         .map(|result| TelegramStreamRead {
@@ -3165,6 +3185,15 @@ impl ObjectFormatService {
         message_id: i32,
     ) -> Result<Vec<u8>, ObjectFormatError> {
         let transport = self.transport_manager.current().await?;
+        self.download_message_bytes_once_with_transport(transport, message_id)
+            .await
+    }
+
+    async fn download_message_bytes_once_with_transport(
+        &self,
+        transport: Arc<crate::telegram::TelegramTransport>,
+        message_id: i32,
+    ) -> Result<Vec<u8>, ObjectFormatError> {
         if transport.is_mock() {
             if let Ok(fault) = std::env::var("TELEGRAM_MOCK_READ_FAULT") {
                 return Err(ObjectFormatError::Telegram(TelegramTransportError::Rpc(
@@ -3426,25 +3455,77 @@ async fn read_stream_span(
             format!("missing chunk {}", span.order),
         )
     })?;
-    let message_id = i32::try_from(chunk.telegram_message_id).map_err(|_| {
+    // Rotate deterministically across the primary location and replicas. A
+    // different chunk therefore naturally exercises a different account,
+    // while legacy manifests still take the original path.
+    let (location, selected_transport) = if chunk.replicas.is_empty() {
+        (
+            TelegramLocation {
+                peer_id: chunk.telegram_peer_id.clone(),
+                message_id: chunk.telegram_message_id,
+                document_id: chunk.telegram_document_id.clone(),
+            },
+            None,
+        )
+    } else {
+        let index = (span.order as usize) % (chunk.replicas.len() + 1);
+        if index == 0 {
+            (
+                TelegramLocation {
+                    peer_id: chunk.telegram_peer_id.clone(),
+                    message_id: chunk.telegram_message_id,
+                    document_id: chunk.telegram_document_id.clone(),
+                },
+                None,
+            )
+        } else {
+            let replica = &chunk.replicas[index - 1];
+            let manager = object_format
+                .account_manager(&replica.account_id)
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            let transport = manager
+                .current()
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            (
+                TelegramLocation {
+                    peer_id: replica.telegram_peer_id.clone(),
+                    message_id: replica.telegram_message_id,
+                    document_id: replica.telegram_document_id.clone(),
+                },
+                Some(transport),
+            )
+        }
+    };
+    let message_id = i32::try_from(location.message_id).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("telegram message id out of range for chunk {}", span.order),
         )
     })?;
-    let telegram = object_format
-        .download_message_bytes_for_stream(message_id)
-        .await
-        .map_err(|error| {
-            warn!(
-                object_id = %manifest.object_id,
-                chunk_order = span.order,
-                telegram_message_id = message_id,
-                error = %error,
-                "object stream chunk failed"
-            );
-            io::Error::other(error.to_string())
-        })?;
+    let telegram = match selected_transport {
+        Some(transport) => {
+            object_format
+                .download_message_bytes_for_stream_from_transport(transport, message_id)
+                .await
+        }
+        None => {
+            object_format
+                .download_message_bytes_for_stream(message_id)
+                .await
+        }
+    }
+    .map_err(|error| {
+        warn!(
+            object_id = %manifest.object_id,
+            chunk_order = span.order,
+            telegram_message_id = message_id,
+            error = %error,
+            "object stream chunk failed"
+        );
+        io::Error::other(error.to_string())
+    })?;
     let telegram_bytes = telegram.bytes.len() as u64;
     let telegram_retries = telegram.retries;
     let telegram_us = telegram.telegram_us;

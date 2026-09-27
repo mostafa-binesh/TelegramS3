@@ -11,6 +11,7 @@ import type {
   TelegramSettingsState,
   UsersState,
   WizardState
+  ,AccountInfo, ReplicationJob, RechunkJob, ReplicaInfo
 } from './types';
 
 const API_PREFIX = '/_admin/api';
@@ -208,6 +209,48 @@ export function listBuckets(
   if (options.pageSize) qp.set('page_size', String(options.pageSize));
   const suffix = qp.toString() ? `?${qp.toString()}` : '';
   return requestJson<BucketsState>(`/buckets${suffix}`, csrf);
+}
+
+export function listAccounts(csrf?: string | null) {
+  return requestJson<{accounts: AccountInfo[]}>('/accounts', csrf);
+}
+
+export function saveAccount(csrf: string | null | undefined, body: {
+  id?: string; label: string; phone?: string; telegram_api_id: string;
+  telegram_api_hash: string; telegram_session_path?: string;
+  telegram_storage_chat_id: string; telegram_proxy_url?: string;
+  telegram_proxy_username?: string; telegram_proxy_password?: string;
+  telegram_proxy_mode?: string;
+}) {
+  return requestJson<{account: AccountInfo}>('/accounts', csrf, {method: 'POST', body});
+}
+
+export function deleteAccount(csrf: string | null | undefined, id: string) {
+  return requestJson<{ok: boolean}>(`/accounts/${encodeURIComponent(id)}`, csrf, {method: 'DELETE'});
+}
+
+export function listReplicationJobs(csrf?: string | null) {
+  return requestJson<{jobs: ReplicationJob[]}>('/replication', csrf);
+}
+
+export function queueReplication(csrf: string | null | undefined, body: {
+  source_account_id: string; target_account_id: string; bucket: string;
+  mode: 'one_time' | 'automatic'; access_mode: 'replica' | 'access';
+}) {
+  return requestJson<{job: ReplicationJob}>('/replication', csrf, {method: 'POST', body});
+}
+
+export function listReplicas(csrf: string | null | undefined, bucket?: string) {
+  const suffix = bucket ? `?bucket=${encodeURIComponent(bucket)}` : '';
+  return requestJson<{replicas: ReplicaInfo[]}>(`/replicas${suffix}`, csrf);
+}
+
+export function listRechunkJobs(csrf?: string | null) {
+  return requestJson<{jobs: RechunkJob[]}>('/rechunk', csrf);
+}
+
+export function queueRechunk(csrf: string | null | undefined, body: {bucket: string; keys: string[]; new_chunk_size: number}) {
+  return requestJson<{jobs: RechunkJob[]}>('/rechunk', csrf, {method: 'POST', body});
 }
 
 export function searchObjects(

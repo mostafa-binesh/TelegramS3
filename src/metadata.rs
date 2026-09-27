@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 14;
+const SCHEMA_VERSION: u32 = 15;
 
 #[derive(Debug, Error)]
 pub enum MetadataError {
@@ -142,6 +142,7 @@ impl MetadataStore {
     }
 }
 
+mod accounts;
 mod auth;
 mod buckets;
 mod connection_removal;
@@ -153,6 +154,7 @@ mod schema;
 mod settings;
 mod shares;
 
+pub use self::accounts::{AccountAccess, AccountRecord, RechunkJob, ReplicationJob};
 pub use self::auth::{DbSession, DbUser};
 pub use self::buckets::BucketRecord;
 pub use self::connection_removal::ConnectionRemovalJob;

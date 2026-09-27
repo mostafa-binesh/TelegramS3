@@ -368,6 +368,14 @@ impl MetadataStore {
                 "#,
                 params![json, timestamp_now()?],
             )?;
+            let now = crate::durable::now();
+            tx.execute(
+                r#"INSERT INTO telegram_accounts(id,label,bootstrap_json,phone,state,created_at,updated_at)
+                   VALUES(?1,'Primary account',?2,(SELECT value FROM app_settings WHERE key='telegram_account_phone'),'configured',?3,?3)
+                   ON CONFLICT(id) DO UPDATE SET bootstrap_json=excluded.bootstrap_json,
+                     phone=COALESCE(excluded.phone,telegram_accounts.phone),state='configured',updated_at=excluded.updated_at"#,
+                params![connection_id, &json, now],
+            )?;
             tx.commit()?;
             Ok(())
         })
@@ -475,7 +483,7 @@ mod tests {
             store.telegram_chunk_size().expect("read"),
             Some(8 * 1024 * 1024)
         );
-        assert_eq!(store.schema_version().expect("schema"), 14);
+        assert_eq!(store.schema_version().expect("schema"), 15);
     }
 
     #[test]
@@ -529,7 +537,7 @@ mod tests {
         );
 
         store.migrate().expect("idempotent migration");
-        assert_eq!(store.schema_version().expect("schema"), 14);
+        assert_eq!(store.schema_version().expect("schema"), 15);
         assert_eq!(
             store
                 .telegram_recovery_verify_interval_secs()

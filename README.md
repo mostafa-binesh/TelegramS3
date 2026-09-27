@@ -80,6 +80,14 @@ staging, and recovery artifacts, not committed payloads.
 - **Multi-user control plane** — argon2id-hashed operator accounts in SQLite,
   HTTP-only session cookies, per-account login rate limiting and lockout,
   revocable sessions, and a superadmin role for account management.
+- **Account pool and replication** — multiple isolated Telegram connections can
+  be registered, including the same Telegram account with separate session
+  files. Buckets support one-time or automatic physical replication or
+  access-only sharing; replica/access badges and per-chunk account details are
+  visible in Buckets, and ready replicas participate in round-robin reads.
+- **Maintenance queues** — selected bucket objects can be re-chunked through a
+  bounded durable worker. Objects are locked and report temporary
+  unavailability while their replacement manifest is published.
 
 ## What's implemented
 

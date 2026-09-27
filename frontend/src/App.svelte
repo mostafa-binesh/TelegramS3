@@ -34,6 +34,8 @@
     updateShareLinkExpiry,
     revokeShareLink,
     setSessionUpdateHandler,
+    queueRechunk,
+    listReplicas,
   } from './lib/api';
   import {normalizeError} from './lib/format';
   import type {
@@ -46,11 +48,13 @@
     SharedLink,
     TelegramSettings,
     MultipartUpload,
-    UserInfo
+    UserInfo,
+    ReplicaInfo
   } from './lib/types';
   import TopProgress from './components/TopProgress.svelte';
   import Toasts from './components/Toasts.svelte';
   import SharedLinksModal from './components/SharedLinksModal.svelte';
+  import ReplicaDetailsModal from './components/ReplicaDetailsModal.svelte';
 
   let session: SessionState | null = null;
   let overview: OverviewState | null = null;
@@ -64,6 +68,7 @@
   let TelegramWizardComponent: any = null;
   let UploadBoxComponent: any = null;
   let UsersPanelComponent: any = null;
+  let AccountsPanelComponent: any = null;
   let TelegramPanelComponent: any = null;
   let OverviewPanelComponent: any = null;
   let BucketsPanelComponent: any = null;
@@ -78,6 +83,7 @@
   async function loadTelegramWizard() { TelegramWizardComponent ??= (await import('./components/TelegramWizard.svelte')).default; }
   async function loadUploadBox() { UploadBoxComponent ??= (await import('./components/UploadBox.svelte')).default; }
   async function loadUsersPanel() { UsersPanelComponent ??= (await import('./components/UsersPanel.svelte')).default; }
+  async function loadAccountsPanel() { AccountsPanelComponent ??= (await import('./components/AccountsPanel.svelte')).default; }
   async function loadTelegramPanel() { TelegramPanelComponent ??= (await import('./components/TelegramPanel.svelte')).default; }
   async function loadOverviewPanel() { OverviewPanelComponent ??= (await import('./components/OverviewPanel.svelte')).default; }
   async function loadBucketsPanel() { BucketsPanelComponent ??= (await import('./components/BucketsPanel.svelte')).default; }
@@ -143,6 +149,13 @@
   let deleteTarget: { type: 'bucket' | 'object' | 'folder' | 'selection' | 'operator'; name: string; key?: string } | null = null;
   let selectedKeys: string[] = [];
   let showMoveModal = false;
+  let showReplicaModal = false;
+  let replicaItems: ReplicaInfo[] = [];
+  let replicaTitle = '';
+  let replicaLoading = false;
+  let replicaError = '';
+  let showRechunkModal = false;
+  let newChunkSizeMiB = '8';
   let moveBucket = '';
   let movePrefix = '';
 
@@ -385,6 +398,7 @@
       await loadUsersPanel();
       await refreshUsers();
     }
+    if (next.view === 'accounts') await loadAccountsPanel();
     if (next.view === 'telegram') {
       await loadTelegramPanel();
       await refreshTelegramSettings();
@@ -481,6 +495,38 @@
     else if (next === 'recovery') navigate({ view: 'recovery', recoveryTab: 'issues' });
     else if (next === 'telegram') navigate({ view: 'telegram', telegramTab: 'connection' });
     else navigate({ view: next });
+  }
+
+  async function openRechunkModal() {
+    if (!selectedKeys.length || !selectedBucket) return;
+    await loadAdminModals();
+    showRechunkModal = true;
+  }
+
+  async function queueSelectedRechunk() {
+    const size = Number(newChunkSizeMiB);
+    if (!Number.isFinite(size) || size <= 0) return;
+    busy = true;
+    try {
+      await queueRechunk(session?.csrf_token, { bucket: selectedBucket, keys: [...selectedKeys], new_chunk_size: Math.round(size * 1048576) });
+      selectedKeys = [];
+      showRechunkModal = false;
+      notifySuccess('Re-chunking queued. The selected objects stay unavailable until each job completes.');
+      await refreshObjects();
+    } catch (cause) { notifyError(normalizeError(cause)); }
+    finally { busy = false; }
+  }
+
+  async function openReplicaDetails(bucket: string, key?: string) {
+    showReplicaModal = true;
+    replicaLoading = true;
+    replicaError = '';
+    replicaTitle = key ? `${bucket}/${key}` : `${bucket} account access`;
+    try {
+      const response = await listReplicas(session?.csrf_token, bucket);
+      replicaItems = key ? response.replicas.filter((item) => item.key === key) : response.replicas;
+    } catch (cause) { replicaError = normalizeError(cause); replicaItems = []; }
+    finally { replicaLoading = false; }
   }
 
   function retryRouteLoad() {
@@ -1114,15 +1160,18 @@
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} {bucketSearch} {bucketPage} {bucketTotal} globalSearchResults={globalSearchResults} globalSearchPage={globalSearchPage} globalSearchTotal={globalSearchTotal} globalSearchLoading={globalSearchLoading} globalSearchError={globalSearchError} {objectSearch} {objectPage} {objectTotal} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onGlobalSearchPage={goToGlobalSearchPage} onOpenSearchResult={openGlobalSearchResult} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBucketPage()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} {bucketSearch} {bucketPage} {bucketTotal} globalSearchResults={globalSearchResults} globalSearchPage={globalSearchPage} globalSearchTotal={globalSearchTotal} globalSearchLoading={globalSearchLoading} globalSearchError={globalSearchError} {objectSearch} {objectPage} {objectTotal} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onGlobalSearchPage={goToGlobalSearchPage} onOpenSearchResult={openGlobalSearchResult} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBucketPage()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onRechunkSelected={openRechunkModal} onOpenReplicas={openReplicaDetails} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+    {:else if view === 'accounts'}
+      {#if AccountsPanelComponent}<svelte:component this={AccountsPanelComponent} csrf={session?.csrf_token} buckets={buckets}/>{:else if routeLoadError}<LoadError title="Could not load accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'users'}
       {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} error={usersError} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={(id: string) => requestDelete({ type: 'operator', name: users.find((user) => user.id === id)?.username ?? id, key: id })} onAdd={openOperatorModal}/>{:else if routeLoadError}<LoadError title="Could not load operator accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
     {/if}
   {/if}
 
-  {#if AdminModalsComponent}<svelte:component this={AdminModalsComponent} bind:showBucket={showBucketModal} bind:showFolder={showFolderModal} bind:showUpload={showUploadModal} bind:showOperator={showOperatorModal} bind:showMove={showMoveModal} bind:showShare={showShareModal} bind:showDelete={showDeleteModal} bind:newBucket bind:newFolder bind:newUsername bind:newDisplay bind:newPassword bind:newRole bind:moveBucket bind:movePrefix bind:shareExpiry bind:shareDescription bind:shareUrl selectedBucket={selectedBucket} currentPrefix={currentPrefix} shareTarget={shareTarget} shareError={shareError} shareBusy={shareBusy} deleteTarget={deleteTarget} {busy} uploadComponent={UploadBoxComponent} csrf={session?.csrf_token} onCreateBucket={makeBucket} onCreateFolder={makeFolder} onCreateOperator={makeUser} onCreateShare={createShareFromModal} onConfirmDelete={confirmDelete} onMove={moveSelected} onUploaded={refreshObjects}/>{/if}
+  {#if AdminModalsComponent}<svelte:component this={AdminModalsComponent} bind:showBucket={showBucketModal} bind:showFolder={showFolderModal} bind:showUpload={showUploadModal} bind:showOperator={showOperatorModal} bind:showMove={showMoveModal} bind:showShare={showShareModal} bind:showDelete={showDeleteModal} bind:showRechunk={showRechunkModal} bind:newBucket bind:newFolder bind:newUsername bind:newDisplay bind:newPassword bind:newRole bind:moveBucket bind:movePrefix bind:shareExpiry bind:shareDescription bind:shareUrl bind:newChunkSizeMiB selectedBucket={selectedBucket} currentPrefix={currentPrefix} shareTarget={shareTarget} shareError={shareError} shareBusy={shareBusy} deleteTarget={deleteTarget} {busy} uploadComponent={UploadBoxComponent} csrf={session?.csrf_token} onCreateBucket={makeBucket} onCreateFolder={makeFolder} onCreateOperator={makeUser} onCreateShare={createShareFromModal} onConfirmDelete={confirmDelete} onMove={moveSelected} onRechunk={queueSelectedRechunk} onUploaded={refreshObjects}/>{/if}
   <SharedLinksModal open={showSharedLinksModal} target={sharedLinksTarget} links={sharedLinks} busy={sharedLinksBusy} error={sharedLinksError} onClose={closeSharedLinksModal} onUpdateExpiry={changeSharedLinkExpiry} onRevoke={revokeSharedLink}/>
 
+  <ReplicaDetailsModal bind:open={showReplicaModal} title={replicaTitle} items={replicaItems} loading={replicaLoading} error={replicaError}/>
   <Toasts />
 </main>
 

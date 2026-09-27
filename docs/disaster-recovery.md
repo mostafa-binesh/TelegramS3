@@ -2,6 +2,14 @@
 
 ## Local Metadata Lost
 
+Schema v15 account and maintenance rows are part of the recovery boundary.
+Back up `metadata.sqlite` before adding or scheduling replication. Restoring
+the database restores account definitions, replica/access maps, pending job
+progress, and re-chunk locks; queued workers resume after restart. Inspect
+failed replication or re-chunk jobs before retrying them. An access-only record
+is not a second copy: it is recoverable only while the target session can read
+the shared Telegram chat.
+
 1. Stop the server.
 2. Preserve the current Telegram session and data directories.
 3. Restore `metadata.sqlite` from backup if you have one, then run `telegram-s3 db status` to confirm the metadata path and schema.

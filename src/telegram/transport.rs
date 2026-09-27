@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
+use tokio::fs as async_fs;
+use tokio::io::AsyncSeekExt;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -160,6 +162,7 @@ pub struct TelegramTransport {
 #[derive(Clone)]
 pub struct TelegramTransportManager {
     config: AppConfig,
+    bootstrap_override: Option<ResolvedTelegramBootstrap>,
     transport: std::sync::Arc<RwLock<Option<std::sync::Arc<TelegramTransport>>>>,
     health: std::sync::Arc<RwLock<TelegramConnectionHealth>>,
     refresh_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
@@ -565,8 +568,30 @@ impl TelegramTransportManager {
             not_configured_health(&config, "Telegram connection check pending".to_string());
         Ok(std::sync::Arc::new(Self {
             config,
+            bootstrap_override: None,
             transport: std::sync::Arc::new(RwLock::new(transport)),
             health: std::sync::Arc::new(RwLock::new(health)),
+            refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            monitor_started: std::sync::Arc::new(AtomicBool::new(false)),
+            monitor_shutdown: std::sync::Arc::new(Mutex::new(None)),
+            monitor_handle: std::sync::Arc::new(Mutex::new(None)),
+        }))
+    }
+
+    /// Build an isolated manager for an account stored in the account
+    /// registry. It never reads or mutates the process-wide active bootstrap.
+    pub async fn open_for_bootstrap(
+        config: AppConfig,
+        bootstrap: ResolvedTelegramBootstrap,
+    ) -> Result<std::sync::Arc<Self>, TelegramTransportError> {
+        Ok(std::sync::Arc::new(Self {
+            health: std::sync::Arc::new(RwLock::new(not_configured_health(
+                &config,
+                "account connection check pending".to_string(),
+            ))),
+            config,
+            bootstrap_override: Some(bootstrap),
+            transport: std::sync::Arc::new(RwLock::new(None)),
             refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             monitor_started: std::sync::Arc::new(AtomicBool::new(false)),
             monitor_shutdown: std::sync::Arc::new(Mutex::new(None)),
@@ -582,6 +607,7 @@ impl TelegramTransportManager {
     ) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             config,
+            bootstrap_override: None,
             transport: std::sync::Arc::new(RwLock::new(transport)),
             health: std::sync::Arc::new(RwLock::new(health)),
             refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -703,9 +729,12 @@ impl TelegramTransportManager {
             *self.health.write().await = health.clone();
             return Ok(health);
         }
-        let opened = AssertUnwindSafe(open_transport_from_store(&self.config))
-            .catch_unwind()
-            .await;
+        let opened = AssertUnwindSafe(open_transport_from_store(
+            &self.config,
+            self.bootstrap_override.as_ref(),
+        ))
+        .catch_unwind()
+        .await;
         let transport = match opened {
             Ok(Ok(transport)) => std::sync::Arc::new(transport),
             Ok(Err(error)) => return Err(error),
@@ -798,6 +827,50 @@ impl TelegramTransport {
             .ok_or(TelegramTransportError::InvalidState(
                 "real Telegram client is unavailable",
             ))
+    }
+
+    /// Upload a staged ciphertext file through this isolated account. The
+    /// caller owns the journal/manifest publication; this method only returns
+    /// the Telegram location acknowledged by the target transport.
+    pub(crate) async fn upload_path(
+        &self,
+        path: &Path,
+        file_name: &str,
+    ) -> Result<crate::manifest::TelegramLocation, TelegramTransportError> {
+        let client = self.client()?;
+        let storage_peer = self.storage_peer().await?;
+        let mut file = async_fs::File::open(path).await?;
+        let size = file.metadata().await?.len();
+        file.seek(std::io::SeekFrom::Start(0)).await?;
+        let uploaded = client
+            .upload_stream(&mut file, size as usize, file_name.to_string())
+            .await
+            .map_err(map_rpc_error)?;
+        let message = client
+            .send_message(
+                storage_peer,
+                grammers_client::message::InputMessage::new()
+                    .text("")
+                    .document(uploaded),
+            )
+            .await
+            .map_err(map_rpc_error)?;
+        let media = message.media().ok_or(TelegramTransportError::InvalidState(
+            "telegram upload returned no media",
+        ))?;
+        let document = match media {
+            grammers_client::media::Media::Document(document) => document,
+            _ => {
+                return Err(TelegramTransportError::InvalidState(
+                    "telegram upload returned non-document media",
+                ));
+            }
+        };
+        Ok(crate::manifest::TelegramLocation {
+            peer_id: self.bootstrap.telegram_storage_chat_id.clone(),
+            message_id: i64::from(message.id()),
+            document_id: Some(document.id().to_string()),
+        })
     }
 }
 
@@ -920,9 +993,15 @@ impl TelegramTransport {
 
 async fn open_transport_from_store(
     config: &AppConfig,
+    bootstrap_override: Option<&ResolvedTelegramBootstrap>,
 ) -> Result<TelegramTransport, TelegramTransportError> {
-    let store = crate::metadata::MetadataStore::open(config.metadata_path())?;
-    let bootstrap = config.resolve_telegram_bootstrap(&store)?;
+    let bootstrap = match bootstrap_override {
+        Some(bootstrap) => bootstrap.clone(),
+        None => {
+            let store = crate::metadata::MetadataStore::open(config.metadata_path())?;
+            config.resolve_telegram_bootstrap(&store)?
+        }
+    };
     TelegramTransport::open_with_bootstrap(config.clone(), bootstrap).await
 }
 

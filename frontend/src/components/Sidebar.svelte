@@ -1,12 +1,12 @@
 <script lang="ts">
   export let view: string;
   export let username: string;
-  export let onNavigate: (view: 'overview'|'buckets'|'transfers'|'recovery'|'telegram'|'users') => void;
+  export let onNavigate: (view: 'overview'|'buckets'|'transfers'|'recovery'|'telegram'|'accounts'|'users') => void;
   export let onLogout: () => void;
   export let busy = false;
   const links = [
     ['overview','Overview'],['buckets','Buckets'],['transfers','Transfers'],
-    ['recovery','Recovery'],['telegram','Telegram settings'],['users','Operators']
+    ['recovery','Recovery'],['telegram','Telegram settings'],['accounts','Accounts'],['users','Operators']
   ] as const;
 </script>
 <aside>
@@ -17,6 +17,7 @@
     {:else if id === 'transfers'}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v15"/><path d="m3 15 4 4 4-4"/><path d="M17 20V5"/><path d="m13 9 4-4 4 4"/></svg>
     {:else if id === 'recovery'}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 5v5h5"/></svg>
     {:else if id === 'telegram'}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="17" r="2" fill="currentColor" stroke="none"/></svg>
+    {:else if id === 'accounts'}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><path d="M16 11a3 3 0 0 1 4.5 2.6M16.5 19a5 5 0 0 1 4 0"/></svg>
     {:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><path d="M16 11a3 3 0 0 1 4.5 2.6M16.5 19a5 5 0 0 1 4 0"/></svg>{/if}
   </span><span>{label}</span></button>{/each}</nav>
   <footer><div class="account-card"><span class="account-avatar" aria-hidden="true">{username.slice(0, 1).toUpperCase() || 'A'}</span><div class="account-copy"><span class="account-kicker">Signed in as</span><strong>{username}</strong></div></div><button class="sign-out" type="button" on:click={onLogout} disabled={busy}><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19H10"/><path d="M13 8l4 4-4 4M9 12h8"/></svg><span>{busy ? 'Signing out…' : 'Sign out'}</span></button></footer>

@@ -320,6 +320,17 @@ Multi-user boundary for the next increment:
 - add two-account isolation, restart, and cross-account cleanup tests before
   changing the single-connection reservation into concurrent cleanup
 
+### Phase 11 - Account pool, replication, and maintenance (rc.6)
+
+- [x] Additive schema migration for multiple Telegram connections and durable
+  replication/re-chunk job state.
+- [x] One-time and automatic bucket replication controls with physical-copy and
+  access-only modes.
+- [x] Replica/access badges, account detail inspection, and round-robin chunk
+  reads across ready physical replicas.
+- [x] Bulk re-chunk queue with progress and temporary object locks.
+- [x] Browser and migration coverage for the operator paths.
+
 Remaining Phase 10 work:
 
 - release-grade deterministic fault/restart coverage now includes the persisted

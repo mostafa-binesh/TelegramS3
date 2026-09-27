@@ -17,6 +17,8 @@ export interface SessionState {
 export interface BucketInfo {
   name: string;
   created_at: string;
+  replica_accounts?: number;
+  access_accounts?: number;
 }
 
 export interface BucketsState {
@@ -46,6 +48,9 @@ export interface ObjectEntry {
   upload_parts_done?: number;
   upload_parts_total?: number;
   upload_error?: string | null;
+  replica_accounts?: number;
+  access_accounts?: number;
+  rechunking?: boolean;
 }
 
 export interface SearchResult extends ObjectEntry {
@@ -281,4 +286,67 @@ export interface TransferJob {
 export interface MultipartUpload {
   upload_id: string; bucket: string; key: string; state: string;
   parts_done: number; parts_total: number; updated_at: number;
+}
+
+export interface AccountInfo {
+  id: string;
+  label: string;
+  phone?: string | null;
+  state: string;
+  storage_chat_id?: string | null;
+  replica_objects: number;
+  access_objects: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ReplicationJob {
+  id: string;
+  source_account_id: string;
+  target_account_id: string;
+  bucket: string;
+  mode: 'one_time' | 'automatic' | string;
+  access_mode: 'replica' | 'access' | string;
+  state: string;
+  objects_total: number;
+  objects_done: number;
+  chunks_total: number;
+  chunks_done: number;
+  bytes_done: number;
+  next_run?: number | null;
+  last_run?: number | null;
+  error?: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface RechunkJob {
+  id: string;
+  bucket: string;
+  key: string;
+  object_id: string;
+  new_chunk_size: number;
+  state: string;
+  chunks_total: number;
+  chunks_done: number;
+  bytes_done: number;
+  error?: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ReplicaInfo {
+  object_id: string;
+  bucket: string;
+  key: string;
+  chunk_order: number;
+  account_id: string;
+  account_label: string;
+  mode: string;
+  peer_id: string;
+  message_id: number;
+  document_id?: string | null;
+  state: string;
+  error?: string | null;
+  updated_at: number;
 }

@@ -57,6 +57,29 @@ pub struct ChunkRef {
     pub source_object_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_chunk_order: Option<u32>,
+    /// Alternate Telegram locations for this chunk.  The primary location
+    /// above remains the compatibility path for manifests written before
+    /// replica support was introduced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replicas: Vec<ChunkReplica>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkReplica {
+    pub account_id: String,
+    #[serde(default)]
+    pub mode: ReplicaMode,
+    pub telegram_peer_id: String,
+    pub telegram_message_id: i64,
+    pub telegram_document_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicaMode {
+    #[default]
+    Replica,
+    Access,
 }
 
 impl ChunkRef {
@@ -129,6 +152,7 @@ impl ObjectManifest {
                 telegram_document_id: None,
                 source_object_id: None,
                 source_chunk_order: None,
+                replicas: Vec::new(),
             }]
         };
         Self {
@@ -211,6 +235,17 @@ impl ObjectManifest {
             if chunk.references_remote_payload() && chunk.telegram_message_id <= 0 {
                 return Err("referenced chunk requires a durable Telegram message".to_string());
             }
+            for replica in &chunk.replicas {
+                if replica.account_id.trim().is_empty() {
+                    return Err("chunk replica account_id is required".to_string());
+                }
+                if replica.telegram_peer_id.trim().is_empty() {
+                    return Err("chunk replica telegram_peer_id is required".to_string());
+                }
+                if replica.telegram_message_id <= 0 {
+                    return Err("chunk replica requires a durable Telegram message".to_string());
+                }
+            }
             if chunk.order != index as u32 {
                 return Err("chunk order must be contiguous".to_string());
             }
@@ -280,5 +315,51 @@ mod tests {
                 .expect("deserialize");
         assert!(!restored.is_expired(expiry - time::Duration::seconds(1)));
         assert!(restored.is_expired(expiry));
+    }
+
+    #[test]
+    fn replica_locations_round_trip_without_breaking_legacy_shape() {
+        let mut manifest = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "bucket".to_string(),
+            key: "key.txt".to_string(),
+            content_length: 12,
+            content_type: "text/plain".to_string(),
+            checksum_algorithm: "sha256".to_string(),
+            whole_object: "deadbeef".to_string(),
+            peer_id: "peer".to_string(),
+            message_id: 42,
+        });
+        manifest.chunks[0].replicas.push(ChunkReplica {
+            account_id: "backup".to_string(),
+            mode: ReplicaMode::Replica,
+            telegram_peer_id: "backup-peer".to_string(),
+            telegram_message_id: 99,
+            telegram_document_id: Some("doc-99".to_string()),
+        });
+        let restored: ObjectManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(restored.chunks[0].replicas[0].account_id, "backup");
+        assert!(restored.validate().is_ok());
+        let legacy = serde_json::to_value(&manifest).expect("value");
+        let object = legacy.as_object().expect("object");
+        let mut legacy = object.clone();
+        legacy.remove("chunks");
+        // The optional field is omitted when empty on newly-created manifests.
+        let empty = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "bucket".to_string(),
+            key: "empty.txt".to_string(),
+            content_length: 0,
+            content_type: "text/plain".to_string(),
+            checksum_algorithm: "sha256".to_string(),
+            whole_object: "deadbeef".to_string(),
+            peer_id: "peer".to_string(),
+            message_id: 42,
+        });
+        assert!(
+            !serde_json::to_string(&empty)
+                .expect("serialize")
+                .contains("replicas")
+        );
     }
 }
