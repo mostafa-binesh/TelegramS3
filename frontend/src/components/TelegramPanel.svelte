@@ -31,6 +31,9 @@
   export let downloadPrefetchChunks = 1;
   export let downloadPrefetchChunksMin = 0;
   export let downloadPrefetchChunksMax = 4;
+  export let downloadFailoverRetries = 1;
+  export let downloadFailoverRetriesMin = 0;
+  export let downloadFailoverRetriesMax = 8;
   export let recoveryVerifyEnabled = true;
   export let recoveryVerifyIntervalSecs = 300;
   export let recoveryVerifyIntervalMin = 60;
@@ -73,13 +76,16 @@
   $: downloadPrefetchChunksValid = Number.isInteger(Number(downloadPrefetchChunks))
     && Number(downloadPrefetchChunks) >= downloadPrefetchChunksMin
     && Number(downloadPrefetchChunks) <= downloadPrefetchChunksMax;
+  $: downloadFailoverRetriesValid = Number.isInteger(Number(downloadFailoverRetries))
+    && Number(downloadFailoverRetries) >= downloadFailoverRetriesMin
+    && Number(downloadFailoverRetries) <= downloadFailoverRetriesMax;
   $: recoveryVerifyIntervalValid = Number.isInteger(Number(recoveryVerifyIntervalSecs))
     && Number(recoveryVerifyIntervalSecs) >= recoveryVerifyIntervalMin
     && Number(recoveryVerifyIntervalSecs) <= recoveryVerifyIntervalMax;
   $: recoveryVerifyChunksValid = Number.isInteger(Number(recoveryVerifyChunks))
     && Number(recoveryVerifyChunks) >= recoveryVerifyChunksMin
     && Number(recoveryVerifyChunks) <= recoveryVerifyChunksMax;
-  $: recoverySettingsValid = downloadPrefetchChunksValid && recoveryVerifyIntervalValid && recoveryVerifyChunksValid;
+  $: recoverySettingsValid = downloadPrefetchChunksValid && downloadFailoverRetriesValid && recoveryVerifyIntervalValid && recoveryVerifyChunksValid;
   $: phoneConfirmationMatches = Boolean(telegramAccountPhone)
     && phoneConfirmation.trim() === telegramAccountPhone.trim();
 
@@ -161,6 +167,13 @@
           {#each [{label: 'Off', value: 0}, {label: '1 ahead', value: 1}, {label: '2 ahead', value: 2}, {label: '4 ahead', value: 4}] as preset}<button class:chosen={Number(downloadPrefetchChunks) === preset.value} type="button" on:click={() => downloadPrefetchChunks = preset.value}>{preset.label}</button>{/each}
         </div>
         <p id="download-prefetch-help" class="range-help">Allowed range: {downloadPrefetchChunksMin}–{downloadPrefetchChunksMax} extra chunks. Higher values use more parallel Telegram requests and per-stream memory.</p>
+        <div class="verification-heading"><div><span class="eyebrow">Account failover</span><h3>Retry before switching</h3></div><span class="policy-badge">{downloadFailoverRetries} retry{Number(downloadFailoverRetries) === 1 ? '' : 'ies'}</span></div>
+        <p class="policy-description">If a selected Telegram account cannot provide a chunk, retry the complete read before moving to the next enabled replica account. Each attempt still uses the normal Telegram retry and recovery window.</p>
+        <label class="chunk-input-label"><span>Retries before account failover</span><div class="chunk-input-wrap"><input bind:value={downloadFailoverRetries} aria-label="Retries before account failover" type="number" min={downloadFailoverRetriesMin} max={downloadFailoverRetriesMax} step="1" inputmode="numeric" aria-describedby="download-failover-help" /><span>retries</span></div></label>
+        <div class="preset-grid verification-presets" aria-label="Account failover retry presets">
+          {#each [0, 1, 2, 4, 8] as preset}<button class:chosen={Number(downloadFailoverRetries) === preset} type="button" on:click={() => downloadFailoverRetries = preset}>{preset}</button>{/each}
+        </div>
+        <p id="download-failover-help" class="range-help">Allowed range: {downloadFailoverRetriesMin}–{downloadFailoverRetriesMax}. Zero switches after the first failed complete attempt; one allows two attempts on the selected account.</p>
         <div class="verification-heading"><div><span class="eyebrow">Recovery verifier</span><h3>Random health checks</h3></div><span class:disabled={!recoveryVerifyEnabled} class="policy-badge">{recoveryVerifyEnabled ? `${recoveryVerifyChunks} chunk${Number(recoveryVerifyChunks) === 1 ? '' : 's'} / file` : 'Disabled'}</span></div>
         <label class="verification-toggle"><input bind:checked={recoveryVerifyEnabled} type="checkbox" aria-describedby="recovery-verify-help" /><span><strong>Enable automatic recovery verification</strong><small>When disabled, the server will not schedule remote chunk checks or quarantine objects from verifier scans.</small></span></label>
         <p class="policy-description">When enabled, the server downloads a fresh random sample from every healthy committed object at each interval and verifies its checksum. It never re-uploads a failed chunk automatically.</p>
@@ -174,7 +187,7 @@
         <p id="recovery-verify-help" class="range-help">{#if recoveryVerifyEnabled}Interval: {recoveryVerifyIntervalMin}–{recoveryVerifyIntervalMax} seconds. Sample count: {recoveryVerifyChunksMin}–{recoveryVerifyChunksMax}. A missing or checksum-bad sampled chunk quarantines the object for recovery; a temporary Telegram/network error is retried on a later scan.{:else}The verifier is disabled. Existing interval and sample values are preserved and will resume when you enable it again.{/if}</p>
         {#if storageSettingsError}<p class="storage-message message-error" role="alert">{storageSettingsError}</p>{/if}
         {#if storageSettingsMessage}<p class="storage-message" role="status">✓ {storageSettingsMessage}</p>{/if}
-        <div class="policy-actions"><span class:valid={draftChunkSizeValid && recoverySettingsValid} class="draft-preview">{draftChunkSizeValid && recoverySettingsValid ? `${downloadPrefetchChunks === 0 ? 'Serial downloads' : `${downloadPrefetchChunks} chunk${Number(downloadPrefetchChunks) === 1 ? '' : 's'} prefetched`} · ${recoveryVerifyEnabled ? `checks ${recoveryVerifyChunks} random chunk${Number(recoveryVerifyChunks) === 1 ? '' : 's'} every ${recoveryVerifyIntervalSecs}s` : 'verification disabled'}` : 'Enter values in the allowed ranges'}</span><button class="primary" type="submit" disabled={storageSettingsBusy || !draftChunkSizeValid || !recoverySettingsValid}>{storageSettingsBusy ? 'Applying…' : 'Apply storage policy'}</button></div>
+        <div class="policy-actions"><span class:valid={draftChunkSizeValid && recoverySettingsValid} class="draft-preview">{draftChunkSizeValid && recoverySettingsValid ? `${downloadPrefetchChunks === 0 ? 'Serial downloads' : `${downloadPrefetchChunks} chunk${Number(downloadPrefetchChunks) === 1 ? '' : 's'} prefetched`} · ${downloadFailoverRetries} failover retr${Number(downloadFailoverRetries) === 1 ? 'y' : 'ies'} · ${recoveryVerifyEnabled ? `checks ${recoveryVerifyChunks} random chunk${Number(recoveryVerifyChunks) === 1 ? '' : 's'} every ${recoveryVerifyIntervalSecs}s` : 'verification disabled'}` : 'Enter values in the allowed ranges'}</span><button class="primary" type="submit" disabled={storageSettingsBusy || !draftChunkSizeValid || !recoverySettingsValid}>{storageSettingsBusy ? 'Applying…' : 'Apply storage policy'}</button></div>
       </form>
 
       <aside class="policy-card policy-impact">

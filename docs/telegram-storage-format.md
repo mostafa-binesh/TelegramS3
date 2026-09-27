@@ -40,7 +40,7 @@ Each object is represented by:
 3. a local index row and journal entry
 4. optional multipart session and part rows while an upload is in progress
 
-Schema v18 additionally stores an account registry, durable replication jobs,
+Schema v19 additionally stores an account registry, durable replication jobs,
 selected-object replication scopes, replica/access locations, and re-chunk
 locks/jobs. Account rows include `download_enabled`, an additive read-selection
 policy that defaults to enabled for existing data. The `object_keys_json` migration is additive: an empty array keeps
@@ -52,6 +52,12 @@ manifest is replaced. `ChunkRef.replicas` is optional so
 schema-v2 manifests remain readable; each location identifies its account,
 mode (`replica` or `access`), peer, message, and document. The primary chunk
 location remains authoritative for legacy manifests.
+New replica locations also persist `chunk_size`, the exact canonical chunk size
+whose encrypted bytes they represent. A non-zero replica value that differs
+from its canonical `ChunkRef.size` is exposed by the admin API as a replica
+layout mismatch and rendered as a yellow account badge. Older replica rows
+without this field remain readable and are treated as unknown rather than
+incorrect.
 
 Replication copies encrypted chunk bytes, preserving the object checksum and
 encryption identity. Access-only replication records the source location and
@@ -72,6 +78,12 @@ The shared reader filters primary and replica locations by the account download
 policy before its deterministic round-robin selection. If every location is
 disabled, the read fails closed with an unavailable-source error; no account
 policy can redirect cleanup through another credential.
+When a selected eligible location fails, the reader makes the configured
+number of complete retries from `telegram_download_failover_retries` (default
+`1`, range `0–8`) before moving to the next eligible location. This policy is
+stored in `app_settings`, survives restart, and is independent of the normal
+Telegram transport retry count. A chunk is still fetched, decrypted, and
+verified as one unit; it is not split between accounts.
 
 ## Default Chunk Size
 

@@ -33,6 +33,11 @@ signal, even though the handler already supported single byte ranges.
   without changing the object format.
 - Log exhausted object-stream chunk failures with object, chunk, and Telegram
   message identifiers without changing object visibility or recovery state.
+- If a manifest has eligible replica locations, apply the database-backed
+  `telegram_download_failover_retries` policy to the selected account before
+  rotating to the next location. A retry is a complete chunk read attempt and
+  retains the same decrypt/checksum boundary; no partial chunk is assembled
+  from different accounts.
 
 ## Consequences
 
@@ -45,5 +50,10 @@ signal, even though the handler already supported single byte ranges.
   delays can extend the response duration. The stream recovery window is
   bounded at 120 seconds; missing messages, integrity failures, and invalid
   configuration still fail immediately.
-- No metadata migration is required. Existing manifests and chunk references
-  remain unchanged, and integrity failures still fail closed for recovery.
+- The original single-account stream policy requires no metadata migration.
+  Existing manifests and chunk references remain unchanged, and integrity
+  failures still fail closed for recovery.
+
+The later account-pool extension stores this failover policy in schema v19;
+legacy manifests without replica chunk-size metadata remain readable and are
+not automatically classified as layout mismatches.

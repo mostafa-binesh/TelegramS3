@@ -416,6 +416,7 @@ pub struct ObjectFormatService {
     data_dir: PathBuf,
     chunk_size: Arc<RwLock<u64>>,
     download_prefetch_chunks: Arc<RwLock<u64>>,
+    download_failover_retries: Arc<RwLock<u64>>,
     recovery_verify_enabled: Arc<RwLock<bool>>,
     recovery_verify_interval_secs: Arc<RwLock<u64>>,
     recovery_verify_chunks: Arc<RwLock<u64>>,
@@ -757,6 +758,14 @@ impl ObjectFormatService {
                 value
             }
         };
+        let download_failover_retries = match metadata.telegram_download_failover_retries()? {
+            Some(value) => AppConfig::validate_download_failover_retries(value)?,
+            None => {
+                let value = crate::config::DEFAULT_DOWNLOAD_FAILOVER_RETRIES;
+                metadata.set_telegram_download_failover_retries(value)?;
+                value
+            }
+        };
         let recovery_verify_interval_secs =
             match metadata.telegram_recovery_verify_interval_secs()? {
                 Some(value) => AppConfig::validate_recovery_verify_interval_secs(value)?,
@@ -788,6 +797,7 @@ impl ObjectFormatService {
             config.data_dir(),
             chunk_size,
             download_prefetch_chunks,
+            download_failover_retries,
             storage_chat_id,
             ObjectEncryption::from_master_key(&master_key),
         )?;
@@ -801,12 +811,14 @@ impl ObjectFormatService {
         Ok(service)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         metadata: MetadataStore,
         transport_manager: std::sync::Arc<TelegramTransportManager>,
         data_dir: impl AsRef<Path>,
         chunk_size: u64,
         download_prefetch_chunks: u64,
+        download_failover_retries: u64,
         storage_chat_id: String,
         encryption: ObjectEncryption,
     ) -> Result<Self, ObjectFormatError> {
@@ -825,6 +837,7 @@ impl ObjectFormatService {
             data_dir,
             chunk_size: Arc::new(RwLock::new(chunk_size)),
             download_prefetch_chunks: Arc::new(RwLock::new(download_prefetch_chunks)),
+            download_failover_retries: Arc::new(RwLock::new(download_failover_retries)),
             recovery_verify_enabled: Arc::new(RwLock::new(
                 crate::config::DEFAULT_RECOVERY_VERIFY_ENABLED,
             )),
@@ -1014,6 +1027,23 @@ impl ObjectFormatService {
             .download_prefetch_chunks
             .write()
             .expect("download prefetch chunks lock") = chunks;
+        Ok(())
+    }
+
+    pub fn download_failover_retries(&self) -> u64 {
+        *self
+            .download_failover_retries
+            .read()
+            .expect("download failover retries lock")
+    }
+
+    pub fn set_download_failover_retries(&self, retries: u64) -> Result<(), ObjectFormatError> {
+        AppConfig::validate_download_failover_retries(retries)
+            .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+        *self
+            .download_failover_retries
+            .write()
+            .expect("download failover retries lock") = retries;
         Ok(())
     }
 
@@ -3594,7 +3624,32 @@ async fn read_stream_span(
                 .unwrap_or(false)
         })
         .collect::<Vec<_>>();
-    let candidate_count = usize::from(primary_enabled) + enabled_replicas.len();
+    let mut candidates = Vec::with_capacity(usize::from(primary_enabled) + enabled_replicas.len());
+    if primary_enabled {
+        candidates.push((
+            primary_account
+                .clone()
+                .unwrap_or_else(|| "primary".to_string()),
+            TelegramLocation {
+                peer_id: chunk.telegram_peer_id.clone(),
+                message_id: chunk.telegram_message_id,
+                document_id: chunk.telegram_document_id.clone(),
+            },
+            true,
+        ));
+    }
+    candidates.extend(enabled_replicas.iter().map(|replica| {
+        (
+            replica.account_id.clone(),
+            TelegramLocation {
+                peer_id: replica.telegram_peer_id.clone(),
+                message_id: replica.telegram_message_id,
+                document_id: replica.telegram_document_id.clone(),
+            },
+            false,
+        )
+    }));
+    let candidate_count = candidates.len();
     if candidate_count == 0 {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -3602,62 +3657,73 @@ async fn read_stream_span(
         ));
     }
     let selected = (span.order as usize) % candidate_count;
-    let (location, selected_transport) = if primary_enabled && selected == 0 {
-        (
-            TelegramLocation {
-                peer_id: chunk.telegram_peer_id.clone(),
-                message_id: chunk.telegram_message_id,
-                document_id: chunk.telegram_document_id.clone(),
-            },
-            None,
-        )
-    } else {
-        let replica_index = selected.saturating_sub(usize::from(primary_enabled));
-        let replica = enabled_replicas[replica_index];
-        let manager = object_format
-            .account_manager(&replica.account_id)
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        let transport = manager
-            .current()
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        (
-            TelegramLocation {
-                peer_id: replica.telegram_peer_id.clone(),
-                message_id: replica.telegram_message_id,
-                document_id: replica.telegram_document_id.clone(),
-            },
-            Some(transport),
-        )
-    };
-    let message_id = i32::try_from(location.message_id).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("telegram message id out of range for chunk {}", span.order),
-        )
-    })?;
-    let telegram = match selected_transport {
-        Some(transport) => {
-            object_format
-                .download_message_bytes_for_stream_from_transport(transport, message_id)
-                .await
-        }
-        None => {
+    // The configured value is the number of complete read attempts allowed
+    // for the selected account before moving to the next eligible account.
+    // Each attempt still uses the normal Telegram retry/recovery window.
+    let attempts_per_account = object_format.download_failover_retries().saturating_add(1) as usize;
+    let total_attempts = attempts_per_account.saturating_mul(candidate_count);
+    let mut telegram_result = None;
+    let mut last_error = None;
+    for attempt in 0..total_attempts {
+        let candidate_index = account_failover_candidate_index(
+            selected,
+            candidate_count,
+            attempts_per_account,
+            attempt,
+        );
+        let (account_id, location, is_primary) = &candidates[candidate_index];
+        let message_id = match i32::try_from(location.message_id) {
+            Ok(message_id) => message_id,
+            Err(error) => {
+                last_error = Some(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "telegram message id out of range for chunk {}: {error}",
+                        span.order
+                    ),
+                ));
+                continue;
+            }
+        };
+        let result = if *is_primary {
             object_format
                 .download_message_bytes_for_stream(message_id)
                 .await
+                .map_err(|error| io::Error::other(error.to_string()))
+        } else {
+            match object_format.account_manager(account_id).await {
+                Ok(manager) => match manager.current().await {
+                    Ok(transport) => object_format
+                        .download_message_bytes_for_stream_from_transport(transport, message_id)
+                        .await
+                        .map_err(|error| io::Error::other(error.to_string())),
+                    Err(error) => Err(io::Error::other(error.to_string())),
+                },
+                Err(error) => Err(io::Error::other(error.to_string())),
+            }
+        };
+        match result {
+            Ok(telegram) => {
+                telegram_result = Some(telegram);
+                break;
+            }
+            Err(error) => {
+                warn!(
+                    object_id = %manifest.object_id,
+                    chunk_order = span.order,
+                    telegram_message_id = message_id,
+                    account_id,
+                    attempt = attempt + 1,
+                    attempts = total_attempts,
+                    error = %error,
+                    "object stream chunk read failed; trying the configured account failover policy"
+                );
+                last_error = Some(error);
+            }
         }
     }
-    .map_err(|error| {
-        warn!(
-            object_id = %manifest.object_id,
-            chunk_order = span.order,
-            telegram_message_id = message_id,
-            error = %error,
-            "object stream chunk failed"
-        );
-        io::Error::other(error.to_string())
+    let telegram = telegram_result.ok_or_else(|| {
+        last_error.unwrap_or_else(|| io::Error::other("all Telegram account read attempts failed"))
     })?;
     let telegram_bytes = telegram.bytes.len() as u64;
     let telegram_retries = telegram.retries;
@@ -3709,6 +3775,15 @@ async fn read_stream_span(
         decrypt_us,
         verify_us,
     })
+}
+
+fn account_failover_candidate_index(
+    selected: usize,
+    candidate_count: usize,
+    attempts_per_account: usize,
+    attempt: usize,
+) -> usize {
+    (selected + attempt / attempts_per_account.max(1)) % candidate_count
 }
 
 struct ReadSpanResult {
@@ -3924,6 +3999,16 @@ mod tests {
         assert_eq!(plan.chunks.len(), 5);
         assert_eq!(plan.chunks[0].offset, 0);
         assert_eq!(plan.chunks[4].size, 1);
+    }
+
+    #[test]
+    fn account_failover_retries_exhaust_one_account_before_rotation() {
+        let attempts = (0..6)
+            .map(|attempt| account_failover_candidate_index(1, 3, 2, attempt))
+            .collect::<Vec<_>>();
+        assert_eq!(attempts, vec![1, 1, 2, 2, 0, 0]);
+        assert_eq!(account_failover_candidate_index(0, 2, 1, 0), 0);
+        assert_eq!(account_failover_candidate_index(0, 2, 1, 1), 1);
     }
 
     #[test]

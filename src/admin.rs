@@ -296,6 +296,7 @@ struct ObjectEntryWire {
     location: Option<String>,
     replica_accounts: u64,
     access_accounts: u64,
+    replica_chunk_size_mismatch: bool,
     rechunking: bool,
 }
 
@@ -339,6 +340,7 @@ struct BucketEntryWire {
     created_at: String,
     replica_accounts: u64,
     access_accounts: u64,
+    replica_chunk_size_mismatch: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1164,29 +1166,37 @@ impl AdminUiState {
         (replica.len() as u64, access.len() as u64)
     }
 
-    fn bucket_replica_summary(&self) -> std::collections::HashMap<String, (u64, u64)> {
+    fn replica_chunk_size_mismatch(&self, manifest: &crate::manifest::ObjectManifest) -> bool {
+        manifest.chunks.iter().any(|chunk| {
+            chunk
+                .replicas
+                .iter()
+                .any(|replica| replica.chunk_size != 0 && replica.chunk_size != chunk.size)
+        })
+    }
+
+    fn bucket_replica_summary(&self) -> std::collections::HashMap<String, (u64, u64, bool)> {
         let mut by_bucket: std::collections::HashMap<
             String,
             (
                 std::collections::HashSet<String>,
                 std::collections::HashSet<String>,
+                bool,
             ),
         > = std::collections::HashMap::new();
         if let Ok(Some(active)) = self.store().active_connection_id()
             && let Ok(buckets) = self.object_format.list_buckets()
         {
             for bucket in buckets {
-                if self
-                    .object_format
-                    .list_bucket_manifests(&bucket.name, None)
-                    .map(|manifests| !manifests.is_empty())
-                    .unwrap_or(false)
+                if let Ok(manifests) = self.object_format.list_bucket_manifests(&bucket.name, None)
+                    && !manifests.is_empty()
                 {
-                    by_bucket
-                        .entry(bucket.name)
-                        .or_default()
-                        .0
-                        .insert(active.clone());
+                    let mismatch = manifests
+                        .iter()
+                        .any(|manifest| self.replica_chunk_size_mismatch(manifest));
+                    let entry = by_bucket.entry(bucket.name).or_default();
+                    entry.0.insert(active.clone());
+                    entry.2 |= mismatch;
                 }
             }
         }
@@ -1202,8 +1212,11 @@ impl AdminUiState {
         }
         by_bucket
             .into_iter()
-            .map(|(bucket, (replica, access))| {
-                (bucket, (replica.len() as u64, access.len() as u64))
+            .map(|(bucket, (replica, access, mismatch))| {
+                (
+                    bucket,
+                    (replica.len() as u64, access.len() as u64, mismatch),
+                )
             })
             .collect()
     }
@@ -1261,6 +1274,10 @@ impl AdminUiState {
                     .get(&bucket.name)
                     .map(|value| value.1)
                     .unwrap_or(0),
+                replica_chunk_size_mismatch: replica_summary
+                    .get(&bucket.name)
+                    .map(|value| value.2)
+                    .unwrap_or(false),
             })
             .collect::<Vec<_>>();
         wire.sort_by(|a, b| {
@@ -1366,6 +1383,7 @@ impl AdminUiState {
                     self.object_replica_summary(manifest.object_id);
                 object.replica_accounts = replica_accounts;
                 object.access_accounts = access_accounts;
+                object.replica_chunk_size_mismatch = self.replica_chunk_size_mismatch(&manifest);
                 object.rechunking = self
                     .store()
                     .object_rechunk_locked(manifest.object_id)
@@ -1421,6 +1439,7 @@ impl AdminUiState {
                     created_at: rfc3339(created.created_at),
                     replica_accounts: 0,
                     access_accounts: 0,
+                    replica_chunk_size_mismatch: false,
                 },
             ),
             Err(error) => bucket_error_response(&error),
@@ -1589,6 +1608,7 @@ impl AdminUiState {
                 self.object_replica_summary(manifest.object_id);
             object.replica_accounts = replica_accounts;
             object.access_accounts = access_accounts;
+            object.replica_chunk_size_mismatch = self.replica_chunk_size_mismatch(manifest);
             object.rechunking = self
                 .store()
                 .object_rechunk_locked(manifest.object_id)
@@ -2434,6 +2454,7 @@ impl AdminUiState {
         let StorageSettingsRequest {
             chunk_size,
             download_prefetch_chunks,
+            download_failover_retries,
             recovery_verify_enabled,
             recovery_verify_interval_secs,
             recovery_verify_chunks,
@@ -2452,6 +2473,11 @@ impl AdminUiState {
         let prefetch_chunks = download_prefetch_chunks
             .unwrap_or_else(|| self.object_format.download_prefetch_chunks());
         if let Err(error) = AppConfig::validate_download_prefetch_chunks(prefetch_chunks) {
+            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+        let failover_retries = download_failover_retries
+            .unwrap_or_else(|| self.object_format.download_failover_retries());
+        if let Err(error) = AppConfig::validate_download_failover_retries(failover_retries) {
             return json_error(StatusCode::BAD_REQUEST, &error.to_string());
         }
         let interval_secs = recovery_verify_interval_secs
@@ -2481,6 +2507,18 @@ impl AdminUiState {
         if let Err(error) = self
             .object_format
             .set_download_prefetch_chunks(prefetch_chunks)
+        {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self
+            .store()
+            .set_telegram_download_failover_retries(failover_retries)
+        {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self
+            .object_format
+            .set_download_failover_retries(failover_retries)
         {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
         }
@@ -2518,6 +2556,9 @@ impl AdminUiState {
             download_prefetch_chunks: self.object_format.download_prefetch_chunks(),
             min_download_prefetch_chunks: crate::config::MIN_DOWNLOAD_PREFETCH_CHUNKS,
             max_download_prefetch_chunks: crate::config::MAX_DOWNLOAD_PREFETCH_CHUNKS,
+            download_failover_retries: self.object_format.download_failover_retries(),
+            min_download_failover_retries: crate::config::MIN_DOWNLOAD_FAILOVER_RETRIES,
+            max_download_failover_retries: crate::config::MAX_DOWNLOAD_FAILOVER_RETRIES,
             recovery_verify_enabled: self.object_format.recovery_verifier_enabled(),
             recovery_verify_interval_secs: self.object_format.recovery_verify_interval_secs(),
             min_recovery_verify_interval_secs: crate::config::MIN_RECOVERY_VERIFY_INTERVAL_SECS,
@@ -3200,6 +3241,7 @@ fn object_to_wire(
         location,
         replica_accounts: 0,
         access_accounts: 0,
+        replica_chunk_size_mismatch: false,
         rechunking: false,
     }
 }
@@ -3586,6 +3628,7 @@ struct TelegramSettingsWire {
 struct StorageSettingsRequest {
     chunk_size: Option<u64>,
     download_prefetch_chunks: Option<u64>,
+    download_failover_retries: Option<u64>,
     recovery_verify_enabled: Option<bool>,
     recovery_verify_interval_secs: Option<u64>,
     recovery_verify_chunks: Option<u64>,
@@ -3600,6 +3643,9 @@ struct StorageSettingsWire {
     download_prefetch_chunks: u64,
     min_download_prefetch_chunks: u64,
     max_download_prefetch_chunks: u64,
+    download_failover_retries: u64,
+    min_download_failover_retries: u64,
+    max_download_failover_retries: u64,
     recovery_verify_enabled: bool,
     recovery_verify_interval_secs: u64,
     min_recovery_verify_interval_secs: u64,

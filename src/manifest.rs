@@ -69,9 +69,17 @@ pub struct ChunkReplica {
     pub account_id: String,
     #[serde(default)]
     pub mode: ReplicaMode,
+    /// Size of the source chunk represented by this replica. Older manifests
+    /// omit it and therefore report an unknown layout until rebuilt.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub chunk_size: u64,
     pub telegram_peer_id: String,
     pub telegram_message_id: i64,
     pub telegram_document_id: Option<String>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -332,6 +340,7 @@ mod tests {
         manifest.chunks[0].replicas.push(ChunkReplica {
             account_id: "backup".to_string(),
             mode: ReplicaMode::Replica,
+            chunk_size: 12,
             telegram_peer_id: "backup-peer".to_string(),
             telegram_message_id: 99,
             telegram_document_id: Some("doc-99".to_string()),

@@ -1,6 +1,6 @@
 use super::rows::{count_rows, parse_rfc3339_timestamp, timestamp_now};
 use super::{MetadataError, MetadataStatus, MetadataStore, SCHEMA_VERSION};
-use crate::config::DEFAULT_DOWNLOAD_PREFETCH_CHUNKS;
+use crate::config::{DEFAULT_DOWNLOAD_FAILOVER_RETRIES, DEFAULT_DOWNLOAD_PREFETCH_CHUNKS};
 use rusqlite::{Connection, OptionalExtension, params};
 
 impl MetadataStore {
@@ -94,6 +94,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_connection_removal_schema(connection)?;
         ensure_share_schema(connection)?;
         ensure_download_prefetch_setting(connection)?;
+        ensure_download_failover_setting(connection)?;
         ensure_traffic_totals_schema(connection)?;
         ensure_multi_account_schema(connection)?;
         ensure_account_download_policy(connection)?;
@@ -361,6 +362,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_connection_removal_schema(connection)?;
     ensure_share_schema(connection)?;
     ensure_download_prefetch_setting(connection)?;
+    ensure_download_failover_setting(connection)?;
     ensure_traffic_totals_schema(connection)?;
     ensure_multi_account_schema(connection)?;
     ensure_account_download_policy(connection)?;
@@ -579,6 +581,18 @@ fn ensure_download_prefetch_setting(connection: &mut Connection) -> Result<(), M
         params![
             super::settings::DOWNLOAD_PREFETCH_CHUNKS_SETTING,
             DEFAULT_DOWNLOAD_PREFETCH_CHUNKS.to_string(),
+            timestamp_now()?
+        ],
+    )?;
+    Ok(())
+}
+
+fn ensure_download_failover_setting(connection: &mut Connection) -> Result<(), MetadataError> {
+    connection.execute(
+        "INSERT OR IGNORE INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)",
+        params![
+            super::settings::DOWNLOAD_FAILOVER_RETRIES_SETTING,
+            DEFAULT_DOWNLOAD_FAILOVER_RETRIES.to_string(),
             timestamp_now()?
         ],
     )?;
@@ -1163,6 +1177,50 @@ mod tests {
                 Ok(())
             })
             .expect("columns");
+    }
+
+    #[test]
+    fn migration_from_version_eighteen_adds_download_failover_setting() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("metadata.sqlite");
+        {
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE schema_version (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        version INTEGER NOT NULL,
+                        applied_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_version (id, version, applied_at)
+                    VALUES (1, 18, '2026-09-28T00:00:00Z');
+                    CREATE TABLE app_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO app_settings(key, value, updated_at)
+                    VALUES ('telegram_download_prefetch_chunks', '2', '2026-09-28T00:00:00Z');
+                    "#,
+                )
+                .expect("seed");
+        }
+
+        let store = MetadataStore::open(&path).expect("migrate");
+        assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+        assert_eq!(
+            store
+                .telegram_download_failover_retries()
+                .expect("failover setting"),
+            Some(1)
+        );
+        assert_eq!(
+            store
+                .telegram_download_prefetch_chunks()
+                .expect("prefetch setting"),
+            Some(2)
+        );
     }
 
     #[test]

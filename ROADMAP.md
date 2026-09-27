@@ -320,7 +320,7 @@ Multi-user boundary for the next increment:
 - add two-account isolation, restart, and cross-account cleanup tests before
   changing the single-connection reservation into concurrent cleanup
 
-### Phase 11 - Account pool, replication, and maintenance (rc.10)
+### Phase 11 - Account pool, replication, and maintenance (rc.11)
 
 - [x] Additive schema migration for multiple Telegram connections and durable
   replication/re-chunk job state.
@@ -350,6 +350,12 @@ Multi-user boundary for the next increment:
 - [x] Added schema v18 durable re-chunk replica policy and target snapshots;
   operators can rebuild prior replica/access targets or choose primary-only
   re-chunking with explicit read-availability consequences.
+- [x] Added replica source chunk-size metadata and object/bucket mismatch
+  reporting, with a yellow account badge when a persisted replica layout differs
+  from the canonical manifest layout; legacy unknown values remain readable.
+- [x] Added schema v19 database-backed account failover retries (`0–8`, default
+  `1`) with complete per-chunk retries before rotation to the next enabled
+  replica account, plus settings and browser coverage.
 
 Remaining Phase 10 work:
 

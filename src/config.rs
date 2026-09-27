@@ -13,6 +13,9 @@ pub const DEFAULT_CHUNK_SIZE: u64 = 1_048_576;
 pub const MIN_DOWNLOAD_PREFETCH_CHUNKS: u64 = 0;
 pub const MAX_DOWNLOAD_PREFETCH_CHUNKS: u64 = 4;
 pub const DEFAULT_DOWNLOAD_PREFETCH_CHUNKS: u64 = 1;
+pub const MIN_DOWNLOAD_FAILOVER_RETRIES: u64 = 0;
+pub const MAX_DOWNLOAD_FAILOVER_RETRIES: u64 = 8;
+pub const DEFAULT_DOWNLOAD_FAILOVER_RETRIES: u64 = 1;
 pub const MIN_RECOVERY_VERIFY_INTERVAL_SECS: u64 = 60;
 pub const MAX_RECOVERY_VERIFY_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
 pub const DEFAULT_RECOVERY_VERIFY_INTERVAL_SECS: u64 = 300;
@@ -151,6 +154,13 @@ impl AppConfig {
     pub fn validate_download_prefetch_chunks(value: u64) -> Result<u64, ConfigError> {
         if !(MIN_DOWNLOAD_PREFETCH_CHUNKS..=MAX_DOWNLOAD_PREFETCH_CHUNKS).contains(&value) {
             return Err(ConfigError::Invalid("TELEGRAM_DOWNLOAD_PREFETCH_CHUNKS"));
+        }
+        Ok(value)
+    }
+
+    pub fn validate_download_failover_retries(value: u64) -> Result<u64, ConfigError> {
+        if !(MIN_DOWNLOAD_FAILOVER_RETRIES..=MAX_DOWNLOAD_FAILOVER_RETRIES).contains(&value) {
+            return Err(ConfigError::Invalid("TELEGRAM_DOWNLOAD_FAILOVER_RETRIES"));
         }
         Ok(value)
     }
@@ -652,6 +662,24 @@ mod tests {
         );
         assert!(
             AppConfig::validate_download_prefetch_chunks(MAX_DOWNLOAD_PREFETCH_CHUNKS + 1).is_err()
+        );
+    }
+
+    #[test]
+    fn download_failover_retries_are_bounded() {
+        assert_eq!(
+            AppConfig::validate_download_failover_retries(MIN_DOWNLOAD_FAILOVER_RETRIES)
+                .expect("minimum"),
+            MIN_DOWNLOAD_FAILOVER_RETRIES
+        );
+        assert_eq!(
+            AppConfig::validate_download_failover_retries(MAX_DOWNLOAD_FAILOVER_RETRIES)
+                .expect("maximum"),
+            MAX_DOWNLOAD_FAILOVER_RETRIES
+        );
+        assert!(
+            AppConfig::validate_download_failover_retries(MAX_DOWNLOAD_FAILOVER_RETRIES + 1)
+                .is_err()
         );
     }
 

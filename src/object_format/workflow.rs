@@ -733,6 +733,7 @@ impl ObjectFormatService {
                     chunk.replicas.push(ChunkReplica {
                         account_id: job.target_account_id.clone(),
                         mode: ReplicaMode::Replica,
+                        chunk_size: chunk.size,
                         telegram_peer_id: location.peer_id.clone(),
                         telegram_message_id: location.message_id,
                         telegram_document_id: location.document_id.clone(),
@@ -746,6 +747,7 @@ impl ObjectFormatService {
                     chunk.replicas.push(ChunkReplica {
                         account_id: job.target_account_id.clone(),
                         mode: ReplicaMode::Access,
+                        chunk_size: chunk.size,
                         telegram_peer_id: location.peer_id.clone(),
                         telegram_message_id: location.message_id,
                         telegram_document_id: location.document_id.clone(),

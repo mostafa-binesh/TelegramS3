@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.6-rc.11 - 2026-09-28
+
+### Replica layout mismatch visibility and download failover
+
+- Persisted the source chunk size on every newly written physical or access
+  replica location. Bucket and object APIs now report when a replica advertises
+  a different non-legacy chunk size from the canonical manifest chunk, and the
+  Buckets account badge changes to a yellow warning icon for that object or
+  bucket. Legacy replica rows without this field remain an explicitly unknown
+  layout and do not produce a false warning.
+- Added a schema v19 migration for `telegram_download_failover_retries`, with
+  a database-backed `0–8` setting and a default of one retry. The Storage policy
+  UI validates, saves, reloads, and explains the setting.
+- Updated the shared reader so a failed selected account receives the configured
+  number of complete read retries before the reader rotates to the next
+  enabled, ready account location. Every attempt still uses the existing
+  Telegram retry/recovery window, decrypts and verifies the complete chunk, and
+  never splits a chunk across accounts.
+- Added Rust coverage for bounds, schema migration, persistence, and candidate
+  rotation, plus Playwright coverage for the retry setting and yellow mismatch
+  badge. Updated the storage-format, S3 compatibility, recovery, README,
+  roadmap, and architecture decision documentation.
+
 ## 0.7.6-rc.10 - 2026-09-28
 
 ### Isolated additional-account onboarding

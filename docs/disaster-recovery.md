@@ -2,7 +2,8 @@
 
 ## Local Metadata Lost
 
-Schema v18 account, scoped-replication, and maintenance rows are part of the
+Schema v19 account, scoped-replication, maintenance, and download-failover rows
+are part of the
 recovery boundary.
 Back up `metadata.sqlite` before adding or scheduling replication. Restoring
 the database restores account definitions, replica/access maps, pending job
@@ -32,6 +33,19 @@ Turning it off only changes future read selection. It does not detach the
 account, change the owning connection recorded in cleanup targets, or delete
 remote data. After restoring metadata, verify the account cards and re-enable
 any account intended to serve reads before testing public or S3 downloads.
+
+The v19 migration adds `telegram_download_failover_retries` to `app_settings`
+with a default of `1`. It controls complete read retries on the selected
+eligible account before the reader rotates to another replica location; it does
+not change upload ownership or cleanup credentials. Restoring metadata restores
+this policy, so verify it in Telegram settings after a restore if download
+behavior needs to be changed.
+
+Replica rows written after the v19 format change include their canonical
+`chunk_size`. The admin bucket/object listing flags a non-zero mismatch against
+the manifest as a yellow account badge. A missing value on an older replica is
+treated as unknown and does not itself mark the object corrupt; re-replicate the
+object to refresh that metadata.
 
 For legacy replication jobs, `object_keys_json` is migrated to an empty array,
 which preserves their original whole-bucket scope. New selected-key jobs keep

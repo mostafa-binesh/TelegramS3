@@ -2,14 +2,14 @@
   export let name: 'download' | 'share' | 'links' | 'trash' | 'refresh' | 'folder' | 'retry' | 'cancel' | 'copy' | 'close' | 'back' | 'accounts';
   export let label: string;
   export let disabled = false;
-  export let tone: 'default' | 'danger' | 'success' = 'default';
+  export let tone: 'default' | 'danger' | 'success' | 'warning' = 'default';
   export let href: string | null = null;
   export let badge: number | null = null;
 </script>
 
-{#if href}<a class:danger={tone === 'danger'} class:success={tone === 'success'} class="action-icon" {href} download aria-label={label} title={label}>
+{#if href}<a class:danger={tone === 'danger'} class:success={tone === 'success'} class:warning={tone === 'warning'} class="action-icon" {href} download aria-label={label} title={label}>
   <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" /></svg>
-</a>{:else}<button class:danger={tone === 'danger'} class:success={tone === 'success'} class="action-icon" type="button" {disabled} aria-label={label} title={label} on:click>
+</a>{:else}<button class:danger={tone === 'danger'} class:success={tone === 'success'} class:warning={tone === 'warning'} class="action-icon" type="button" {disabled} aria-label={label} title={label} on:click>
   <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
     {#if name === 'download'}<path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" />
     {:else if name === 'share'}<circle cx="18" cy="5" r="2.5" /><circle cx="6" cy="12" r="2.5" /><circle cx="18" cy="19" r="2.5" /><path d="m8.2 10.8 7.6-4.5m-7.6 6.9 7.6 4.5" />
@@ -32,6 +32,8 @@
   .action-icon.danger:hover:not(:disabled) { color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); border-color: color-mix(in srgb, var(--danger) 30%, var(--border)); }
   .action-icon.success { color: #17604a; border-color: #c7e4dd; background: #effaf6; }
   .action-icon.success:hover:not(:disabled) { color: #0f4f3d; background: #e4f7ef; border-color: #8dcdbb; }
+  .action-icon.warning { color: #95620b; border-color: #efd39a; background: #fff8e8; }
+  .action-icon.warning:hover:not(:disabled) { color: #704700; background: #fff0c7; border-color: #ddb866; }
   svg { width: 18px; height: 18px; }
   .action-badge { position: absolute; top: -7px; right: -7px; min-width: 18px; height: 18px; padding: 0 4px; border: 2px solid var(--surface); border-radius: 999px; background: var(--accent); color: #fff; font-size: .65rem; line-height: 14px; font-weight: 800; text-align: center; }
 </style>

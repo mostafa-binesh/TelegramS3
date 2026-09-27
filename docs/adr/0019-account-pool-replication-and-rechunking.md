@@ -1,6 +1,6 @@
 # ADR-0019: Account pool, bucket replication, and re-chunking
 
-- Status: accepted for 0.7.6-rc.10
+- Status: accepted for 0.7.6-rc.11
 - Date: 2026-09-27
 
 ## Context
@@ -78,3 +78,19 @@ aggregate state (`connected`, `partial`, or `disconnected`) from per-account
 health while exposing named indicators for each connection. Account transports
 are cached after their first health probe so recurring Overview refreshes do
 not rebuild every secondary transport.
+
+## Follow-up: replica layout visibility and read failover
+
+Replica locations now persist the canonical source chunk size. The admin API
+compares that value with each manifest chunk and marks the object and containing
+bucket when a non-legacy replica layout differs. The UI uses a yellow account
+badge for that warning; a missing value in an older manifest remains unknown
+and is not treated as corruption.
+
+The shared reader keeps the deterministic per-chunk account rotation, but a
+failed selected account receives the configured number of complete retries
+before the next eligible account is attempted. The
+`telegram_download_failover_retries` database setting defaults to one retry and
+accepts zero through eight. Each attempt retains the existing transport retry,
+120-second stream recovery, decryption, and checksum verification boundaries;
+accounts are never mixed within one chunk.

@@ -74,6 +74,7 @@ Defaults used by the current scaffold:
 - admin bind addr: `127.0.0.1:9001`
 - chunk size: `1 MiB`
 - download prefetch: `1` extra verified chunk (`0–4`)
+- account failover: `1` retry after the initial complete chunk attempt (`0–8`)
 - recovery verifier: enabled
 - recovery verifier interval: `300s` (5 minutes)
 - recovery verifier sample: `1` random chunk per committed object
@@ -137,6 +138,15 @@ rewriting existing objects or changing active transfer chunk boundaries. A
 larger value can reduce visible zero-speed gaps at the cost of additional
 parallel Telegram traffic and up to `(prefetch + 1) × chunk size` of transient
 per-stream plaintext/ciphertext work.
+
+The same page controls `telegram_download_failover_retries`, introduced by
+schema v19. It is the number of additional complete attempts made on the
+currently selected eligible Telegram account before the reader rotates to the
+next eligible replica/access location. `0` moves after the first failed
+attempt; `1` allows two total attempts. Each attempt still uses the normal
+transport retry policy and 120-second stream recovery window, and each chunk is
+decrypted and verified as one unit rather than assembled from multiple
+accounts. The value changes live and persists across restart.
 
 The same policy page controls the sampled recovery verifier. When enabled, it
 runs once at startup and then at the configured interval, selecting the

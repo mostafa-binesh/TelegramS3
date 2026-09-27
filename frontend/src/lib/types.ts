@@ -19,6 +19,7 @@ export interface BucketInfo {
   created_at: string;
   replica_accounts?: number;
   access_accounts?: number;
+  replica_chunk_size_mismatch?: boolean;
 }
 
 export interface BucketsState {
@@ -50,6 +51,7 @@ export interface ObjectEntry {
   upload_error?: string | null;
   replica_accounts?: number;
   access_accounts?: number;
+  replica_chunk_size_mismatch?: boolean;
   rechunking?: boolean;
 }
 
@@ -260,6 +262,9 @@ export interface StorageSettings {
   download_prefetch_chunks: number;
   min_download_prefetch_chunks: number;
   max_download_prefetch_chunks: number;
+  download_failover_retries: number;
+  min_download_failover_retries: number;
+  max_download_failover_retries: number;
   recovery_verify_enabled: boolean;
   recovery_verify_interval_secs: number;
   min_recovery_verify_interval_secs: number;

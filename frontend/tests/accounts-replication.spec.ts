@@ -29,8 +29,8 @@ async function mockConsole(page: import('@playwright/test').Page) {
     if (path === '/replication' && request.method() === 'POST') { replicationBody = request.postDataJSON(); return route.fulfill({ status: 202, json: { job: { id: 'replication-1', bucket: 'release-test', state: 'queued', mode: 'automatic', access_mode: 'access', chunks_done: 0, chunks_total: 0, objects_done: 0, objects_total: 0, bytes_done: 0 } } }); }
     if (path === '/rechunk' && request.method() === 'GET') return route.fulfill({ json: { jobs: [] } });
     if (path === '/rechunk' && request.method() === 'POST') { rechunkBody = request.postDataJSON(); return route.fulfill({ status: 202, json: { jobs: [] } }); }
-    if (path === '/buckets' && request.method() === 'GET') return route.fulfill({ json: { buckets: [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }], page: 1, page_size: 25, total: 1, has_more: false } });
-    if (path === '/objects' && request.method() === 'GET') return route.fulfill({ json: { prefix: '', folders: [], objects: [{ key: 'sample.bin', name: 'sample.bin', size: 10, last_modified: '2026-01-01T00:00:00Z', shared_links: 0, replica_accounts: 2, access_accounts: 1 }], page: 1, page_size: 25, total: 1, has_more: false } });
+    if (path === '/buckets' && request.method() === 'GET') return route.fulfill({ json: { buckets: [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z', replica_accounts: 2, access_accounts: 1, replica_chunk_size_mismatch: true }], page: 1, page_size: 25, total: 1, has_more: false } });
+    if (path === '/objects' && request.method() === 'GET') return route.fulfill({ json: { prefix: '', folders: [], objects: [{ key: 'sample.bin', name: 'sample.bin', size: 10, last_modified: '2026-01-01T00:00:00Z', shared_links: 0, replica_accounts: 2, access_accounts: 1, replica_chunk_size_mismatch: true }], page: 1, page_size: 25, total: 1, has_more: false } });
     if (path === '/replicas' && request.method() === 'GET') return route.fulfill({ json: { replicas: [
       { object_id: 'object-1', bucket: 'release-test', key: 'sample.bin', chunk_order: 0, account_id: 'backup', account_label: 'Backup', mode: 'replica', peer_id: '-1002', message_id: 42, document_id: 'doc-42', state: 'ready', updated_at: 1 },
       { object_id: 'object-1', bucket: 'release-test', key: 'sample.bin', chunk_order: 0, account_id: 'backup', account_label: 'Backup', mode: 'access', peer_id: '-1001', message_id: 42, document_id: 'doc-42', state: 'ready', updated_at: 1 }
@@ -74,9 +74,12 @@ test('additional accounts use an isolated onboarding wizard', async ({ page }) =
 test('replica badge shows account details and bulk replication keeps the selected keys', async ({ page }) => {
   const state = await mockConsole(page);
   await page.goto('/_admin/buckets');
+  await expect(page.getByRole('button', { name: /Show account copies and access for release-test/ })).toHaveClass(/warning/);
   await page.getByRole('button', { name: /^release-test/ }).click();
 
-  await page.getByRole('button', { name: 'Show account copies and access for sample.bin' }).click();
+  const replicaButton = page.getByRole('button', { name: /Show account copies and access for sample\.bin/ });
+  await expect(replicaButton).toHaveClass(/warning/);
+  await replicaButton.click();
   await expect(page.getByRole('dialog', { name: /release-test\/sample.bin/ })).toBeVisible();
   const replicaDialog = page.getByRole('dialog', { name: /release-test\/sample.bin/ });
   await expect(replicaDialog.getByText('Backup').first()).toBeVisible();

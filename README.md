@@ -94,7 +94,11 @@ staging, and recovery artifacts, not committed payloads.
   has an independent persisted download eligibility switch, so an operator can
   temporarily remove one physical replica from read selection without changing
   ownership or cleanup. Overview health is aggregated across accounts and shows
-  per-account connection indicators.
+  per-account connection indicators. Each new replica records its source chunk
+  size; object and bucket account badges turn yellow when persisted replica
+  layouts disagree with the canonical chunks. Downloads can retry a complete
+  chunk on the selected account a configurable number of times, then fail over
+  to the next enabled replica account.
 - **Maintenance queues** — selected bucket objects can be re-chunked through a
   bounded durable worker. Objects are locked and report temporary
   unavailability while their replacement manifest is published. The bucket
@@ -341,8 +345,8 @@ cargo build --release
 ## Configuration
 
 Runtime configuration is mostly environment-driven, but Telegram bootstrap
-settings, download prefetch policy, upload chunk policy, and recovery-verifier
-policy are managed from the authenticated admin panel and persisted in
+settings, download prefetch and account-failover policies, upload chunk policy,
+and recovery-verifier policy are managed from the authenticated admin panel and persisted in
 `metadata.sqlite`.
 `TELEGRAM_CHUNK_SIZE` is imported when no database policy exists; after that,
 the database value is authoritative. The verifier defaults to one random chunk
@@ -353,6 +357,10 @@ can also be changed live. Telegram
 API IDs and storage chat IDs are validated as numeric values
 before persistence; connection refresh failures are returned as JSON warnings
 from the admin API rather than as proxy-level failures.
+The account-failover setting defaults to one retry after the initial attempt and
+accepts `0–8` retries before moving to another enabled replica location; each
+attempt retains the normal per-chunk retry and 120-second stream recovery
+behavior.
 The complete reference lives in [docs/configuration.md](docs/configuration.md);
 the most important variables:
 

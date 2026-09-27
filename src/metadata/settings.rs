@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 const CHUNK_SIZE_SETTING: &str = "telegram_chunk_size";
 pub(crate) const DOWNLOAD_PREFETCH_CHUNKS_SETTING: &str = "telegram_download_prefetch_chunks";
+pub(crate) const DOWNLOAD_FAILOVER_RETRIES_SETTING: &str = "telegram_download_failover_retries";
 const RECOVERY_VERIFY_ENABLED_SETTING: &str = "telegram_recovery_verify_enabled";
 const RECOVERY_VERIFY_INTERVAL_SETTING: &str = "telegram_recovery_verify_interval_secs";
 const RECOVERY_VERIFY_CHUNKS_SETTING: &str = "telegram_recovery_verify_chunks";
@@ -107,6 +108,17 @@ impl MetadataStore {
 
     pub fn set_telegram_download_prefetch_chunks(&self, chunks: u64) -> Result<(), MetadataError> {
         self.set_numeric_setting(DOWNLOAD_PREFETCH_CHUNKS_SETTING, chunks)
+    }
+
+    pub fn telegram_download_failover_retries(&self) -> Result<Option<u64>, MetadataError> {
+        self.read_numeric_setting(DOWNLOAD_FAILOVER_RETRIES_SETTING)
+    }
+
+    pub fn set_telegram_download_failover_retries(
+        &self,
+        retries: u64,
+    ) -> Result<(), MetadataError> {
+        self.set_numeric_setting(DOWNLOAD_FAILOVER_RETRIES_SETTING, retries)
     }
 
     pub fn telegram_recovery_verify_interval_secs(&self) -> Result<Option<u64>, MetadataError> {
@@ -583,6 +595,33 @@ mod tests {
             store
                 .telegram_download_prefetch_chunks()
                 .expect("prefetch after migration"),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn download_failover_setting_defaults_and_round_trips() {
+        let store = MetadataStore::open_in_memory().expect("metadata");
+        assert_eq!(
+            store
+                .telegram_download_failover_retries()
+                .expect("failover read"),
+            Some(1)
+        );
+        store
+            .set_telegram_download_failover_retries(4)
+            .expect("failover write");
+        assert_eq!(
+            store
+                .telegram_download_failover_retries()
+                .expect("failover read"),
+            Some(4)
+        );
+        store.migrate().expect("idempotent migration");
+        assert_eq!(
+            store
+                .telegram_download_failover_retries()
+                .expect("failover after migration"),
             Some(4)
         );
     }
