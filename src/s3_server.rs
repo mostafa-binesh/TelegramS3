@@ -400,10 +400,18 @@ async fn handle_request(
         *response.status_mut() = StatusCode::NO_CONTENT;
         return Ok(response);
     }
-    if request.uri().path().starts_with("/_public/") {
+    // Let S3 CreateBucket reach the shared validator even when the bucket name
+    // is also an internal route prefix. GET/HEAD admin and public requests
+    // still dispatch to their dedicated surfaces below.
+    let reserved_bucket_create = request.method() == Method::PUT
+        && matches!(
+            request.uri().path(),
+            "/_public" | "/_public/" | "/_admin" | "/_admin/"
+        );
+    if !reserved_bucket_create && request.uri().path().starts_with("/_public/") {
         return Ok(handle_share_request(request, object_format).await);
     }
-    if AdminUiState::is_admin_route(request.uri().path()) {
+    if !reserved_bucket_create && AdminUiState::is_admin_route(request.uri().path()) {
         return Ok(admin_ui_state.handle_request(request).await);
     }
     let timeout_secs = if matches!(
@@ -1498,6 +1506,9 @@ fn map_object_error(error: crate::object_format::ObjectFormatError) -> s3s::S3Er
         crate::object_format::ObjectFormatError::Metadata(
             crate::metadata::MetadataError::BucketAlreadyExists(bucket),
         ) => s3s::S3Error::with_message(S3ErrorCode::BucketAlreadyOwnedByYou, bucket),
+        crate::object_format::ObjectFormatError::InvalidBucketName(message) => {
+            s3s::S3Error::with_message(S3ErrorCode::InvalidBucketName, message)
+        }
         crate::object_format::ObjectFormatError::Metadata(
             crate::metadata::MetadataError::BucketNotEmpty(bucket),
         ) => s3s::S3Error::with_message(S3ErrorCode::BucketNotEmpty, bucket),

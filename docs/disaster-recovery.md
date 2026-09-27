@@ -83,6 +83,19 @@ metadata until reconciliation determines whether the acknowledgement can be
 matched exactly; do not delete the visible Telegram files just because the browser
 request was interrupted.
 
+The authenticated browser uses bounded bucket and object listing pages so a large
+namespace does not require rendering every entry at once. Bucket-name search and
+recursive object-key search are read-only metadata queries; object search results
+carry their parent location so an operator can navigate there before using the
+normal download, share, link, or delete actions. Search and pagination do not
+alter manifests, active-object pointers, transfer jobs, or recovery state.
+
+The path-style names `_public` and `_admin` are reserved at bucket creation
+because requests using those first path segments belong to the public-share and
+admin routers. Recovery and index rebuild do not delete or rename any legacy
+row with those names; the reservation only prevents new creation through S3 or
+the admin console.
+
 ### Interrupted Public Download
 
 Public and authenticated admin downloads are streamed from Telegram-backed

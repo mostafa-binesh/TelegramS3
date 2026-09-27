@@ -324,6 +324,21 @@ response cannot leave the UI displaying an indefinite loading state. This affect
 presentation only; manifest visibility and committed-object rules remain
 unchanged.
 
+The browser listing API returns bounded pages (`page`, `page_size`, `total`, and
+`has_more`) for buckets and folder entries. Bucket search filters names; object
+search recursively matches keys under the selected bucket/prefix and returns a
+parent `location` for each match. The UI can jump from that location directly to
+the containing folder, while download/share/link-manager/delete actions continue
+to operate on the canonical full object key. Pagination and search do not change
+manifest ordering, chunk references, or visibility rules.
+
+Bucket creation also protects the HTTP namespace: exact names `_public` and
+`_admin` are reserved for public share links and the authenticated admin
+surface. The shared object-format service rejects these names before metadata
+creation, so S3 and admin callers cannot create a bucket that would be routed
+away from the bucket API. This is a creation-time rule and does not rewrite
+legacy metadata rows.
+
 The browser also treats a stale cookie-bound CSRF token as a session-sync event:
 it reads the current session and retries the rejected administrative request at
 most once. This affects only control-plane request handling and does not alter

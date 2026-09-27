@@ -80,6 +80,8 @@ async function mockAdminApi(
     delayFirstObjectListMs?: number;
     delayNestedObjectListMs?: number;
     staleCsrfOnce?: boolean;
+    browserBuckets?: Array<{ name: string; created_at: string }>;
+    browserObjects?: Array<Record<string, unknown>>;
   } = {}
 ) {
   let loggedIn = false;
@@ -90,7 +92,7 @@ async function mockAdminApi(
   let chunkSize = 1_048_576;
   let downloadPrefetchChunks = 1;
   const deletedKeys = new Set<string>();
-  const buckets = [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }];
+  const buckets = options.browserBuckets ?? [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }];
   const users = [user];
   let delayedFirstObjectList = false;
   let delayedNestedObjectList = false;
@@ -186,7 +188,15 @@ async function mockAdminApi(
     if (path === '/telegram/wizard/cancel' && request.method() === 'POST') {
       return route.fulfill({ json: { ok: true } });
     }
-    if (path === '/buckets' && request.method() === 'GET') return route.fulfill({ json: { buckets } });
+    if (path === '/buckets' && request.method() === 'GET') {
+      const params = new URL(request.url()).searchParams;
+      const search = (params.get('search') ?? '').toLowerCase();
+      const page = Number(params.get('page') ?? '1');
+      const pageSize = Number(params.get('page_size') ?? '25');
+      const matching = buckets.filter((bucket) => bucket.name.toLowerCase().includes(search));
+      const start = (page - 1) * pageSize;
+      return route.fulfill({ json: { buckets: matching.slice(start, start + pageSize), page, page_size: pageSize, total: matching.length, has_more: start + pageSize < matching.length, search } });
+    }
     if (path === '/buckets' && request.method() === 'POST') {
       if (options.staleCsrfOnce && !staleCsrfRejected) {
         staleCsrfRejected = true;
@@ -194,6 +204,9 @@ async function mockAdminApi(
         return route.fulfill({ status: 403, json: { error: 'invalid csrf token' } });
       }
       const body = request.postDataJSON() as { name: string };
+      if (body.name === '_public' || body.name === '_admin') {
+        return route.fulfill({ status: 400, json: { error: `${body.name} is reserved for an internal HTTP route` } });
+      }
       buckets.push({ name: body.name, created_at: '2026-01-01T00:00:00Z' });
       return route.fulfill({ json: buckets.at(-1) });
     }
@@ -204,7 +217,9 @@ async function mockAdminApi(
       return route.fulfill({ json: { ok: true } });
     }
     if (path === '/objects' && request.method() === 'GET') {
-      const prefix = new URL(request.url()).searchParams.get('prefix') ?? '';
+      const params = new URL(request.url()).searchParams;
+      const prefix = params.get('prefix') ?? '';
+      const search = (params.get('search') ?? '').toLowerCase();
       if (options.delayFirstObjectListMs && !delayedFirstObjectList) {
         delayedFirstObjectList = true;
         await new Promise((resolve) => setTimeout(resolve, options.delayFirstObjectListMs));
@@ -213,9 +228,14 @@ async function mockAdminApi(
         delayedNestedObjectList = true;
         await new Promise((resolve) => setTimeout(resolve, options.delayNestedObjectListMs));
       }
-      const rootObjects = [{ key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }];
+      const rootObjects = options.browserObjects ?? [{ key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }];
       const nestedObjects = [{ key: 'docs/report.txt', name: 'report.txt', size: 24, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }];
-      return route.fulfill({ json: { prefix, folders: prefix ? [] : ['docs'], objects: (prefix ? nestedObjects : rootObjects).filter((object) => !deletedKeys.has(object.key)) } });
+      const allObjects = (prefix ? nestedObjects : rootObjects).filter((object) => !deletedKeys.has(String(object.key)));
+      const matching = search ? allObjects.filter((object) => String(object.key).toLowerCase().includes(search)).map((object) => ({ ...object, location: String(object.key).includes('/') ? `${String(object.key).slice(0, String(object.key).lastIndexOf('/') + 1)}` : null })) : allObjects;
+      const page = Number(params.get('page') ?? '1');
+      const pageSize = Number(params.get('page_size') ?? '25');
+      const start = (page - 1) * pageSize;
+      return route.fulfill({ json: { prefix, folders: search ? [] : (prefix ? [] : ['docs']), objects: matching.slice(start, start + pageSize), page, page_size: pageSize, total: (search ? matching : (prefix ? nestedObjects : [...new Set(['docs', ...allObjects.map((object) => String(object.key).includes('/') ? String(object.key).split('/')[0] : '')].filter(Boolean))])).length, has_more: start + pageSize < matching.length, search } });
     }
     if (path === '/objects/share' && request.method() === 'POST') {
       return route.fulfill({ status: 201, json: { url: '/_public/mock-share-token', expires_at: '2026-01-01T01:00:00Z' } });
@@ -286,6 +306,23 @@ test('recovers from a stale CSRF token without requiring a page refresh', async 
 
   await expect(page.getByRole('button', { name: /csrf-recovered created/ })).toBeVisible();
   expect(bucketCsrfHeaders).toEqual(['csrf-test-token', 'csrf-refreshed-token']);
+});
+
+test('reserved internal route bucket names are rejected by the bucket form', async ({ page }) => {
+  await mockAdminApi(page);
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Buckets' }).click();
+
+  for (const name of ['_public', '_admin']) {
+    await page.getByRole('button', { name: /Create bucket/ }).first().click();
+    await page.getByLabel('Bucket name').fill(name);
+    await page.locator('.compact-modal').getByRole('button', { name: 'Create bucket', exact: true }).click();
+    await expect(page.getByRole('alert').filter({ hasText: `${name} is reserved` })).toBeVisible();
+    await expect(page.getByRole('button', { name: new RegExp(`${name} created`) })).toHaveCount(0);
+  }
 });
 
 test('guest is gated, authenticated navigation works, and logout revokes the session', async ({ page }) => {
@@ -411,6 +448,52 @@ test('re-entering a bucket reloads its objects', async ({ page }) => {
 
   await expect(page.getByText('readme.txt')).toBeVisible();
   expect(objectListRequests).toBe(2);
+});
+
+test('bucket and object search supports pagination and direct folder navigation', async ({ page }) => {
+  const browserBuckets = Array.from({ length: 27 }, (_, index) => ({
+    name: `archive-${String(index).padStart(2, '0')}`,
+    created_at: '2026-01-01T00:00:00Z'
+  }));
+  const browserObjects = [
+    { key: 'archive/reports/final-report.txt', name: 'final-report.txt', size: 42, last_modified: '2026-01-01T00:00:00Z', shared_links: 2 },
+    { key: 'archive/readme.txt', name: 'readme.txt', size: 8, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }
+  ];
+  await mockAdminApi(page, { browserBuckets, browserObjects });
+  const bucketRequests: string[] = [];
+  const objectRequests: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === '/_admin/api/buckets' && request.method() === 'GET') bucketRequests.push(url.search);
+    if (url.pathname === '/_admin/api/objects' && request.method() === 'GET') objectRequests.push(url.search);
+  });
+
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Buckets' }).click();
+  await expect(page.getByRole('button', { name: /archive-00 created/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Next' }).click();
+  await expect(page.getByRole('button', { name: /archive-26 created/ })).toBeVisible();
+  expect(bucketRequests.at(-1)).toContain('page=2');
+  await page.getByRole('searchbox', { name: 'Search buckets' }).fill('archive-26');
+  await expect(page.getByRole('button', { name: /archive-26 created/ })).toBeVisible();
+  await expect.poll(() => bucketRequests.at(-1) ?? '').toContain('search=archive-26');
+
+  await page.getByRole('button', { name: /archive-26 created/ }).click();
+  await expect(page.getByRole('searchbox', { name: 'Search objects and folders' })).toBeVisible();
+  await page.getByRole('searchbox', { name: 'Search objects and folders' }).fill('final-report');
+  await expect(page.getByText('final-report.txt')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Go to folder archive/reports/' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Download final-report.txt' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Share final-report.txt' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Manage shared links for final-report.txt' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Delete final-report.txt' })).toBeVisible();
+  await expect.poll(() => objectRequests.at(-1) ?? '').toContain('search=final-report');
+  expect(objectRequests.at(-1)).not.toContain('delimiter=1');
+  await page.getByRole('button', { name: 'Go to folder archive/reports/' }).click();
+  await expect(page.getByRole('heading', { name: 'Bucket / archive-26 / archive / reports' })).toBeVisible();
 });
 
 test('a slow folder load is not replaced by the background poll', async ({ page }) => {

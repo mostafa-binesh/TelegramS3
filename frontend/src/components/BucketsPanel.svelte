@@ -15,6 +15,12 @@
   export let objectsError = '';
   export let busy = false;
   export let selectedKeys: string[] = [];
+  export let bucketSearch = '';
+  export let bucketPage = 1;
+  export let bucketTotal = 0;
+  export let objectSearch = '';
+  export let objectPage = 1;
+  export let objectTotal = 0;
   export let onCreateBucket: () => void = () => {};
   export let onRefresh: () => void = () => {};
   export let onUpload: () => void = () => {};
@@ -30,9 +36,16 @@
   export let onOpenMove: () => void = () => {};
   export let onShare: (object: ObjectEntry) => void = () => {};
   export let onOpenShareLinks: (object: ObjectEntry) => void = () => {};
+  export let onBucketSearch: (value: string) => void = () => {};
+  export let onBucketPage: (page: number) => void = () => {};
+  export let onObjectSearch: (value: string) => void = () => {};
+  export let onObjectPage: (page: number) => void = () => {};
+  export let onGoToFolder: (location: string) => void = () => {};
 
   $: selectableObjects = listing?.objects.filter((object) => !object.uploading) ?? [];
   $: allVisibleSelected = selectedKeys.length > 0 && selectedKeys.length === selectableObjects.length;
+  $: bucketPageCount = Math.max(1, Math.ceil(bucketTotal / 25));
+  $: objectPageCount = Math.max(1, Math.ceil(objectTotal / 25));
 
   function uploadTitle(object: ObjectEntry) {
     const done = object.upload_parts_done ?? 0;
@@ -98,14 +111,29 @@
     </div>
   </div>
   {#if !selectedBucket}
+    <div class="browser-toolbar">
+      <label class="search-field">
+        <span class="visually-hidden">Search buckets</span>
+        <input value={bucketSearch} type="search" placeholder="Search buckets…" aria-label="Search buckets" on:input={(event) => onBucketSearch((event.currentTarget as HTMLInputElement).value)} />
+      </label>
+      {#if bucketSearch}<button class="btn-link clear-search" type="button" on:click={() => onBucketSearch('')}>Clear search</button>{/if}
+    </div>
     <p class="fine-print">Select a bucket to browse its files. Bucket names may contain Unicode characters.</p>
     {#if bucketsLoading}<div class="skeleton-stack" aria-label="Loading buckets"><div class="skeleton" style="height:52px"></div><div class="skeleton" style="height:52px"></div><div class="skeleton" style="height:52px"></div></div>
     {:else if bucketsError}<LoadError title="Could not load buckets" message={bucketsError} onRetry={onRefresh} />
-    {:else if buckets.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">+</span>No buckets yet. Create one above to start the file browser.</p>
+    {:else if buckets.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">{bucketSearch ? '⌕' : '+'}</span>{bucketSearch ? 'No buckets match this search.' : 'No buckets yet. Create one above to start the file browser.'}</p>
     {:else}<ul class="checks">{#each buckets as bucket (bucket.name)}<li><div class="bucket-row"><button type="button" class="btn-link" on:click={() => onOpenBucket(bucket.name)}>{bucket.name}<small>created {formatTimestamp(bucket.created_at)}</small></button><ActionIcon name="trash" label={`Delete bucket ${bucket.name}`} tone="danger" on:click={() => onRemoveBucket(bucket.name)} disabled={busy}/></div></li>{/each}</ul>{/if}
+    {#if bucketTotal > 25}<div class="pagination" aria-label="Bucket pages"><button class="ghost" type="button" disabled={bucketPage <= 1 || bucketsLoading} on:click={() => onBucketPage(bucketPage - 1)}>Previous</button><span>Page {bucketPage} of {bucketPageCount} · {bucketTotal} buckets</span><button class="ghost" type="button" disabled={bucketPage >= bucketPageCount || bucketsLoading} on:click={() => onBucketPage(bucketPage + 1)}>Next</button></div>{/if}
   {:else}
     {#if listing}
       <div class="listing-frame" class:loading={objectsLoading} aria-busy={objectsLoading}>
+        <div class="browser-toolbar object-toolbar">
+          <label class="search-field search-wide">
+            <span class="visually-hidden">Search objects</span>
+            <input value={objectSearch} type="search" placeholder="Search this bucket…" aria-label="Search objects and folders" on:input={(event) => onObjectSearch((event.currentTarget as HTMLInputElement).value)} />
+          </label>
+          {#if objectSearch}<span class="search-hint">Searching recursively</span><button class="btn-link clear-search" type="button" on:click={() => onObjectSearch('')}>Clear search</button>{:else}<span class="search-hint">Browse this folder</span>{/if}
+        </div>
         {#if objectsLoading}
           <div class="listing-status" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span>Loading folder contents…</div>
         {:else if objectsError}
@@ -132,6 +160,7 @@
           </td>
           <td>
             <span class="object-name">{obj.name}</span>
+            {#if obj.location}<button class="location-link" type="button" on:click={() => onGoToFolder(obj.location ?? '')}>in {obj.location}</button>{/if}
             {#if obj.uploading}
               <div class="upload-progress" class:attention-progress={uploadKind(obj) === 'attention'}>
                 <div class="upload-progress-head">
@@ -159,11 +188,12 @@
           </td>
           <td>{#if obj.uploading}<span class="upload-size"><strong>Multipart</strong><small>S3 upload</small></span>{:else}{formatBytes(obj.size)}{/if}</td>
           <td>{#if obj.uploading}<span class="upload-state"><strong>{uploadLabel(obj)}</strong><small>{formatTimestamp(obj.last_modified)}</small></span>{:else}{formatTimestamp(obj.last_modified)}{/if}</td>
-          <td><div class="row-actions">{#if obj.uploading}<span class="uploading-actions" class:needs-action={uploadKind(obj) === 'attention'} title={uploadTitle(obj)}><span aria-hidden="true"></span>{uploadKind(obj) === 'attention' ? 'Needs action' : 'Working'}</span>{:else}<ActionIcon name="download" label={`Download ${obj.name}`} href={contentUrl(selectedBucket, obj.key)}/><ActionIcon name="share" label={`Share ${obj.name}`} on:click={() => onShare(obj)} disabled={busy}/><ActionIcon name="links" badge={obj.shared_links} label={`Manage shared links for ${obj.name}`} on:click={() => onOpenShareLinks(obj)} disabled={busy}/><ActionIcon name="trash" label={`Delete ${obj.name}`} tone="danger" on:click={() => onRemoveKey(obj)} disabled={busy}/>{/if}</div></td>
+          <td><div class="row-actions">{#if obj.uploading}<span class="uploading-actions" class:needs-action={uploadKind(obj) === 'attention'} title={uploadTitle(obj)}><span aria-hidden="true"></span>{uploadKind(obj) === 'attention' ? 'Needs action' : 'Working'}</span>{:else}{#if obj.location}<ActionIcon name="folder" label={`Go to folder ${obj.location}`} on:click={() => onGoToFolder(obj.location ?? '')}/>{/if}<ActionIcon name="download" label={`Download ${obj.name}`} href={contentUrl(selectedBucket, obj.key)}/><ActionIcon name="share" label={`Share ${obj.name}`} on:click={() => onShare(obj)} disabled={busy}/><ActionIcon name="links" badge={obj.shared_links} label={`Manage shared links for ${obj.name}`} on:click={() => onOpenShareLinks(obj)} disabled={busy}/><ActionIcon name="trash" label={`Delete ${obj.name}`} tone="danger" on:click={() => onRemoveKey(obj)} disabled={busy}/>{/if}</div></td>
         </tr>
       {/each}
     </tbody></table></div>{/if}
       </div>
+      {#if objectTotal > 25}<div class="pagination" aria-label="Object pages"><button class="ghost" type="button" disabled={objectPage <= 1 || objectsLoading} on:click={() => onObjectPage(objectPage - 1)}>Previous</button><span>Page {objectPage} of {objectPageCount} · {objectTotal} items</span><button class="ghost" type="button" disabled={objectPage >= objectPageCount || objectsLoading} on:click={() => onObjectPage(objectPage + 1)}>Next</button></div>{/if}
     {:else if objectsLoading}<div class="skeleton-stack" aria-label="Loading files"><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div></div>
     {:else if objectsError}<LoadError title="Could not load this folder" message={objectsError} onRetry={onRefresh} />
     {/if}
@@ -174,6 +204,17 @@
   .heading-row { display: flex; align-items: center; gap: .75rem; }
   .back-button { flex: 0 0 auto; }
   .listing-frame { position: relative; min-height: 72px; }
+  .browser-toolbar { display: flex; align-items: center; gap: 12px; margin: 14px 0; }
+  .object-toolbar { margin-top: 0; padding: 10px 0 12px; border-bottom: 1px solid #e2ebf2; }
+  .search-field { display: block; flex: 1 1 360px; max-width: 520px; }
+  .search-field input { width: 100%; min-height: 40px; padding: 9px 13px; border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--ink); box-sizing: border-box; }
+  .search-field input:focus { outline: 3px solid rgba(43,130,197,.16); border-color: #68a9d2; }
+  .search-hint { color: var(--muted); font-size: .75rem; }
+  .clear-search { flex: 0 0 auto; font-size: .78rem; }
+  .pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 16px; color: var(--muted); font-size: .78rem; }
+  .pagination .ghost { min-height: 34px; padding: 6px 12px; }
+  .location-link { display: block; max-width: 100%; overflow: hidden; padding: 2px 0; border: 0; background: transparent; color: #49779a; font-size: .72rem; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .location-link:hover { color: var(--accent); text-decoration: underline; }
   .listing-status { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 34px; margin: 0 0 8px; padding: 7px 10px; border: 1px solid #cfe4f1; border-radius: 10px; background: #f3faff; color: #2d6789; font-size: .78rem; font-weight: 750; }
   .listing-status.error { justify-content: space-between; gap: 12px; border-color: #f0c9c9; background: #fff7f7; color: var(--danger, #b00020); }
   .listing-status .ghost { flex: 0 0 auto; padding: 5px 10px; }
@@ -229,5 +270,6 @@
   @keyframes shimmer { from { transform: translateX(-160%); } to { transform: translateX(380%); } }
   @keyframes indeterminate { 0% { transform: translateX(-110%); } 55%,100% { transform: translateX(270%); } }
   @media (prefers-reduced-motion: reduce) { .status-beacon, .upload-fill, .upload-fill::after { animation: none!important; transition: none; } .listing-frame .table-scroll { transition: none; } }
+  @media (max-width: 700px) { .browser-toolbar { align-items: stretch; flex-wrap: wrap; } .search-field { flex-basis: 100%; max-width: none; } .object-toolbar .search-hint { flex: 1 1 auto; } .pagination { flex-wrap: wrap; } }
   .visually-hidden { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
 </style>

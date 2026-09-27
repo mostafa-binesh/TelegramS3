@@ -197,8 +197,16 @@ export function deleteUser(csrf?: string | null, id?: string) {
   return requestJson<{ ok?: boolean }>(`/users/${id}`, csrf, { method: 'DELETE' });
 }
 
-export function listBuckets(csrf?: string | null) {
-  return requestJson<BucketsState>('/buckets', csrf);
+export function listBuckets(
+  csrf?: string | null,
+  options: { search?: string; page?: number; pageSize?: number } = {}
+) {
+  const qp = new URLSearchParams();
+  if (options.search) qp.set('search', options.search);
+  if (options.page) qp.set('page', String(options.page));
+  if (options.pageSize) qp.set('page_size', String(options.pageSize));
+  const suffix = qp.toString() ? `?${qp.toString()}` : '';
+  return requestJson<BucketsState>(`/buckets${suffix}`, csrf);
 }
 
 export function createBucket(csrf?: string | null, name = '') {
@@ -218,10 +226,14 @@ export function listObjects(
   csrf: string | null | undefined,
   bucket: string,
   prefix: string,
-  delimiter = true
+  delimiter = true,
+  options: { search?: string; page?: number; pageSize?: number } = {}
 ) {
   const qp = new URLSearchParams({ bucket, prefix });
   if (delimiter) qp.set('delimiter', '1');
+  if (options.search) qp.set('search', options.search);
+  if (options.page) qp.set('page', String(options.page));
+  if (options.pageSize) qp.set('page_size', String(options.pageSize));
   return requestJson<ObjectsState>(`/objects?${qp.toString()}`, csrf);
 }
 

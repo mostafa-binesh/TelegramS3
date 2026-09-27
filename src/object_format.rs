@@ -58,6 +58,7 @@ const CLEANUP_EVIDENCE_ROOT: &str = "cleanup-evidence";
 pub const TELEGRAM_STREAM_RECOVERY_WINDOW_SECS: u64 = 120;
 const TELEGRAM_STREAM_RECOVERY_WINDOW: StdDuration =
     StdDuration::from_secs(TELEGRAM_STREAM_RECOVERY_WINDOW_SECS);
+pub const RESERVED_BUCKET_NAMES: [&str; 2] = ["_public", "_admin"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkPlan {
@@ -367,6 +368,8 @@ pub enum ObjectFormatError {
     Io(#[from] io::Error),
     #[error("invalid upload plan: {0}")]
     InvalidPlan(String),
+    #[error("invalid bucket name: {0}")]
+    InvalidBucketName(String),
     #[error("invalid read plan: {0}")]
     InvalidRead(String),
     #[error("checksum mismatch for {scope}: expected {expected}, got {actual}")]
@@ -871,6 +874,11 @@ impl ObjectFormatService {
     }
 
     pub fn create_bucket(&self, bucket: &str) -> Result<BucketRecord, ObjectFormatError> {
+        if RESERVED_BUCKET_NAMES.contains(&bucket) {
+            return Err(ObjectFormatError::InvalidBucketName(format!(
+                "{bucket} is reserved for an internal HTTP route"
+            )));
+        }
         self.ensure_connection_not_removing()?;
         Ok(self.metadata.create_bucket(BucketRecord {
             name: bucket.to_string(),
@@ -3430,6 +3438,26 @@ mod tests {
         assert_eq!(plan.chunks.len(), 5);
         assert_eq!(plan.chunks[0].offset, 0);
         assert_eq!(plan.chunks[4].size, 1);
+    }
+
+    #[test]
+    fn internal_http_route_bucket_names_are_reserved() {
+        assert_eq!(RESERVED_BUCKET_NAMES, ["_public", "_admin"]);
+        assert!(RESERVED_BUCKET_NAMES.contains(&"_public"));
+        assert!(RESERVED_BUCKET_NAMES.contains(&"_admin"));
+        assert!(!RESERVED_BUCKET_NAMES.contains(&"documents"));
+    }
+
+    #[tokio::test]
+    async fn create_bucket_rejects_internal_http_route_names() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        for name in RESERVED_BUCKET_NAMES {
+            assert!(matches!(
+                service.create_bucket(name),
+                Err(ObjectFormatError::InvalidBucketName(_))
+            ));
+        }
     }
 
     #[tokio::test]

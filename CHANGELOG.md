@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.7.6-rc.4 - 2026-09-27
+
+### Bucket and object browser navigation
+
+- Added bounded server-side pagination for bucket and folder listings, with
+  total counts and next/previous navigation so large namespaces do not require
+  rendering every entry at once.
+- Added bucket-name search and recursive object-key search. Search results
+  include their containing location and retain download, share, link-manager,
+  delete, and direct folder-navigation actions.
+- Added browser coverage for pagination, search request parameters, result
+  actions, and direct navigation to a nested result location.
+
+### Reserved internal bucket names
+
+- Reserved the exact bucket names `_public` and `_admin` because those
+  path-style prefixes belong to the public-share and authenticated-admin HTTP
+  surfaces.
+- S3 `CreateBucket` now returns `InvalidBucketName`, including for requests
+  that would otherwise be intercepted by an internal route. The admin bucket
+  form returns HTTP 400 with a clear validation message.
+- Added shared-service, S3 integration, and browser regression coverage. This
+  is a creation-time rule only: no metadata migration rewrites existing rows.
+
 ## 0.7.6-rc.3 - 2026-09-27
 
 ### Persistent Overview traffic tabs

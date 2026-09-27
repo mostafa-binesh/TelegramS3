@@ -217,6 +217,13 @@ Completed in this increment:
 - the admin console now has history-routed bucket/folder locations, SVG
   navigation icons, a folder-aware move browser, and Telegram connection/proxy
   sub-tabs
+- bucket and object browsing now use bounded server-side pages, searchable
+  bucket names, recursive object search, result location breadcrumbs, direct
+  parent-folder navigation, and the existing per-object actions for search
+  results
+- `_public` and `_admin` are reserved at the shared bucket-creation boundary;
+  S3 clients receive `InvalidBucketName` and the admin form receives a clear
+  validation error
 - the Telegram settings page now exposes a database-backed Storage policy tab;
   chunk size can be changed live for new uploads while existing manifests and
   active receptions retain their captured boundaries

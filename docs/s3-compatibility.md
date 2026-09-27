@@ -72,6 +72,18 @@ features, so they are documented separately.
   as the S3 data plane: uploads are
   `POST /_admin/api/objects/content?bucket&key`, downloads are
   `GET`/`HEAD` with an optional `Range` (`206`/`Content-Range`).
+- The authenticated browser API supports bounded listing pages through
+  `page`/`page_size` plus `total`/`has_more` metadata. `GET /_admin/api/buckets`
+  accepts `search` for bucket-name filtering; `GET /_admin/api/objects` accepts
+  `search` for recursive key matching within the selected bucket/prefix. Search
+  results include a parent `location` and preserve download, share, link-manager,
+  delete, and direct-go-to-folder actions. These are operator-console features;
+  S3 `ListObjects` and `ListObjectsV2` semantics are unchanged.
+- Path-style bucket names `_public` and `_admin` are reserved because those
+  paths dispatch to the public-share and authenticated-admin HTTP surfaces.
+  `CreateBucket` rejects either exact name with the standard
+  `InvalidBucketName` error; the admin JSON endpoint returns HTTP 400. Existing
+  metadata rows are not rewritten by this rule.
 - The bucket browser also reads active transfer jobs for the selected bucket and
   prefix. An S3 multipart key appears as an in-progress row while its final
   manifest is being committed, with an accessible percentage bar, completed/

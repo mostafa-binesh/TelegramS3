@@ -126,6 +126,25 @@ async fn s3_crud_list_and_range_smoke_test() {
     .await;
     assert_eq!(create.status, 200, "create bucket");
 
+    for reserved in ["_public", "_admin"] {
+        let rejected = signed_request(
+            &tempdir,
+            &bind_addr,
+            "PUT",
+            &format!("/{reserved}"),
+            None,
+            &[],
+            &[],
+        )
+        .await;
+        let error_body = String::from_utf8_lossy(&rejected.body);
+        assert_eq!(rejected.status, 400, "reserved bucket {reserved}");
+        assert!(
+            error_body.contains("InvalidBucketName"),
+            "reserved bucket {reserved} response: {error_body}"
+        );
+    }
+
     let put = signed_request(
         &tempdir,
         &bind_addr,

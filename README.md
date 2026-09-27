@@ -63,7 +63,13 @@ staging, and recovery artifacts, not committed payloads.
   operator account management, in-app bucket creation, bucket/object browser
   with per-file upload, ranged download, guarded folder deletion, and resilient
   folder transitions that keep the last listing visible while the next folder
-  loads, plus the Telegram setup wizard.
+  loads. The browser also supports server-paginated bucket/folder listings,
+  bucket and recursive object search, result locations with direct parent-folder
+  navigation, and the existing download/share/link/delete actions on found
+  objects. The path-style bucket names `_public` and `_admin` are reserved for
+  the public-link and admin routes and are rejected by both the S3 and admin
+  creation paths. The Telegram setup wizard is also available in the same
+  console.
 - **Operational tooling** — a `telegram-s3` CLI (`users`, `config check`,
   `doctor`, `db`, `index`, `repair`, `gc --dry-run`), loopback-only health and
   metrics endpoints, and a production Docker image published to GHCR.

@@ -241,6 +241,8 @@ struct ObjectEntryWire {
     etag: String,
     expires_at: Option<String>,
     shared_links: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -249,6 +251,11 @@ struct ListObjectsResponse {
     prefix: String,
     folders: Vec<String>,
     objects: Vec<ObjectEntryWire>,
+    page: usize,
+    page_size: usize,
+    total: usize,
+    has_more: bool,
+    search: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -276,6 +283,17 @@ struct ShareLinksResponse {
 struct BucketEntryWire {
     name: String,
     created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct ListBucketsResponse {
+    buckets: Vec<BucketEntryWire>,
+    page: usize,
+    page_size: usize,
+    total: usize,
+    has_more: bool,
+    search: String,
 }
 
 fn rfc3339_unix(unix: i64) -> String {
@@ -464,7 +482,7 @@ impl AdminUiState {
             (Method::DELETE, p) if p.starts_with("users/") => {
                 self.handle_delete_user(p, &principal)
             }
-            (Method::GET, "buckets") => self.handle_list_buckets(),
+            (Method::GET, "buckets") => self.handle_list_buckets(request),
             (Method::POST, "buckets") => self.handle_create_bucket(request).await,
             (Method::DELETE, p) if p.starts_with("buckets/") => self.handle_delete_bucket(p),
             (Method::GET, "objects") => self.handle_list_objects(request),
@@ -817,19 +835,61 @@ impl AdminUiState {
 
     // ---- file-management (JSON) ----------------------------------------------
 
-    fn handle_list_buckets(&self) -> Response<Body> {
+    fn handle_list_buckets(&self, request: Request<Incoming>) -> Response<Body> {
+        let query = parse_list_params(request.uri().query().unwrap_or(""));
+        let search = query.get("search").cloned().unwrap_or_default();
+        if search.len() > 256 {
+            return json_error(StatusCode::BAD_REQUEST, "search query too long");
+        }
+        let page = match parse_page_param(&query, "page", 1) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
+        let page_size = match parse_page_param(&query, "page_size", 25) {
+            Ok(value) if value <= 100 => value,
+            Ok(_) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "page_size must be between 1 and 100",
+                );
+            }
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
+        let search_lower = search.to_lowercase();
         let buckets = match self.object_format.list_buckets() {
             Ok(buckets) => buckets,
             Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         };
-        let wire = buckets
+        let mut wire = buckets
             .into_iter()
+            .filter(|bucket| {
+                search_lower.is_empty() || bucket.name.to_lowercase().contains(&search_lower)
+            })
             .map(|bucket| BucketEntryWire {
                 name: bucket.name,
                 created_at: rfc3339(bucket.created_at),
             })
             .collect::<Vec<_>>();
-        json_response(StatusCode::OK, serde_json::json!({ "buckets": wire }))
+        let total = wire.len();
+        let start = page.saturating_sub(1).saturating_mul(page_size);
+        let end = start.saturating_add(page_size).min(total);
+        let has_more = end < total;
+        wire = if start < total {
+            wire.into_iter().skip(start).take(end - start).collect()
+        } else {
+            Vec::new()
+        };
+        json_response(
+            StatusCode::OK,
+            ListBucketsResponse {
+                buckets: wire,
+                page,
+                page_size,
+                total,
+                has_more,
+                search,
+            },
+        )
     }
 
     async fn handle_create_bucket(&self, request: Request<Incoming>) -> Response<Body> {
@@ -881,6 +941,25 @@ impl AdminUiState {
         if prefix.len() > 2048 {
             return json_error(StatusCode::BAD_REQUEST, "prefix too long");
         }
+        let search = query.get("search").cloned().unwrap_or_default();
+        if search.len() > 256 {
+            return json_error(StatusCode::BAD_REQUEST, "search query too long");
+        }
+        let page = match parse_page_param(&query, "page", 1) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
+        let page_size = match parse_page_param(&query, "page_size", 25) {
+            Ok(value) if value <= 100 => value,
+            Ok(_) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "page_size must be between 1 and 100",
+                );
+            }
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
+        let search_lower = search.to_lowercase();
         let manifests = match self
             .object_format
             .list_bucket_manifests(&bucket, Some(&prefix))
@@ -889,12 +968,17 @@ impl AdminUiState {
             Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         };
 
-        let delimiter = query.contains_key("delimiter");
+        // Search results are recursive so an operator can find an object in a
+        // nested folder and jump directly to its containing location.
+        let delimiter = query.contains_key("delimiter") && search.is_empty();
         let mut folders: Vec<String> = Vec::new();
-        let mut objects: Vec<ObjectEntryWire> = Vec::new();
+        let mut object_manifests = Vec::new();
 
         for manifest in manifests {
             let key = &manifest.key;
+            if !search_lower.is_empty() && !key.to_lowercase().contains(&search_lower) {
+                continue;
+            }
             let relative = key.strip_prefix(&prefix).unwrap_or(key);
             if delimiter && let Some(slash) = relative.find('/') {
                 let folder = prefix.clone() + &relative[..=slash];
@@ -906,19 +990,22 @@ impl AdminUiState {
             if relative.is_empty() {
                 continue;
             }
-            let shared_links = match self.store().share_link_count(&bucket, key) {
-                Ok(count) => count,
-                Err(error) => {
-                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
-                }
-            };
-            objects.push(object_to_wire(&manifest, key, shared_links));
+            object_manifests.push(manifest);
         }
         folders.sort();
-        objects.sort_by(|a, b| a.name.cmp(&b.name));
+        object_manifests.sort_by(|a, b| a.key.cmp(&b.key));
+        let total = folders.len() + object_manifests.len();
+        let start = page.saturating_sub(1).saturating_mul(page_size);
+        let end = start.saturating_add(page_size).min(total);
+        let has_more = end < total;
         // Report only basenames for folders/objects at this level.
         let folder_names = folders
             .iter()
+            .skip(start.min(folders.len()))
+            .take(
+                end.min(folders.len())
+                    .saturating_sub(start.min(folders.len())),
+            )
             .map(|path| {
                 path.strip_prefix(&prefix)
                     .unwrap_or(path)
@@ -926,12 +1013,41 @@ impl AdminUiState {
                     .to_string()
             })
             .collect::<Vec<_>>();
+        let object_start = start.saturating_sub(folders.len());
+        let object_end = end
+            .saturating_sub(folders.len())
+            .min(object_manifests.len());
+        let mut objects = Vec::new();
+        for manifest in object_manifests
+            .iter()
+            .skip(object_start.min(object_manifests.len()))
+            .take(object_end.saturating_sub(object_start.min(object_manifests.len())))
+        {
+            let key = &manifest.key;
+            let shared_links = match self.store().share_link_count(&bucket, key) {
+                Ok(count) => count,
+                Err(error) => {
+                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                }
+            };
+            let location = if search.is_empty() {
+                None
+            } else {
+                key.rsplit_once('/').map(|(parent, _)| format!("{parent}/"))
+            };
+            objects.push(object_to_wire(manifest, key, shared_links, location));
+        }
         json_response(
             StatusCode::OK,
             ListObjectsResponse {
                 prefix: prefix.clone(),
                 folders: folder_names,
                 objects,
+                page,
+                page_size,
+                total,
+                has_more,
+                search,
             },
         )
     }
@@ -2380,7 +2496,12 @@ async fn read_wizard_cancel_request(request: Request<Incoming>) -> Option<Wizard
     read_json_body_opt(request).await
 }
 
-fn object_to_wire(manifest: &ObjectManifest, key: &str, shared_links: u64) -> ObjectEntryWire {
+fn object_to_wire(
+    manifest: &ObjectManifest,
+    key: &str,
+    shared_links: u64,
+    location: Option<String>,
+) -> ObjectEntryWire {
     ObjectEntryWire {
         name: basename_key(key),
         key: key.to_string(),
@@ -2393,6 +2514,7 @@ fn object_to_wire(manifest: &ObjectManifest, key: &str, shared_links: u64) -> Ob
                 .ok()
         }),
         shared_links,
+        location,
     }
 }
 
@@ -2435,6 +2557,21 @@ fn parse_list_params(query: &str) -> std::collections::HashMap<String, String> {
     form_urlencoded::parse(query.as_bytes())
         .into_owned()
         .collect()
+}
+
+fn parse_page_param(
+    query: &std::collections::HashMap<String, String>,
+    name: &str,
+    default: usize,
+) -> Result<usize, String> {
+    match query.get(name) {
+        None => Ok(default),
+        Some(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|parsed| *parsed > 0)
+            .ok_or_else(|| format!("{name} must be a positive integer")),
+    }
 }
 
 fn session_anonymous() -> Response<Body> {
@@ -2499,7 +2636,8 @@ fn bucket_error_response(error: &crate::object_format::ObjectFormatError) -> Res
         crate::object_format::ObjectFormatError::Metadata(
             crate::metadata::MetadataError::InvalidManifest(message),
         )
-        | crate::object_format::ObjectFormatError::InvalidPlan(message) => {
+        | crate::object_format::ObjectFormatError::InvalidPlan(message)
+        | crate::object_format::ObjectFormatError::InvalidBucketName(message) => {
             json_error(StatusCode::BAD_REQUEST, message)
         }
         _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),

@@ -21,6 +21,11 @@ export interface BucketInfo {
 
 export interface BucketsState {
   buckets: BucketInfo[];
+  page?: number;
+  page_size?: number;
+  total?: number;
+  has_more?: boolean;
+  search?: string;
 }
 
 export interface ObjectEntry {
@@ -31,6 +36,8 @@ export interface ObjectEntry {
   etag: string;
   expires_at?: string | null;
   shared_links: number;
+  /** Parent folder path, supplied for recursive search results. */
+  location?: string | null;
   /** True when this row represents a durable upload that is not committed yet. */
   uploading?: boolean;
   upload_state?: string;
@@ -61,6 +68,11 @@ export interface ObjectsState {
   prefix: string;
   folders: string[];
   objects: ObjectEntry[];
+  page?: number;
+  page_size?: number;
+  total?: number;
+  has_more?: boolean;
+  search?: string;
 }
 
 export interface UsersState {

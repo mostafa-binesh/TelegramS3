@@ -93,6 +93,15 @@
 
   let buckets: BucketInfo[] = [];
   let newBucket = '';
+  const browserPageSize = 25;
+  let bucketSearch = '';
+  let bucketPage = 1;
+  let bucketTotal = 0;
+  let objectSearch = '';
+  let objectPage = 1;
+  let objectTotal = 0;
+  let bucketSearchTimer: ReturnType<typeof setTimeout> | null = null;
+  let objectSearchTimer: ReturnType<typeof setTimeout> | null = null;
   $: view = $route.view;
   $: selectedBucket = $route.bucket;
   $: currentPrefix = $route.prefix;
@@ -520,12 +529,15 @@
     }
   }
 
-  async function refreshBuckets() {
+  async function refreshBuckets(options: { page?: number } = {}) {
     const csrf = session?.csrf_token;
+    const requestedPage = options.page ?? bucketPage;
     bucketsLoading = true;
     try {
-      const res = await listBuckets(csrf);
+      const res = await listBuckets(csrf, { search: bucketSearch, page: requestedPage, pageSize: browserPageSize });
       buckets = res.buckets ?? [];
+      bucketPage = res.page ?? requestedPage;
+      bucketTotal = res.total ?? buckets.length;
       bucketsError = '';
     } catch (cause) {
       bucketsError = normalizeError(cause);
@@ -539,6 +551,8 @@
     listing = null;
     objectsError = '';
     selectedKeys = [];
+    objectSearch = '';
+    objectPage = 1;
     navigate({ view: 'buckets', bucket: name, prefix: '' });
   }
 
@@ -546,14 +560,49 @@
     listing = null;
     objectsError = '';
     selectedKeys = [];
+    objectSearch = '';
+    objectPage = 1;
     navigate({ view: 'buckets', bucket: '', prefix: '' });
+  }
+
+  function searchBuckets(value: string) {
+    bucketSearch = value;
+    bucketPage = 1;
+    if (bucketSearchTimer) clearTimeout(bucketSearchTimer);
+    bucketSearchTimer = setTimeout(() => {
+      bucketSearchTimer = null;
+      void refreshBuckets({ page: 1 });
+    }, 240);
+  }
+
+  function goToBucketPage(page: number) {
+    const lastPage = Math.max(1, Math.ceil(bucketTotal / browserPageSize));
+    bucketPage = Math.min(lastPage, Math.max(1, page));
+    void refreshBuckets({ page: bucketPage });
+  }
+
+  function searchObjects(value: string) {
+    objectSearch = value;
+    objectPage = 1;
+    if (objectSearchTimer) clearTimeout(objectSearchTimer);
+    objectSearchTimer = setTimeout(() => {
+      objectSearchTimer = null;
+      void refreshObjects(selectedBucket, currentPrefix, { page: 1 });
+    }, 240);
+  }
+
+  function goToObjectPage(page: number) {
+    const lastPage = Math.max(1, Math.ceil(objectTotal / browserPageSize));
+    objectPage = Math.min(lastPage, Math.max(1, page));
+    void refreshObjects(selectedBucket, currentPrefix, { page: objectPage });
   }
 
   function mergeActiveUploads(
     nextListing: ObjectsState,
     uploads: MultipartUpload[],
     bucket: string,
-    prefix: string
+    prefix: string,
+    search = ''
   ): ObjectsState {
     const objects = new Map(nextListing.objects.map((object) => [object.key, object]));
     const folders = new Set(nextListing.folders);
@@ -561,6 +610,7 @@
 
     for (const upload of uploads) {
       if (upload.bucket !== bucket || !activeStates.has(upload.state) || !upload.key.startsWith(prefix)) continue;
+      if (search && !upload.key.toLowerCase().includes(search.toLowerCase())) continue;
       const relative = upload.key.slice(prefix.length);
       if (!relative) continue;
       const slash = relative.indexOf('/');
@@ -595,7 +645,7 @@
   async function refreshObjects(
     bucket = selectedBucket,
     prefix = currentPrefix,
-    options: { silent?: boolean } = {}
+    options: { silent?: boolean; page?: number } = {}
   ) {
     if (!bucket) return;
     // A background poll must not supersede the foreground load that owns the
@@ -603,6 +653,7 @@
     // finally block would no longer be allowed to clear objectsLoading.
     if (options.silent && objectsLoading) return;
     const csrf = session?.csrf_token;
+    const requestedPage = options.page ?? objectPage;
     const requestSerial = ++objectsRequestSerial;
     const routeKey = `${bucket}|${prefix}`;
     objectsError = '';
@@ -611,7 +662,11 @@
       objectsLoading = true;
     }
     try {
-      const nextListing = await listObjects(csrf, bucket, prefix);
+      const nextListing = await listObjects(csrf, bucket, prefix, !objectSearch, {
+        search: objectSearch,
+        page: requestedPage,
+        pageSize: browserPageSize
+      });
       let uploads = activeUploadsByRoute.get(routeKey) ?? [];
       try {
         uploads = (await listMultipartUploads(bucket, prefix, csrf)).uploads ?? [];
@@ -622,7 +677,9 @@
         // snapshot so the in-flight row does not disappear and reappear.
       }
       if (requestSerial === objectsRequestSerial && routeKey === `${selectedBucket}|${currentPrefix}`) {
-        listing = mergeActiveUploads(nextListing, uploads, bucket, prefix);
+        listing = mergeActiveUploads(nextListing, uploads, bucket, prefix, objectSearch);
+        objectPage = nextListing.page ?? requestedPage;
+        objectTotal = nextListing.total ?? (nextListing.folders.length + nextListing.objects.length);
         objectsError = '';
       }
     } catch (cause) {
@@ -673,11 +730,22 @@
 
   function enterFolder(name: string) {
     selectedKeys = [];
+    objectSearch = '';
+    objectPage = 1;
     navigate({ view: 'buckets', bucket: selectedBucket, prefix: `${currentPrefix}${name}/` });
+  }
+
+  function goToSearchResultFolder(location: string) {
+    selectedKeys = [];
+    objectSearch = '';
+    objectPage = 1;
+    navigate({ view: 'buckets', bucket: selectedBucket, prefix: location });
   }
 
   function gotoCrumb(i: number) {
     selectedKeys = [];
+    objectSearch = '';
+    objectPage = 1;
     const parts = currentPrefix.split('/').filter(Boolean).slice(0, i);
     navigate({ view: 'buckets', bucket: selectedBucket, prefix: parts.map((p) => p + '/').join('') });
   }
@@ -928,7 +996,7 @@
       {#if view === 'buckets' && selectedBucket}
         <div class="header-address" aria-label="Current bucket location">
           <button class="btn-link" type="button" on:click={exitBucket}>All buckets</button><span>/</span>
-          <button class="btn-link" type="button" on:click={() => navigate({view: 'buckets', bucket: selectedBucket, prefix: ''})}>{selectedBucket}</button>
+          <button class="btn-link" type="button" on:click={() => gotoCrumb(0)}>{selectedBucket}</button>
           {#each crumbs() as crumb, i (crumb + i)}<span>/</span><button class="btn-link" type="button" on:click={() => gotoCrumb(i + 1)}>{crumb}</button>{/each}
         </div>
       {:else}<h1>{view==='users'?'Operators':view==='telegram'?'Telegram settings':view.charAt(0).toUpperCase()+view.slice(1)}</h1>{/if}
@@ -980,7 +1048,7 @@
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} {bucketSearch} {bucketPage} {bucketTotal} {objectSearch} {objectPage} {objectTotal} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'users'}
       {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} error={usersError} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={(id: string) => requestDelete({ type: 'operator', name: users.find((user) => user.id === id)?.username ?? id, key: id })} onAdd={openOperatorModal}/>{:else if routeLoadError}<LoadError title="Could not load operator accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
     {/if}
