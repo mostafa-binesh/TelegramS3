@@ -774,6 +774,11 @@ impl ObjectFormatService {
         &self,
         account_id: &str,
     ) -> Result<Arc<TelegramTransportManager>, ObjectFormatError> {
+        if let Ok(managers) = self.account_managers.lock()
+            && let Some(manager) = managers.get(account_id)
+        {
+            return Ok(Arc::clone(manager));
+        }
         let (_, settings) = self.metadata.telegram_account(account_id)?.ok_or_else(|| {
             ObjectFormatError::InvalidPlan("target Telegram account is not configured".into())
         })?;
@@ -808,7 +813,19 @@ impl ObjectFormatService {
                 .telegram_proxy_mode
                 .unwrap_or_else(|| "auto".into()),
         };
-        Ok(TelegramTransportManager::open_for_bootstrap(config, bootstrap).await?)
+        let manager = TelegramTransportManager::open_for_bootstrap(config, bootstrap).await?;
+        // Prime the first health result once, then keep it fresh in the
+        // background. A failed prime is left for the monitor to classify as a
+        // disconnected account without blocking the caller indefinitely.
+        let _ = manager.refresh().await;
+        manager.start_health_monitor();
+        if let Ok(mut managers) = self.account_managers.lock() {
+            if let Some(existing) = managers.get(account_id) {
+                return Ok(Arc::clone(existing));
+            }
+            managers.insert(account_id.to_string(), Arc::clone(&manager));
+        }
+        Ok(manager)
     }
 
     async fn upload_replica_bytes(

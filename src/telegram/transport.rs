@@ -752,6 +752,21 @@ impl TelegramTransportManager {
         Ok(health)
     }
 
+    /// Replace the live transport after bootstrap settings were edited. This
+    /// drops the old client without logging the Telegram account out and then
+    /// opens the new session/configuration.
+    pub async fn reload(&self) -> Result<TelegramConnectionHealth, TelegramTransportError> {
+        self.shutdown_health_monitor().await;
+        let _refresh = self.refresh_lock.lock().await;
+        self.transport.write().await.take();
+        *self.health.write().await = not_configured_health(
+            &self.config,
+            "Telegram connection reloading after settings change".to_string(),
+        );
+        drop(_refresh);
+        self.refresh().await
+    }
+
     /// Detach the live Telegram transport and remove its local session after a
     /// connection-removal job has completed. Logout is best effort: local
     /// connection removal must still be able to finish when Telegram is down.

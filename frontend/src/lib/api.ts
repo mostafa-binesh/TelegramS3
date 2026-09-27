@@ -210,12 +210,14 @@ export function deleteUser(csrf?: string | null, id?: string) {
 
 export function listBuckets(
   csrf?: string | null,
-  options: { search?: string; page?: number; pageSize?: number } = {}
+  options: { search?: string; page?: number; pageSize?: number; sort?: string; order?: string } = {}
 ) {
   const qp = new URLSearchParams();
   if (options.search) qp.set('search', options.search);
   if (options.page) qp.set('page', String(options.page));
   if (options.pageSize) qp.set('page_size', String(options.pageSize));
+  if (options.sort) qp.set('sort', options.sort);
+  if (options.order) qp.set('order', options.order);
   const suffix = qp.toString() ? `?${qp.toString()}` : '';
   return requestJson<BucketsState>(`/buckets${suffix}`, csrf);
 }
@@ -225,13 +227,13 @@ export function listAccounts(csrf?: string | null) {
 }
 
 export function saveAccount(csrf: string | null | undefined, body: {
-  id?: string; label: string; phone?: string; telegram_api_id: string;
-  telegram_api_hash: string; telegram_session_path?: string;
-  telegram_storage_chat_id: string; telegram_proxy_url?: string;
+  id?: string; label: string; phone?: string; telegram_api_id?: string;
+  telegram_api_hash?: string; telegram_session_path?: string;
+  telegram_storage_chat_id?: string; telegram_proxy_url?: string;
   telegram_proxy_username?: string; telegram_proxy_password?: string;
-  telegram_proxy_mode?: string;
+  telegram_proxy_mode?: string; download_enabled?: boolean;
 }) {
-  return requestJson<{account: AccountInfo}>('/accounts', csrf, {method: 'POST', body});
+  return requestJson<{account: AccountInfo; refresh_error?: string | null}>('/accounts', csrf, {method: 'POST', body});
 }
 
 export function deleteAccount(csrf: string | null | undefined, id: string) {
@@ -298,13 +300,15 @@ export function listObjects(
   bucket: string,
   prefix: string,
   delimiter = true,
-  options: { search?: string; page?: number; pageSize?: number } = {}
+  options: { search?: string; page?: number; pageSize?: number; sort?: string; order?: string } = {}
 ) {
   const qp = new URLSearchParams({ bucket, prefix });
   if (delimiter) qp.set('delimiter', '1');
   if (options.search) qp.set('search', options.search);
   if (options.page) qp.set('page', String(options.page));
   if (options.pageSize) qp.set('page_size', String(options.pageSize));
+  if (options.sort) qp.set('sort', options.sort);
+  if (options.order) qp.set('order', options.order);
   return requestJson<ObjectsState>(`/objects?${qp.toString()}`, csrf);
 }
 

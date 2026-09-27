@@ -40,9 +40,10 @@ Each object is represented by:
 3. a local index row and journal entry
 4. optional multipart session and part rows while an upload is in progress
 
-Schema v16 additionally stores an account registry, durable replication jobs,
+Schema v17 additionally stores an account registry, durable replication jobs,
 selected-object replication scopes, replica/access locations, and re-chunk
-locks/jobs. The `object_keys_json` migration is additive: an empty array keeps
+locks/jobs. Account rows include `download_enabled`, an additive read-selection
+policy that defaults to enabled for existing data. The `object_keys_json` migration is additive: an empty array keeps
 existing whole-bucket replication behavior, while a populated array limits a
 job to the selected keys. These rows are additive and do not rewrite existing
 object ownership. `ChunkRef.replicas` is optional so
@@ -55,6 +56,16 @@ encryption identity. Access-only replication records the source location and
 requires the target Telegram session to have access to that group/chat.
 Re-chunking stages a replacement object with a new chunk policy, then commits
 it through the normal transfer journal. A lock prevents mixed old/new reads.
+The storage operation is object-scoped. The admin bucket selection may expand
+selected buckets into one durable job per committed object before invoking the
+worker. Replica locations belong to the old manifest;
+they are not silently treated as valid locations for the replacement chunk
+layout and are handled by the old manifest's evidence-first cleanup. Re-run
+replication after re-chunking when alternate physical copies are required.
+The shared reader filters primary and replica locations by the account download
+policy before its deterministic round-robin selection. If every location is
+disabled, the read fails closed with an unavailable-source error; no account
+policy can redirect cleanup through another credential.
 
 ## Default Chunk Size
 
@@ -355,7 +366,12 @@ search recursively matches keys under the selected bucket/prefix and returns a
 parent `location` for each match. The UI can jump from that location directly to
 the containing folder, while download/share/link-manager/delete actions continue
 to operate on the canonical full object key. Pagination and search do not change
-manifest ordering, chunk references, or visibility rules.
+manifest ordering, chunk references, or visibility rules. The admin listing
+endpoints also accept validated sort keys and ascending/descending order; sorting
+is applied to the complete metadata result before the requested page is sliced.
+Folder entries remain name-ordered when an object-only column such as size or
+modified time is selected because folders have no object size or modification
+timestamp.
 
 Bucket creation also protects the HTTP namespace: exact names `_public` and
 `_admin` are reserved for public share links and the authenticated admin

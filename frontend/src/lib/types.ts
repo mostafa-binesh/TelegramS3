@@ -53,6 +53,10 @@ export interface ObjectEntry {
   rechunking?: boolean;
 }
 
+export type SortDirection = 'asc' | 'desc';
+export type BucketSortKey = 'name' | 'created_at' | 'accounts';
+export type ObjectSortKey = 'name' | 'size' | 'last_modified';
+
 export interface SearchResult extends ObjectEntry {
   bucket: string;
 }
@@ -210,6 +214,14 @@ export interface OverviewState {
     connection_state: string;
     detail: string;
     storage_chat_id?: string | null;
+    accounts?: Array<{
+      id: string;
+      label: string;
+      state: string;
+      detail: string;
+      connected: boolean;
+      download_enabled: boolean;
+    }>;
   };
   checks?: { label: string; ok: boolean; detail: string }[];
   connection_removal?: {
@@ -298,6 +310,7 @@ export interface AccountInfo {
   storage_chat_id?: string | null;
   replica_objects: number;
   access_objects: number;
+  download_enabled: boolean;
   created_at: number;
   updated_at: number;
 }

@@ -22,7 +22,9 @@ use crate::manifest::ObjectManifest;
 use crate::metadata::{
     MetadataStore, RecoveryAck, RecoveryAcknowledgements, TelegramBootstrapSettings,
 };
-use crate::object_format::{ObjectFormatService, RecoveryIssue as RecoveryIssueModel};
+use crate::object_format::{
+    ObjectFormatService, RecoveryIssue as RecoveryIssueModel, TelegramAccountHealthSnapshot,
+};
 use crate::redact::redact_path;
 use crate::telegram::{
     LoginDriverError, LoginStage, SessionState, TelegramConnectionHealth, TelegramLoginDriver,
@@ -180,14 +182,15 @@ struct AccountRequest {
     id: Option<String>,
     label: String,
     phone: Option<String>,
-    telegram_api_id: String,
-    telegram_api_hash: String,
+    telegram_api_id: Option<String>,
+    telegram_api_hash: Option<String>,
     telegram_session_path: Option<String>,
-    telegram_storage_chat_id: String,
+    telegram_storage_chat_id: Option<String>,
     telegram_proxy_url: Option<String>,
     telegram_proxy_username: Option<String>,
     telegram_proxy_password: Option<String>,
     telegram_proxy_mode: Option<String>,
+    download_enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -614,34 +617,47 @@ impl AdminUiState {
             Ok(body) => body,
             Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid account payload"),
         };
-        let storage_chat_id =
-            match normalize_telegram_storage_chat_id(Some(&body.telegram_storage_chat_id)) {
+        let existing = match body.id.as_deref() {
+            Some(id) => match self.store().telegram_account(id) {
                 Ok(value) => value,
-                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error.to_string()),
-            };
+                Err(error) => {
+                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                }
+            },
+            None => None,
+        };
+        let existing_settings = existing.as_ref().map(|(_, settings)| settings);
+        let api_id = clean_required(body.telegram_api_id)
+            .or_else(|| existing_settings.and_then(|settings| settings.telegram_api_id.clone()));
+        let api_hash = clean_required(body.telegram_api_hash)
+            .or_else(|| existing_settings.and_then(|settings| settings.telegram_api_hash.clone()));
+        let session_path = clean_optional(body.telegram_session_path).or_else(|| {
+            existing_settings.and_then(|settings| settings.telegram_session_path.clone())
+        });
+        let storage_chat = body.telegram_storage_chat_id.or_else(|| {
+            existing_settings.and_then(|settings| settings.telegram_storage_chat_id.clone())
+        });
+        let storage_chat_id = match normalize_telegram_storage_chat_id(storage_chat.as_deref()) {
+            Ok(value) => value,
+            Err(error) => return json_error(StatusCode::BAD_REQUEST, &error.to_string()),
+        };
         let settings = TelegramBootstrapSettings {
-            telegram_api_id: Some(body.telegram_api_id.trim().to_string()),
-            telegram_api_hash: Some(body.telegram_api_hash.trim().to_string()),
-            telegram_session_path: body
-                .telegram_session_path
-                .map(|value| value.trim().to_string()),
+            telegram_api_id: api_id,
+            telegram_api_hash: api_hash,
+            telegram_session_path: session_path,
             telegram_storage_chat_id: Some(storage_chat_id),
-            telegram_proxy_url: body
-                .telegram_proxy_url
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
-            telegram_proxy_username: body
-                .telegram_proxy_username
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
-            telegram_proxy_password: body
-                .telegram_proxy_password
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
-            telegram_proxy_mode: body
-                .telegram_proxy_mode
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
+            telegram_proxy_url: clean_optional(body.telegram_proxy_url).or_else(|| {
+                existing_settings.and_then(|settings| settings.telegram_proxy_url.clone())
+            }),
+            telegram_proxy_username: clean_optional(body.telegram_proxy_username).or_else(|| {
+                existing_settings.and_then(|settings| settings.telegram_proxy_username.clone())
+            }),
+            telegram_proxy_password: clean_optional(body.telegram_proxy_password).or_else(|| {
+                existing_settings.and_then(|settings| settings.telegram_proxy_password.clone())
+            }),
+            telegram_proxy_mode: clean_optional(body.telegram_proxy_mode).or_else(|| {
+                existing_settings.and_then(|settings| settings.telegram_proxy_mode.clone())
+            }),
         };
         if let Err(error) = validate_telegram_bootstrap_settings(&settings) {
             return json_error(StatusCode::BAD_REQUEST, &error.to_string());
@@ -656,9 +672,38 @@ impl AdminUiState {
             body.id.as_deref(),
             body.label.trim(),
             &settings,
-            body.phone.as_deref(),
+            body.phone.as_deref().or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|(account, _)| account.phone.as_deref())
+            }),
+            body.download_enabled,
         ) {
-            Ok(account) => json_response(StatusCode::OK, serde_json::json!({"account": account})),
+            Ok(account) => {
+                let active = self.store().active_connection_id().ok().flatten();
+                let refresh_error = if active.as_deref() == Some(account.id.as_str()) {
+                    if let Err(error) = self.store().set_telegram_bootstrap_settings(&settings) {
+                        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                    }
+                    self.object_format.set_storage_chat_id(
+                        settings
+                            .telegram_storage_chat_id
+                            .clone()
+                            .unwrap_or_default(),
+                    );
+                    match self.transport_manager.reload().await {
+                        Ok(_) => None,
+                        Err(error) => Some(error.to_string()),
+                    }
+                } else {
+                    self.object_format.invalidate_account_manager(&account.id);
+                    None
+                };
+                json_response(
+                    StatusCode::OK,
+                    serde_json::json!({"account": account, "refresh_error": refresh_error}),
+                )
+            }
             Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         }
     }
@@ -666,7 +711,10 @@ impl AdminUiState {
     fn handle_delete_account(&self, path: &str) -> Response<Body> {
         let id = path.trim_start_matches("accounts/");
         match self.store().delete_telegram_account(id) {
-            Ok(true) => json_response(StatusCode::OK, serde_json::json!({"ok": true})),
+            Ok(true) => {
+                self.object_format.invalidate_account_manager(id);
+                json_response(StatusCode::OK, serde_json::json!({"ok": true}))
+            }
             Ok(false) => json_error(StatusCode::NOT_FOUND, "account not found"),
             Err(error) => json_error(StatusCode::CONFLICT, &error.to_string()),
         }
@@ -1167,6 +1215,17 @@ impl AdminUiState {
             }
             Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
         };
+        let sort = query.get("sort").map(String::as_str).unwrap_or("name");
+        if !matches!(sort, "name" | "created_at" | "accounts") {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "sort must be name, created_at, or accounts",
+            );
+        }
+        let descending = match parse_sort_order(&query) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
         let search_lower = search.to_lowercase();
         let replica_summary = self.bucket_replica_summary();
         let buckets = match self.object_format.list_buckets() {
@@ -1191,6 +1250,20 @@ impl AdminUiState {
                     .unwrap_or(0),
             })
             .collect::<Vec<_>>();
+        wire.sort_by(|a, b| {
+            let ordering = match sort {
+                "created_at" => a.created_at.cmp(&b.created_at),
+                "accounts" => (a.replica_accounts + a.access_accounts)
+                    .cmp(&(b.replica_accounts + b.access_accounts))
+                    .then_with(|| a.name.cmp(&b.name)),
+                _ => a.name.cmp(&b.name),
+            };
+            if descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
         let total = wire.len();
         let start = page.saturating_sub(1).saturating_mul(page_size);
         let end = start.saturating_add(page_size).min(total);
@@ -1387,6 +1460,17 @@ impl AdminUiState {
             }
             Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
         };
+        let sort = query.get("sort").map(String::as_str).unwrap_or("name");
+        if !matches!(sort, "name" | "size" | "last_modified") {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "sort must be name, size, or last_modified",
+            );
+        }
+        let descending = match parse_sort_order(&query) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
         let search_lower = search.to_lowercase();
         let manifests = match self
             .object_format
@@ -1420,8 +1504,32 @@ impl AdminUiState {
             }
             object_manifests.push(manifest);
         }
-        folders.sort();
-        object_manifests.sort_by(|a, b| a.key.cmp(&b.key));
+        folders.sort_by(|a, b| {
+            let ordering = a.cmp(b);
+            if sort == "name" && descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
+        object_manifests.sort_by(|a, b| {
+            let ordering = match sort {
+                "size" => a
+                    .content_length
+                    .cmp(&b.content_length)
+                    .then_with(|| a.key.cmp(&b.key)),
+                "last_modified" => a
+                    .created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.key.cmp(&b.key)),
+                _ => a.key.cmp(&b.key),
+            };
+            if descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
         let total = folders.len() + object_manifests.len();
         let start = page.saturating_sub(1).saturating_mul(page_size);
         let end = start.saturating_add(page_size).min(total);
@@ -2493,14 +2601,23 @@ impl AdminUiState {
             .ok()
             .flatten();
         let health = self.telegram_health_snapshot().await;
+        let account_health = self
+            .object_format
+            .telegram_account_health_snapshots()
+            .await
+            .unwrap_or_default();
         let session_state = health.status.session_state.clone();
         let session_state_debug = format!("{session_state:?}");
-        let session_usable = telegram_session_usable(session_state.clone());
+        let (connection_state, connection_detail) =
+            aggregate_telegram_health(&account_health, &health);
+        let session_usable = connection_state == "connected"
+            || (account_health.is_empty() && telegram_session_usable(session_state.clone()));
         let telegram = TelegramStateWire {
             session_state: session_state_debug.clone(),
-            connection_state: telegram_connection_state_label(&health.state).to_string(),
-            detail: health.detail.clone(),
+            connection_state: connection_state.to_string(),
+            detail: connection_detail,
             storage_chat_id: Some(health.status.storage_chat_id.clone()),
+            accounts: account_health,
         };
         let storage = StorageWire {
             metadata_path: redact_path(&self.config.metadata_path().display().to_string()),
@@ -2682,6 +2799,40 @@ fn telegram_connection_state_label(
         crate::telegram::TelegramConnectionState::NeedsReauth => "needs_reauth",
         crate::telegram::TelegramConnectionState::NotConfigured => "not_configured",
     }
+}
+
+fn aggregate_telegram_health(
+    accounts: &[TelegramAccountHealthSnapshot],
+    primary: &TelegramConnectionHealth,
+) -> (&'static str, String) {
+    if accounts.is_empty() {
+        return (
+            telegram_connection_state_label(&primary.state),
+            primary.detail.clone(),
+        );
+    }
+    let connected = accounts.iter().filter(|account| account.connected).count();
+    let state = if connected == accounts.len() {
+        "connected"
+    } else if connected > 0 {
+        "partial"
+    } else {
+        "disconnected"
+    };
+    let detail = match state {
+        "connected" => format!("All {} Telegram accounts are connected", accounts.len()),
+        "partial" => format!(
+            "{} of {} Telegram accounts are connected",
+            connected,
+            accounts.len()
+        ),
+        _ => accounts
+            .iter()
+            .find(|account| !account.detail.is_empty())
+            .map(|account| account.detail.clone())
+            .unwrap_or_else(|| "No Telegram accounts are connected".to_string()),
+    };
+    (state, detail)
 }
 
 fn clean_required(value: Option<String>) -> Option<String> {
@@ -3017,6 +3168,14 @@ fn parse_page_param(
     }
 }
 
+fn parse_sort_order(query: &std::collections::HashMap<String, String>) -> Result<bool, String> {
+    match query.get("order").map(String::as_str) {
+        None | Some("asc") => Ok(false),
+        Some("desc") => Ok(true),
+        Some(_) => Err("order must be asc or desc".to_string()),
+    }
+}
+
 fn session_anonymous() -> Response<Body> {
     json_response(
         StatusCode::OK,
@@ -3314,6 +3473,7 @@ struct TelegramStateWire {
     connection_state: String,
     detail: String,
     storage_chat_id: Option<String>,
+    accounts: Vec<TelegramAccountHealthSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]

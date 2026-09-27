@@ -96,6 +96,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_download_prefetch_setting(connection)?;
         ensure_traffic_totals_schema(connection)?;
         ensure_multi_account_schema(connection)?;
+        ensure_account_download_policy(connection)?;
         ensure_replication_scope_schema(connection)?;
         return Ok(());
     }
@@ -361,6 +362,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_download_prefetch_setting(connection)?;
     ensure_traffic_totals_schema(connection)?;
     ensure_multi_account_schema(connection)?;
+    ensure_account_download_policy(connection)?;
     ensure_replication_scope_schema(connection)?;
     Ok(())
 }
@@ -376,6 +378,7 @@ fn ensure_multi_account_schema(connection: &mut Connection) -> Result<(), Metada
             label TEXT NOT NULL,
             bootstrap_json TEXT NOT NULL,
             phone TEXT,
+            download_enabled INTEGER NOT NULL DEFAULT 1,
             state TEXT NOT NULL DEFAULT 'configured',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
@@ -477,6 +480,24 @@ fn ensure_multi_account_schema(connection: &mut Connection) -> Result<(), Metada
         connection.execute(
             "UPDATE telegram_accounts SET bootstrap_json=?2,updated_at=?3 WHERE id=?1",
             params![connection_id, bootstrap, now],
+        )?;
+    }
+    Ok(())
+}
+
+/// Account download eligibility is deliberately separate from ownership and
+/// cleanup state. Disabling it only removes the account from read selection;
+/// uploads and remote cleanup continue to use their durable owner.
+fn ensure_account_download_policy(connection: &mut Connection) -> Result<(), MetadataError> {
+    let has_column: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('telegram_accounts') WHERE name='download_enabled')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_column {
+        connection.execute(
+            "ALTER TABLE telegram_accounts ADD COLUMN download_enabled INTEGER NOT NULL DEFAULT 1",
+            [],
         )?;
     }
     Ok(())
@@ -1003,6 +1024,64 @@ mod tests {
         let jobs = store.list_replication_jobs().expect("jobs");
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].object_keys.is_empty());
+    }
+
+    #[test]
+    fn migration_from_version_sixteen_adds_download_policy_without_changing_accounts() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("metadata.sqlite");
+        {
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE schema_version (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        version INTEGER NOT NULL,
+                        applied_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_version (id, version, applied_at)
+                    VALUES (1, 16, '2026-09-27T00:00:00Z');
+                    CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+                    CREATE TABLE telegram_accounts (
+                        id TEXT PRIMARY KEY,
+                        label TEXT NOT NULL,
+                        bootstrap_json TEXT NOT NULL,
+                        phone TEXT,
+                        state TEXT NOT NULL DEFAULT 'configured',
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+                    INSERT INTO telegram_accounts(id,label,bootstrap_json,state,created_at,updated_at)
+                    VALUES ('old-account','Old account','{}','configured',1,1);
+                    "#,
+                )
+                .expect("seed");
+        }
+
+        let store = MetadataStore::open(&path).expect("migrate");
+        assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+        let account = store
+            .list_telegram_accounts()
+            .expect("accounts")
+            .into_iter()
+            .next()
+            .expect("old account");
+        assert!(account.download_enabled);
+        store
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE telegram_accounts SET download_enabled=0 WHERE id='old-account'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("disable policy");
+        assert!(
+            !store
+                .telegram_account_download_enabled("old-account")
+                .expect("policy")
+        );
     }
 
     #[test]

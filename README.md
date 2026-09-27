@@ -69,7 +69,8 @@ staging, and recovery artifacts, not committed payloads.
   folder transitions that keep the last listing visible while the next folder
   loads. The browser also supports server-paginated bucket/folder listings,
   bucket and recursive object search, result locations with direct parent-folder
-  navigation, and the existing download/share/link/delete actions on found
+  navigation, sortable bucket and object columns across paginated results, and
+  the existing download/share/link/delete actions on found
   objects. The path-style bucket names `_public` and `_admin` are reserved for
   the public-link and admin routes and are rejected by both the S3 and admin
   creation paths. The Telegram setup wizard is also available in the same
@@ -87,10 +88,17 @@ staging, and recovery artifacts, not committed payloads.
   visible in Buckets, and ready replicas participate in round-robin reads. The
   Accounts workspace owns primary and additional connections together, with
   separate Connections, Replication, and Maintenance tabs; selected objects
-  can be replicated from the same details flow as whole buckets.
+  can be replicated from the same details flow as whole buckets. Each account
+  has an independent persisted download eligibility switch, so an operator can
+  temporarily remove one physical replica from read selection without changing
+  ownership or cleanup. Overview health is aggregated across accounts and shows
+  per-account connection indicators.
 - **Maintenance queues** — selected bucket objects can be re-chunked through a
   bounded durable worker. Objects are locked and report temporary
-  unavailability while their replacement manifest is published.
+  unavailability while their replacement manifest is published. The bucket
+  browser also supports selecting visible buckets for guarded bulk deletion or
+  re-chunking every committed object in those buckets. Re-chunking does not
+  automatically rebuild old physical replicas.
 - **Session recovery** — an expired admin session synchronizes with the
   guest-safe session endpoint and returns to the login screen instead of
   leaving a stale “not authenticated” error in the SPA.

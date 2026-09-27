@@ -35,3 +35,31 @@ manifests remain backward-compatible because replica lists are optional.
   transaction. Operators must monitor failed jobs and recovery state.
 - Re-chunking temporarily returns an explicit retry-later response for the
   object, preserving consistency over availability during the swap.
+
+## Follow-up: read eligibility and connection workspace
+
+Each account also stores a `download_enabled` flag. It is deliberately a read
+policy, not an ownership or cleanup policy: disabling an account removes its
+primary, replica, and access locations from client download selection while
+leaving uploads, immutable ownership, and evidence-first cleanup unchanged. If
+no eligible location remains, the reader fails closed instead of silently using
+a disabled credential.
+
+Re-chunking remains object-scoped. It publishes a replacement manifest with a
+new chunk layout; replica locations attached to the old manifest are not
+silently reused because their message bytes no longer map to the replacement
+chunks. The old manifest and its replica locations follow the existing
+evidence-first cleanup path. Operators must queue replication again when
+alternate physical copies are required after re-chunking.
+
+The bucket browser supports selecting multiple bucket rows. Its re-chunk action
+expands each selected bucket into its committed object keys and queues the same
+one-object-per-job workflow; the storage layer remains intentionally
+object-scoped so locks and progress are independently recoverable.
+
+The admin UI treats the primary and additional connections as one account
+workspace. Account cards share one add/edit form, and Overview derives one
+aggregate state (`connected`, `partial`, or `disconnected`) from per-account
+health while exposing named indicators for each connection. Account transports
+are cached after their first health probe so recurring Overview refreshes do
+not rebuild every secondary transport.

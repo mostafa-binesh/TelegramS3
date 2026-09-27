@@ -50,7 +50,10 @@
     TelegramSettings,
     MultipartUpload,
     UserInfo,
-    ReplicaInfo
+    ReplicaInfo,
+    BucketSortKey,
+    ObjectSortKey,
+    SortDirection
   } from './lib/types';
   import TopProgress from './components/TopProgress.svelte';
   import Toasts from './components/Toasts.svelte';
@@ -106,6 +109,8 @@
   let bucketSearch = '';
   let bucketPage = 1;
   let bucketTotal = 0;
+  let bucketSortKey: BucketSortKey = 'name';
+  let bucketSortDirection: SortDirection = 'asc';
   let globalSearchResults: SearchResult[] = [];
   let globalSearchPage = 1;
   let globalSearchTotal = 0;
@@ -115,6 +120,8 @@
   let objectSearch = '';
   let objectPage = 1;
   let objectTotal = 0;
+  let objectSortKey: ObjectSortKey = 'name';
+  let objectSortDirection: SortDirection = 'asc';
   let bucketSearchTimer: ReturnType<typeof setTimeout> | null = null;
   let objectSearchTimer: ReturnType<typeof setTimeout> | null = null;
   $: view = $route.view;
@@ -148,7 +155,8 @@
   let sharedLinks: SharedLink[] = [];
   let sharedLinksBusy = false;
   let sharedLinksError = '';
-  let deleteTarget: { type: 'bucket' | 'object' | 'folder' | 'selection' | 'operator'; name: string; key?: string } | null = null;
+  let deleteTarget: { type: 'bucket' | 'bucket-selection' | 'object' | 'folder' | 'selection' | 'operator'; name: string; key?: string } | null = null;
+  let selectedBuckets: string[] = [];
   let selectedKeys: string[] = [];
   let showMoveModal = false;
   let showReplicaModal = false;
@@ -161,6 +169,7 @@
   let replicaBucket = '';
   let stageTestBusy = false;
   let showRechunkModal = false;
+  let rechunkScope: 'objects' | 'buckets' = 'objects';
   let newChunkSizeMiB = '8';
   let moveBucket = '';
   let movePrefix = '';
@@ -526,7 +535,26 @@
   async function openRechunkModal() {
     if (!selectedKeys.length || !selectedBucket) return;
     await loadAdminModals();
+    rechunkScope = 'objects';
     showRechunkModal = true;
+  }
+
+  async function openBucketRechunkModal() {
+    if (!selectedBuckets.length) return;
+    await loadAdminModals();
+    rechunkScope = 'buckets';
+    showRechunkModal = true;
+  }
+
+  async function listAllBucketObjectKeys(bucket: string) {
+    const keys: string[] = [];
+    let page = 1;
+    while (true) {
+      const response = await listObjects(session?.csrf_token, bucket, '', false, { page, pageSize: 100 });
+      keys.push(...response.objects.filter((object) => !object.uploading && !object.rechunking).map((object) => object.key));
+      if (!response.has_more) return keys;
+      page += 1;
+    }
   }
 
   async function queueSelectedRechunk() {
@@ -534,7 +562,25 @@
     if (!Number.isFinite(size) || size <= 0) return;
     busy = true;
     try {
-      await queueRechunk(session?.csrf_token, { bucket: selectedBucket, keys: [...selectedKeys], new_chunk_size: Math.round(size * 1048576) });
+      const newChunkSize = Math.round(size * 1048576);
+      if (rechunkScope === 'buckets') {
+        const bucketsToRechunk = [...selectedBuckets];
+        let objectCount = 0;
+        for (const bucket of bucketsToRechunk) {
+          const keys = await listAllBucketObjectKeys(bucket);
+          if (!keys.length) continue;
+          await queueRechunk(session?.csrf_token, { bucket, keys, new_chunk_size: newChunkSize });
+          objectCount += keys.length;
+        }
+        selectedBuckets = [];
+        showRechunkModal = false;
+        notifySuccess(objectCount
+          ? `Re-chunking queued for ${objectCount} object${objectCount === 1 ? '' : 's'} across ${bucketsToRechunk.length} bucket${bucketsToRechunk.length === 1 ? '' : 's'}.`
+          : 'No committed objects were available in the selected buckets.');
+        await refreshBuckets();
+        return;
+      }
+      await queueRechunk(session?.csrf_token, { bucket: selectedBucket, keys: [...selectedKeys], new_chunk_size: newChunkSize });
       selectedKeys = [];
       showRechunkModal = false;
       notifySuccess('Re-chunking queued. The selected objects stay unavailable until each job completes.');
@@ -617,7 +663,13 @@
     const requestedPage = options.page ?? bucketPage;
     bucketsLoading = true;
     try {
-      const res = await listBuckets(csrf, { search: bucketSearch, page: requestedPage, pageSize: browserPageSize });
+      const res = await listBuckets(csrf, {
+        search: bucketSearch,
+        page: requestedPage,
+        pageSize: browserPageSize,
+        sort: bucketSortKey,
+        order: bucketSortDirection
+      });
       buckets = res.buckets ?? [];
       bucketPage = res.page ?? requestedPage;
       bucketTotal = res.total ?? buckets.length;
@@ -633,6 +685,7 @@
   function openBucket(name: string) {
     listing = null;
     objectsError = '';
+    selectedBuckets = [];
     selectedKeys = [];
     objectSearch = '';
     objectPage = 1;
@@ -680,6 +733,7 @@
   function exitBucket() {
     listing = null;
     objectsError = '';
+    selectedBuckets = [];
     selectedKeys = [];
     objectSearch = '';
     objectPage = 1;
@@ -689,6 +743,7 @@
   function searchBuckets(value: string) {
     bucketSearch = value;
     bucketPage = 1;
+    selectedBuckets = [];
     globalSearchPage = 1;
     if (bucketSearchTimer) clearTimeout(bucketSearchTimer);
     bucketSearchTimer = setTimeout(() => {
@@ -702,6 +757,17 @@
     const lastPage = Math.max(1, Math.ceil(bucketTotal / browserPageSize));
     bucketPage = Math.min(lastPage, Math.max(1, page));
     void refreshBuckets({ page: bucketPage });
+  }
+
+  function sortBuckets(key: BucketSortKey) {
+    if (bucketSortKey === key) {
+      bucketSortDirection = bucketSortDirection === 'asc' ? 'desc' : 'asc';
+    } else {
+      bucketSortKey = key;
+      bucketSortDirection = 'asc';
+    }
+    bucketPage = 1;
+    void refreshBuckets({ page: 1 });
   }
 
   function goToGlobalSearchPage(page: number) {
@@ -724,6 +790,35 @@
     const lastPage = Math.max(1, Math.ceil(objectTotal / browserPageSize));
     objectPage = Math.min(lastPage, Math.max(1, page));
     void refreshObjects(selectedBucket, currentPrefix, { page: objectPage });
+  }
+
+  function sortObjects(key: ObjectSortKey) {
+    if (objectSortKey === key) {
+      objectSortDirection = objectSortDirection === 'asc' ? 'desc' : 'asc';
+    } else {
+      objectSortKey = key;
+      objectSortDirection = 'asc';
+    }
+    objectPage = 1;
+    void refreshObjects(selectedBucket, currentPrefix, { page: 1 });
+  }
+
+  function compareFolderNames(a: string, b: string) {
+    const ordering = a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+    return objectSortKey === 'name' && objectSortDirection === 'desc' ? -ordering : ordering;
+  }
+
+  function compareObjectEntries(a: ObjectEntry, b: ObjectEntry) {
+    let ordering = 0;
+    if (objectSortKey === 'size') {
+      ordering = a.size === b.size ? 0 : a.size < b.size ? -1 : 1;
+    } else if (objectSortKey === 'last_modified') {
+      ordering = a.last_modified.localeCompare(b.last_modified);
+    } else {
+      ordering = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    }
+    if (ordering === 0) ordering = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    return objectSortDirection === 'desc' ? -ordering : ordering;
   }
 
   function mergeActiveUploads(
@@ -766,8 +861,8 @@
 
     return {
       ...nextListing,
-      folders: [...folders].sort(),
-      objects: [...objects.values()].sort((a, b) => a.name.localeCompare(b.name))
+      folders: [...folders].sort(compareFolderNames),
+      objects: [...objects.values()].sort(compareObjectEntries)
     };
   }
 
@@ -794,7 +889,9 @@
       const nextListing = await listObjects(csrf, bucket, prefix, !objectSearch, {
         search: objectSearch,
         page: requestedPage,
-        pageSize: browserPageSize
+        pageSize: browserPageSize,
+        sort: objectSortKey,
+        order: objectSortDirection
       });
       let uploads = activeUploadsByRoute.get(routeKey) ?? [];
       try {
@@ -862,6 +959,44 @@
     objectSearch = '';
     objectPage = 1;
     navigate({ view: 'buckets', bucket: selectedBucket, prefix: `${currentPrefix}${name}/` });
+  }
+
+  function toggleBucket(name: string) {
+    selectedBuckets = selectedBuckets.includes(name)
+      ? selectedBuckets.filter((item) => item !== name)
+      : [...selectedBuckets, name];
+  }
+
+  function toggleAllBuckets() {
+    const visibleNames = buckets.map((bucket) => bucket.name);
+    const allVisibleSelected = visibleNames.length > 0 && visibleNames.every((name) => selectedBuckets.includes(name));
+    selectedBuckets = allVisibleSelected
+      ? selectedBuckets.filter((name) => !visibleNames.includes(name))
+      : [...new Set([...selectedBuckets, ...visibleNames])];
+  }
+
+  async function removeSelectedBuckets() {
+    if (!selectedBuckets.length) return;
+    await loadAdminModals();
+    deleteTarget = { type: 'bucket-selection', name: `${selectedBuckets.length} selected bucket(s)` };
+    showDeleteModal = true;
+  }
+
+  async function deleteSelectedBuckets() {
+    if (!selectedBuckets.length) return;
+    const names = [...selectedBuckets];
+    busy = true;
+    try {
+      for (const name of names) await deleteBucket(session?.csrf_token, name);
+      selectedBuckets = [];
+      notifySuccess(`${names.length} bucket${names.length === 1 ? '' : 's'} deleted.`);
+      await refreshBuckets();
+      await refreshOverview();
+    } catch (cause) {
+      notifyError(normalizeError(cause));
+    } finally {
+      busy = false;
+    }
   }
 
   function goToSearchResultFolder(location: string) {
@@ -951,6 +1086,7 @@
     showDeleteModal = false;
     deleteTarget = null;
     if (target.type === 'bucket') await dropBucket(target.name);
+    else if (target.type === 'bucket-selection') await deleteSelectedBuckets();
     else if (target.type === 'selection') await deleteSelected();
     else if (target.type === 'operator') await dropUser(target.key ?? target.name);
     else if (target.type === 'folder') await removeKey(target.name, true);
@@ -1144,7 +1280,7 @@
           {#each crumbs() as crumb, i (crumb + i)}<span>/</span><button class="btn-link" type="button" on:click={() => gotoCrumb(i + 1)}>{crumb}</button>{/each}
         </div>
       {:else}<h1>{view==='users'?'Operators':view==='telegram'?'Storage settings':view.charAt(0).toUpperCase()+view.slice(1)}</h1>{/if}
-    </div><HealthBadge state={overviewLoading || !overview ? 'checking' : overview.telegram?.connection_state ?? 'checking'} detail={overviewLoading || !overview ? 'Checking Telegram connection…' : overview.telegram?.detail ?? 'Waiting for a connection check'} checkedAt={overviewLoading ? undefined : overview?.checked_at}/></header>
+    </div><HealthBadge state={overviewLoading || !overview ? 'checking' : overview.telegram?.connection_state ?? 'checking'} detail={overviewLoading || !overview ? 'Checking Telegram connection…' : overview.telegram?.detail ?? 'Waiting for a connection check'} accounts={overview?.telegram?.accounts ?? []} checkedAt={overviewLoading ? undefined : overview?.checked_at}/></header>
   {/if}
   {#if loading}
     <section class="card surface"><p>Loading…</p></section>
@@ -1192,7 +1328,7 @@
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')} onStageMetricsTest={runStageMetricsDiagnostic} stageTestBusy={stageTestBusy}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} {bucketSearch} {bucketPage} {bucketTotal} globalSearchResults={globalSearchResults} globalSearchPage={globalSearchPage} globalSearchTotal={globalSearchTotal} globalSearchLoading={globalSearchLoading} globalSearchError={globalSearchError} {objectSearch} {objectPage} {objectTotal} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onGlobalSearchPage={goToGlobalSearchPage} onOpenSearchResult={openGlobalSearchResult} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBucketPage()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onRechunkSelected={openRechunkModal} onOpenReplicas={openReplicaDetails} onOpenBulkReplication={() => openReplicaDetails(selectedBucket, undefined, [...selectedKeys])} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedBuckets} {selectedKeys} {bucketSearch} {bucketPage} {bucketTotal} {bucketSortKey} {bucketSortDirection} globalSearchResults={globalSearchResults} globalSearchPage={globalSearchPage} globalSearchTotal={globalSearchTotal} globalSearchLoading={globalSearchLoading} globalSearchError={globalSearchError} {objectSearch} {objectPage} {objectTotal} {objectSortKey} {objectSortDirection} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onBucketSort={sortBuckets} onGlobalSearchPage={goToGlobalSearchPage} onOpenSearchResult={openGlobalSearchResult} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onObjectSort={sortObjects} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBucketPage()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleBucket={toggleBucket} onToggleAllBuckets={toggleAllBuckets} onRemoveSelectedBuckets={removeSelectedBuckets} onRechunkSelectedBuckets={openBucketRechunkModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onRechunkSelected={openRechunkModal} onOpenReplicas={openReplicaDetails} onOpenBulkReplication={() => openReplicaDetails(selectedBucket, undefined, [...selectedKeys])} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'accounts'}
       {#if AccountsPanelComponent}<svelte:component this={AccountsPanelComponent} csrf={session?.csrf_token} buckets={buckets} {accountsTab} onTabChange={(tab: AccountsTab) => navigate({ view: 'accounts', accountsTab: tab })} overview={overview} {session} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose} onRemoveConnection={removeCurrentConnection}/>{:else if routeLoadError}<LoadError title="Could not load accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'users'}
@@ -1200,7 +1336,7 @@
     {/if}
   {/if}
 
-  {#if AdminModalsComponent}<svelte:component this={AdminModalsComponent} bind:showBucket={showBucketModal} bind:showFolder={showFolderModal} bind:showUpload={showUploadModal} bind:showOperator={showOperatorModal} bind:showMove={showMoveModal} bind:showShare={showShareModal} bind:showDelete={showDeleteModal} bind:showRechunk={showRechunkModal} bind:newBucket bind:newFolder bind:newUsername bind:newDisplay bind:newPassword bind:newRole bind:moveBucket bind:movePrefix bind:shareExpiry bind:shareDescription bind:shareUrl bind:newChunkSizeMiB selectedBucket={selectedBucket} currentPrefix={currentPrefix} shareTarget={shareTarget} shareError={shareError} shareBusy={shareBusy} deleteTarget={deleteTarget} {busy} uploadComponent={UploadBoxComponent} csrf={session?.csrf_token} onCreateBucket={makeBucket} onCreateFolder={makeFolder} onCreateOperator={makeUser} onCreateShare={createShareFromModal} onConfirmDelete={confirmDelete} onMove={moveSelected} onRechunk={queueSelectedRechunk} onUploaded={refreshObjects}/>{/if}
+  {#if AdminModalsComponent}<svelte:component this={AdminModalsComponent} bind:showBucket={showBucketModal} bind:showFolder={showFolderModal} bind:showUpload={showUploadModal} bind:showOperator={showOperatorModal} bind:showMove={showMoveModal} bind:showShare={showShareModal} bind:showDelete={showDeleteModal} bind:showRechunk={showRechunkModal} bind:newBucket bind:newFolder bind:newUsername bind:newDisplay bind:newPassword bind:newRole bind:moveBucket bind:movePrefix bind:shareExpiry bind:shareDescription bind:shareUrl bind:newChunkSizeMiB rechunkScope={rechunkScope} selectedBucket={selectedBucket} currentPrefix={currentPrefix} shareTarget={shareTarget} shareError={shareError} shareBusy={shareBusy} deleteTarget={deleteTarget} {busy} uploadComponent={UploadBoxComponent} csrf={session?.csrf_token} onCreateBucket={makeBucket} onCreateFolder={makeFolder} onCreateOperator={makeUser} onCreateShare={createShareFromModal} onConfirmDelete={confirmDelete} onMove={moveSelected} onRechunk={queueSelectedRechunk} onUploaded={refreshObjects}/>{/if}
   <SharedLinksModal open={showSharedLinksModal} target={sharedLinksTarget} links={sharedLinks} busy={sharedLinksBusy} error={sharedLinksError} onClose={closeSharedLinksModal} onUpdateExpiry={changeSharedLinkExpiry} onRevoke={revokeSharedLink}/>
 
   <ReplicaDetailsModal bind:open={showReplicaModal} title={replicaTitle} items={replicaItems} loading={replicaLoading} error={replicaError} csrf={session?.csrf_token} bucket={replicaBucket} scopeKeys={replicaScopeKeys} scopeLabel={replicaScopeLabel}/>
@@ -1244,7 +1380,10 @@
     color: var(--muted);
   }
   .table-scroll {
+    width: 100%;
+    min-width: 0;
     max-width: 100%;
+    box-sizing: border-box;
     overflow-x: auto;
     overscroll-behavior-inline: contain;
     -webkit-overflow-scrolling: touch;

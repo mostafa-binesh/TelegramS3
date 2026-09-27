@@ -3,7 +3,7 @@
   import { formatBytes, formatTimestamp } from '../lib/format';
   import LoadError from './LoadError.svelte';
   import ActionIcon from './ActionIcon.svelte';
-  import type { BucketInfo, ObjectEntry, ObjectsState, SearchResult } from '../lib/types';
+  import type { BucketInfo, BucketSortKey, ObjectEntry, ObjectSortKey, ObjectsState, SearchResult, SortDirection } from '../lib/types';
 
   export let buckets: BucketInfo[] = [];
   export let selectedBucket = '';
@@ -14,10 +14,13 @@
   export let bucketsError = '';
   export let objectsError = '';
   export let busy = false;
+  export let selectedBuckets: string[] = [];
   export let selectedKeys: string[] = [];
   export let bucketSearch = '';
   export let bucketPage = 1;
   export let bucketTotal = 0;
+  export let bucketSortKey: BucketSortKey = 'name';
+  export let bucketSortDirection: SortDirection = 'asc';
   export let globalSearchResults: SearchResult[] = [];
   export let globalSearchPage = 1;
   export let globalSearchTotal = 0;
@@ -26,6 +29,8 @@
   export let objectSearch = '';
   export let objectPage = 1;
   export let objectTotal = 0;
+  export let objectSortKey: ObjectSortKey = 'name';
+  export let objectSortDirection: SortDirection = 'asc';
   export let onCreateBucket: () => void = () => {};
   export let onRefresh: () => void = () => {};
   export let onUpload: () => void = () => {};
@@ -33,6 +38,10 @@
   export let onBack: () => void = () => {};
   export let onEnterFolder: (name: string) => void = () => {};
   export let onOpenFolder: () => void = () => {};
+  export let onToggleBucket: (name: string) => void = () => {};
+  export let onToggleAllBuckets: () => void = () => {};
+  export let onRemoveSelectedBuckets: () => void = () => {};
+  export let onRechunkSelectedBuckets: () => void = () => {};
   export let onToggleKey: (key: string) => void = () => {};
   export let onToggleAll: () => void = () => {};
   export let onRemoveKey: (object: ObjectEntry | string) => void = () => {};
@@ -46,16 +55,19 @@
   export let onOpenShareLinks: (object: ObjectEntry) => void = () => {};
   export let onBucketSearch: (value: string) => void = () => {};
   export let onBucketPage: (page: number) => void = () => {};
+  export let onBucketSort: (key: BucketSortKey) => void = () => {};
   export let onGlobalSearchPage: (page: number) => void = () => {};
   export let onOpenSearchResult: (result: SearchResult) => void = () => {};
   export let onObjectSearch: (value: string) => void = () => {};
   export let onObjectPage: (page: number) => void = () => {};
+  export let onObjectSort: (key: ObjectSortKey) => void = () => {};
   export let onGoToFolder: (location: string) => void = () => {};
 
   type PageItem = number | 'ellipsis';
 
   $: selectableObjects = listing?.objects.filter((object) => !object.uploading) ?? [];
   $: allVisibleSelected = selectedKeys.length > 0 && selectedKeys.length === selectableObjects.length;
+  $: allVisibleBucketsSelected = buckets.length > 0 && buckets.every((bucket) => selectedBuckets.includes(bucket.name));
   $: bucketPageCount = Math.max(1, Math.ceil(bucketTotal / 25));
   $: globalSearchPageCount = Math.max(1, Math.ceil(globalSearchTotal / 25));
   $: objectPageCount = Math.max(1, Math.ceil(objectTotal / 25));
@@ -131,6 +143,15 @@
     const total = object.upload_parts_total ?? 0;
     return total > 0 ? Math.min(100, Math.max(0, Math.round((done / total) * 100))) : 0;
   }
+
+  function sortLabel(key: string, activeKey: string, direction: SortDirection) {
+    if (key !== activeKey) return 'Sort ascending';
+    return direction === 'asc' ? 'Sort descending' : 'Sort ascending';
+  }
+
+  function sortGlyph(key: string, activeKey: string, direction: SortDirection) {
+    return key === activeKey ? (direction === 'asc' ? '↑' : '↓') : '↕';
+  }
 </script>
 
 <section class="card surface">
@@ -153,7 +174,10 @@
     {#if bucketsLoading}<div class="skeleton-stack" aria-label="Loading buckets"><div class="skeleton" style="height:52px"></div><div class="skeleton" style="height:52px"></div><div class="skeleton" style="height:52px"></div></div>
     {:else if bucketsError}<LoadError title="Could not load buckets" message={bucketsError} onRetry={onRefresh} />
     {:else if buckets.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">{bucketSearch ? '⌕' : '+'}</span>{bucketSearch ? 'No buckets match this search.' : 'No buckets yet. Create one above to start the file browser.'}</p>
-    {:else}<ul class="checks">{#each buckets as bucket (bucket.name)}<li><div class="bucket-row"><button type="button" class="btn-link" on:click={() => onOpenBucket(bucket.name)}>{bucket.name}<small>created {formatTimestamp(bucket.created_at)}</small></button><div class="bucket-meta">{#if (bucket.replica_accounts ?? 0) + (bucket.access_accounts ?? 0)}<ActionIcon name="accounts" tone="success" badge={(bucket.replica_accounts ?? 0) + (bucket.access_accounts ?? 0)} label={`Show account copies and access for ${bucket.name}`} on:click={() => onOpenReplicas(bucket.name)}/>{/if}<ActionIcon name="trash" label={`Delete bucket ${bucket.name}`} tone="danger" on:click={() => onRemoveBucket(bucket.name)} disabled={busy}/></div></div></li>{/each}</ul>{/if}
+    {:else}
+      <div class="table-scroll bucket-table-scroll"><table class="kv-table bucket-table"><colgroup><col class="bucket-selection-column"/><col class="bucket-name-column"/><col class="bucket-created-column"/><col class="bucket-accounts-column"/><col class="bucket-actions-column"/></colgroup><thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible buckets" checked={allVisibleBucketsSelected} on:change={onToggleAllBuckets}/></th><th aria-sort={bucketSortKey === 'name' ? bucketSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort buckets by Name ${sortLabel('name', bucketSortKey, bucketSortDirection)}`} on:click={() => onBucketSort('name')}><span>Name</span><span class:active-sort={bucketSortKey === 'name'} class="sort-glyph" aria-hidden="true">{sortGlyph('name', bucketSortKey, bucketSortDirection)}</span></button></th><th aria-sort={bucketSortKey === 'created_at' ? bucketSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort buckets by Created ${sortLabel('created_at', bucketSortKey, bucketSortDirection)}`} on:click={() => onBucketSort('created_at')}><span>Created</span><span class:active-sort={bucketSortKey === 'created_at'} class="sort-glyph" aria-hidden="true">{sortGlyph('created_at', bucketSortKey, bucketSortDirection)}</span></button></th><th aria-sort={bucketSortKey === 'accounts' ? bucketSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort buckets by Accounts ${sortLabel('accounts', bucketSortKey, bucketSortDirection)}`} on:click={() => onBucketSort('accounts')}><span>Accounts</span><span class:active-sort={bucketSortKey === 'accounts'} class="sort-glyph" aria-hidden="true">{sortGlyph('accounts', bucketSortKey, bucketSortDirection)}</span></button></th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>{#each buckets as bucket (bucket.name)}<tr><td><input class="select-all" type="checkbox" checked={selectedBuckets.includes(bucket.name)} on:change={() => onToggleBucket(bucket.name)} aria-label={`Select bucket ${bucket.name}`}/></td><td><button type="button" class="btn-link bucket-name-link" aria-label={`${bucket.name} created ${formatTimestamp(bucket.created_at)}`} on:click={() => onOpenBucket(bucket.name)}>{bucket.name}</button></td><td class="muted">{formatTimestamp(bucket.created_at)}</td><td>{#if (bucket.replica_accounts ?? 0) + (bucket.access_accounts ?? 0)}<span class="account-summary">{(bucket.replica_accounts ?? 0) + (bucket.access_accounts ?? 0)} total<span>{bucket.replica_accounts ?? 0} copies · {bucket.access_accounts ?? 0} access</span></span>{:else}<span class="muted">—</span>{/if}</td><td><div class="row-actions">{#if (bucket.replica_accounts ?? 0) + (bucket.access_accounts ?? 0)}<ActionIcon name="accounts" tone="success" badge={(bucket.replica_accounts ?? 0) + (bucket.access_accounts ?? 0)} label={`Show account copies and access for ${bucket.name}`} on:click={() => onOpenReplicas(bucket.name)}/>{/if}<ActionIcon name="trash" label={`Delete bucket ${bucket.name}`} tone="danger" on:click={() => onRemoveBucket(bucket.name)} disabled={busy}/></div></td></tr>{/each}</tbody></table></div>
+      {#if selectedBuckets.length}<div class="selection-bar bucket-selection-bar"><strong>{selectedBuckets.length} selected</strong><button class="ghost bulk-action" type="button" on:click={onRechunkSelectedBuckets}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16M8 4v4m8 2v4m-5 2v4"/></svg><span>Re-chunk files</span></button><button class="ghost bulk-action bulk-delete" type="button" on:click={onRemoveSelectedBuckets}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16m-10 4v6m4-6v6M9 7V4h6v3m-9 0 1 13h10l1-13"/></svg><span>Delete buckets</span></button></div>{/if}
+    {/if}
     {#if bucketTotal > 25}<nav class="pagination" aria-label="Bucket pages"><button class="pagination-arrow" type="button" aria-label="Previous bucket page" disabled={bucketPage <= 1 || bucketsLoading} on:click={() => onBucketPage(bucketPage - 1)}>←</button><div class="page-numbers">{#each bucketPageItems as item}{#if item === 'ellipsis'}<span class="pagination-ellipsis" aria-hidden="true">…</span>{:else}<button class:active-page={item === bucketPage} class="page-number" type="button" aria-label={`Go to bucket page ${item}`} aria-current={item === bucketPage ? 'page' : undefined} disabled={bucketsLoading} on:click={() => onBucketPage(item)}>{item}</button>{/if}{/each}</div><button class="pagination-arrow" type="button" aria-label="Next bucket page" disabled={bucketPage >= bucketPageCount || bucketsLoading} on:click={() => onBucketPage(bucketPage + 1)}>→</button><span class="pagination-summary">{bucketTotal} buckets</span></nav>{/if}
     {#if bucketSearch}<section class="global-search-card" aria-label="Recursive file search"><div class="global-search-head"><div><p class="card-label">Recursive file search</p><h3>Files in all buckets</h3></div><span class="search-count">{globalSearchTotal} {globalSearchTotal === 1 ? 'match' : 'matches'}</span></div>{#if globalSearchLoading}<div class="skeleton-stack" aria-label="Searching files"><div class="skeleton" style="height:52px"></div><div class="skeleton" style="height:52px"></div></div>{:else if globalSearchError}<LoadError title="Could not search files" message={globalSearchError} onRetry={onRefresh} />{:else if globalSearchResults.length === 0}<p class="empty-state compact-empty"><span class="empty-mark" aria-hidden="true">⌕</span>No files match this search across the buckets.</p>{:else}<ul class="global-search-list">{#each globalSearchResults as result (result.bucket + result.key)}<li><div class="global-result-copy"><strong>{result.name}</strong><small>{result.bucket}{result.location ? ` / ${result.location}` : ' / root'}</small></div><button class="ghost result-open" type="button" on:click={() => onOpenSearchResult(result)}>Open location</button></li>{/each}</ul>{#if globalSearchTotal > 25}<nav class="pagination" aria-label="Recursive search pages"><button class="pagination-arrow" type="button" aria-label="Previous search page" disabled={globalSearchPage <= 1 || globalSearchLoading} on:click={() => onGlobalSearchPage(globalSearchPage - 1)}>←</button><div class="page-numbers">{#each globalSearchPageItems as item}{#if item === 'ellipsis'}<span class="pagination-ellipsis" aria-hidden="true">…</span>{:else}<button class:active-page={item === globalSearchPage} class="page-number" type="button" aria-label={`Go to search page ${item}`} aria-current={item === globalSearchPage ? 'page' : undefined} disabled={globalSearchLoading} on:click={() => onGlobalSearchPage(item)}>{item}</button>{/if}{/each}</div><button class="pagination-arrow" type="button" aria-label="Next search page" disabled={globalSearchPage >= globalSearchPageCount || globalSearchLoading} on:click={() => onGlobalSearchPage(globalSearchPage + 1)}>→</button><span class="pagination-summary">{globalSearchTotal} matches</span></nav>{/if}{/if}</section>{/if}
   {:else}
@@ -172,7 +196,7 @@
           <div class="listing-status error" role="alert"><span>{objectsError}</span><button class="ghost" type="button" on:click={onRefresh}>Retry</button></div>
         {/if}
         {#if listing.folders.length === 0 && listing.objects.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">↑</span>This folder is empty. Drop files above to upload the first one.</p>
-        {:else}<div class="table-scroll" class:listing-dimmed={objectsLoading}><table class="kv-table"><colgroup><col class="selection-column"/><col class="name-column"/><col class="size-column"/><col class="modified-column"/><col class="actions-column"/></colgroup><thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={allVisibleSelected} on:change={onToggleAll}/></th><th>Name</th><th>Size</th><th>Modified</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
+        {:else}<div class="table-scroll" class:listing-dimmed={objectsLoading}><table class="kv-table"><colgroup><col class="selection-column"/><col class="name-column"/><col class="size-column"/><col class="modified-column"/><col class="actions-column"/></colgroup><thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={allVisibleSelected} on:change={onToggleAll}/></th><th aria-sort={objectSortKey === 'name' ? objectSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort objects by Name ${sortLabel('name', objectSortKey, objectSortDirection)}`} on:click={() => onObjectSort('name')}><span>Name</span><span class:active-sort={objectSortKey === 'name'} class="sort-glyph" aria-hidden="true">{sortGlyph('name', objectSortKey, objectSortDirection)}</span></button></th><th aria-sort={objectSortKey === 'size' ? objectSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort objects by Size ${sortLabel('size', objectSortKey, objectSortDirection)}`} on:click={() => onObjectSort('size')}><span>Size</span><span class:active-sort={objectSortKey === 'size'} class="sort-glyph" aria-hidden="true">{sortGlyph('size', objectSortKey, objectSortDirection)}</span></button></th><th aria-sort={objectSortKey === 'last_modified' ? objectSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort objects by Modified ${sortLabel('last_modified', objectSortKey, objectSortDirection)}`} on:click={() => onObjectSort('last_modified')}><span>Modified</span><span class:active-sort={objectSortKey === 'last_modified'} class="sort-glyph" aria-hidden="true">{sortGlyph('last_modified', objectSortKey, objectSortDirection)}</span></button></th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
       {#each listing?.folders ?? [] as folder (folder)}<tr><td></td><td><button class="btn-link" on:click={() => onEnterFolder(folder)}>{folder}/</button></td><td class="muted">folder</td><td class="muted">—</td><td><div class="row-actions"><ActionIcon name="trash" label={`Delete folder ${folder}`} tone="danger" on:click={() => onRemoveKey(folder)} disabled={busy}/></div></td></tr>{/each}
       {#each listing?.objects ?? [] as obj (obj.key)}
         <tr class:uploading-row={obj.uploading} class:upload-attention={obj.uploading && uploadKind(obj) === 'attention'}>
@@ -270,17 +294,29 @@
   .listing-status .ghost { flex: 0 0 auto; padding: 5px 10px; }
   .listing-frame .table-scroll { transition: opacity 180ms ease, filter 180ms ease; }
   .listing-frame .listing-dimmed { opacity: .48; filter: saturate(.7); pointer-events: none; }
-  .bucket-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-  .bucket-meta { display:flex; align-items:center; gap:8px; }
   .expiry-note { display:block; color:var(--muted); font-size:.75rem; }
-  .kv-table { table-layout: fixed; min-width: 940px; }
+  .kv-table { table-layout: fixed; min-width: 1080px; }
+  .bucket-table { min-width: 764px; }
+  .bucket-selection-column { width: 44px; }
+  .bucket-name-column { width: auto; }
+  .bucket-created-column { width: 190px; }
+  .bucket-accounts-column { width: 190px; }
+  .bucket-actions-column { width: 120px; }
+  .sort-header { display: inline-flex; align-items: center; gap: 7px; padding: 5px 7px; margin: -5px -7px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: .72rem; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; }
+  .sort-header:hover { background: #eef7fc; color: var(--accent); }
+  .sort-header:focus-visible { outline: 3px solid rgba(43,130,197,.18); outline-offset: 1px; }
+  .sort-glyph { color: #9db0bf; font-size: .95rem; line-height: 1; letter-spacing: 0; opacity: .8; }
+  .sort-glyph.active-sort { color: var(--accent); opacity: 1; }
+  .bucket-name-link { font-weight: 750; }
+  .account-summary { display: grid; gap: 3px; color: #315b75; font-weight: 750; }
+  .account-summary span { color: var(--muted); font-size: .7rem; font-weight: 600; }
   .selection-column { width: 44px; }
   .size-column { width: 120px; }
-  .modified-column { width: 172px; }
-  .actions-column { width: 200px; }
+  .modified-column { width: 220px; }
+  .actions-column { width: 260px; }
   .kv-table th, .kv-table td { vertical-align: middle; }
   .kv-table th:nth-child(2), .kv-table td:nth-child(2) { overflow-wrap: anywhere; }
-  .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 38px; white-space: nowrap; }
+  .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 38px; white-space: nowrap; overflow: visible; }
   .row-actions :global(.action-icon) { flex: 0 0 38px; }
   .selection-bar { position: fixed; left: calc(230px + clamp(20px, 3vw, 40px)); right: clamp(20px, 3vw, 40px); bottom: 18px; z-index: 15; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 14px; border: 1px solid #c9ddeb; border-radius: 16px; background: color-mix(in srgb, var(--surface) 92%, #dff1ff); box-shadow: 0 18px 40px rgba(20,55,90,.2); backdrop-filter: blur(14px); }
   .selection-bar .bulk-action { display: inline-flex; align-items: center; gap: 6px; }
@@ -323,7 +359,7 @@
   @keyframes shimmer { from { transform: translateX(-160%); } to { transform: translateX(380%); } }
   @keyframes indeterminate { 0% { transform: translateX(-110%); } 55%,100% { transform: translateX(270%); } }
   @media (prefers-reduced-motion: reduce) { .status-beacon, .upload-fill, .upload-fill::after { animation: none!important; transition: none; } .listing-frame .table-scroll { transition: none; } }
-  @media (max-width: 700px) { .browser-toolbar { align-items: stretch; flex-wrap: wrap; } .search-field { flex-basis: 100%; max-width: none; } .object-toolbar .search-hint { flex: 1 1 auto; } .pagination { flex-wrap: wrap; } .pagination-summary { flex-basis: 100%; margin: 0; text-align: center; } .global-search-head, .global-search-list li { align-items: stretch; flex-direction: column; } .result-open { align-self: flex-start; } }
+  @media (max-width: 700px) { .browser-toolbar { align-items: stretch; flex-wrap: wrap; } .search-field { flex-basis: 100%; max-width: none; } .object-toolbar .search-hint { flex: 1 1 auto; } .pagination { flex-wrap: wrap; } .pagination-summary { flex-basis: 100%; margin: 0; text-align: center; } .global-search-head, .global-search-list li { align-items: stretch; flex-direction: column; } .result-open { align-self: flex-start; } .bucket-table { min-width: 0!important; } .bucket-created-column { width: 96px; } .bucket-accounts-column { width: 104px; } .bucket-actions-column { width: 82px; } .bucket-table .sort-header { gap: 3px; padding-inline: 3px; margin-inline: -3px; font-size: .6rem; } .bucket-table .account-summary span { display: none; } .bucket-table .row-actions { gap: 3px; } .bucket-table .row-actions :global(.action-icon) { flex-basis: 32px; width: 32px; height: 32px; } }
   @media (max-width: 900px) { .selection-bar { left: 12px; right: 12px; bottom: 12px; } }
   .visually-hidden { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
 </style>

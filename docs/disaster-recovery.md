@@ -2,7 +2,7 @@
 
 ## Local Metadata Lost
 
-Schema v16 account, scoped-replication, and maintenance rows are part of the
+Schema v17 account, scoped-replication, and maintenance rows are part of the
 recovery boundary.
 Back up `metadata.sqlite` before adding or scheduling replication. Restoring
 the database restores account definitions, replica/access maps, pending job
@@ -10,6 +10,18 @@ progress, and re-chunk locks; queued workers resume after restart. Inspect
 failed replication or re-chunk jobs before retrying them. An access-only record
 is not a second copy: it is recoverable only while the target session can read
 the shared Telegram chat.
+
+The admin bucket-level re-chunk action expands selected buckets into their
+committed objects and queues independent durable jobs. A restart can therefore
+resume or inspect each object job separately; it does not create a single
+all-or-nothing bucket transaction.
+
+The v17 account migration adds `download_enabled` with a default of `1`, so
+existing accounts remain usable without rewriting manifests or replica rows.
+Turning it off only changes future read selection. It does not detach the
+account, change the owning connection recorded in cleanup targets, or delete
+remote data. After restoring metadata, verify the account cards and re-enable
+any account intended to serve reads before testing public or S3 downloads.
 
 For legacy replication jobs, `object_keys_json` is migrated to an empty array,
 which preserves their original whole-bucket scope. New selected-key jobs keep
@@ -102,7 +114,10 @@ namespace does not require rendering every entry at once. Bucket-name search and
 recursive object-key search are read-only metadata queries; object search results
 carry their parent location so an operator can navigate there before using the
 normal download, share, link, or delete actions. Search and pagination do not
-alter manifests, active-object pointers, transfer jobs, or recovery state.
+alter manifests, active-object pointers, transfer jobs, or recovery state. The
+browser can sort bucket columns and folder object columns; the server sorts the
+complete metadata set before pagination, so this presentation feature does not
+change recovery ordering or object visibility.
 
 The path-style names `_public` and `_admin` are reserved at bucket creation
 because requests using those first path segments belong to the public-share and

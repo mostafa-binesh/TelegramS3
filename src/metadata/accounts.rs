@@ -9,6 +9,7 @@ pub struct AccountRecord {
     pub label: String,
     pub phone: Option<String>,
     pub state: String,
+    pub download_enabled: bool,
     pub storage_chat_id: Option<String>,
     pub replica_objects: u64,
     pub access_objects: u64,
@@ -81,11 +82,12 @@ fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> 
         label: row.get(1)?,
         phone: row.get(2)?,
         state: row.get(3)?,
-        storage_chat_id: row.get(4)?,
-        replica_objects: row.get(5)?,
-        access_objects: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        download_enabled: row.get::<_, i64>(4)? != 0,
+        storage_chat_id: row.get(5)?,
+        replica_objects: row.get(6)?,
+        access_objects: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -93,7 +95,7 @@ impl MetadataStore {
     pub fn list_telegram_accounts(&self) -> Result<Vec<AccountRecord>, MetadataError> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                r#"SELECT a.id,a.label,a.phone,a.state,
+                r#"SELECT a.id,a.label,a.phone,a.state,a.download_enabled,
                     json_extract(a.bootstrap_json,'$.telegram_storage_chat_id'),
                     COUNT(DISTINCT CASE WHEN r.mode='replica' THEN r.object_id END),
                     COUNT(DISTINCT CASE WHEN r.mode='access' THEN r.object_id END),
@@ -115,7 +117,7 @@ impl MetadataStore {
         self.with_connection(|connection| {
             let row = connection
                 .query_row(
-                    r#"SELECT a.id,a.label,a.phone,a.state,
+                    r#"SELECT a.id,a.label,a.phone,a.state,a.download_enabled,
                         json_extract(a.bootstrap_json,'$.telegram_storage_chat_id'),
                         COUNT(DISTINCT CASE WHEN r.mode='replica' THEN r.object_id END),
                         COUNT(DISTINCT CASE WHEN r.mode='access' THEN r.object_id END),
@@ -124,7 +126,7 @@ impl MetadataStore {
                        LEFT JOIN replica_locations r ON r.account_id=a.id AND r.state='ready'
                        WHERE a.id=?1 GROUP BY a.id"#,
                     [id],
-                    |row| Ok((account_from_row(row)?, row.get::<_, String>(9)?)),
+                    |row| Ok((account_from_row(row)?, row.get::<_, String>(11)?)),
                 )
                 .optional()?;
             row.map(|(record, json)| Ok((record, parse_bootstrap(json)?)))
@@ -138,6 +140,7 @@ impl MetadataStore {
         label: &str,
         settings: &TelegramBootstrapSettings,
         phone: Option<&str>,
+        download_enabled: Option<bool>,
     ) -> Result<AccountRecord, MetadataError> {
         let id = id
             .map(str::to_owned)
@@ -146,14 +149,14 @@ impl MetadataStore {
         let now = crate::durable::now();
         self.with_connection(|connection| {
             connection.execute(
-                r#"INSERT INTO telegram_accounts(id,label,bootstrap_json,phone,state,created_at,updated_at)
-                   VALUES(?1,?2,?3,?4,'configured',?5,?5)
+                r#"INSERT INTO telegram_accounts(id,label,bootstrap_json,phone,download_enabled,state,created_at,updated_at)
+                   VALUES(?1,?2,?3,?4,COALESCE(?5,1),'configured',?6,?6)
                    ON CONFLICT(id) DO UPDATE SET label=excluded.label,bootstrap_json=excluded.bootstrap_json,
-                     phone=excluded.phone,state='configured',updated_at=excluded.updated_at"#,
-                params![id, label.trim(), json, phone, now],
+                     phone=excluded.phone,download_enabled=COALESCE(?5,telegram_accounts.download_enabled),state='configured',updated_at=excluded.updated_at"#,
+                params![id, label.trim(), json, phone, download_enabled, now],
             )?;
             let record = connection.query_row(
-                r#"SELECT a.id,a.label,a.phone,a.state,
+                r#"SELECT a.id,a.label,a.phone,a.state,a.download_enabled,
                     json_extract(a.bootstrap_json,'$.telegram_storage_chat_id'),0,0,a.created_at,a.updated_at
                    FROM telegram_accounts a WHERE a.id=?1"#,
                 [&id], account_from_row,
@@ -178,6 +181,22 @@ impl MetadataStore {
                 ));
             }
             Ok(connection.execute("DELETE FROM telegram_accounts WHERE id=?1", [id])? == 1)
+        })
+    }
+
+    /// Read eligibility is independent from account ownership. Missing account
+    /// rows are treated as disabled so a stale replica cannot silently route a
+    /// download through an unknown credential.
+    pub fn telegram_account_download_enabled(&self, id: &str) -> Result<bool, MetadataError> {
+        self.with_connection(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT download_enabled FROM telegram_accounts WHERE id=?1",
+                    [id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .is_some_and(|value| value != 0))
         })
     }
 

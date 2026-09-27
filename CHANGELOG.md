@@ -1,6 +1,47 @@
 # Changelog
 
-## Unreleased
+## 0.7.6-rc.9 - 2026-09-28
+
+### Multi-account connection workspace and read policy
+
+- Refactored Connections into selectable account cards with an add-account tile
+  and one shared add/edit form for the primary and additional accounts.
+- Added persisted per-account `download_enabled` settings through additive
+  schema v17 migration. Disabled accounts are excluded from primary, physical
+  replica, and access-only chunk reads, while upload ownership and cleanup
+  remain bound to their original account.
+- Cached isolated account transport managers and health monitors so replica
+  reads and overview refreshes do not repeatedly create Telegram clients.
+- Changed Overview Telegram health to aggregate all accounts as connected,
+  partial, or disconnected and added per-account green/red status dots with
+  account-name hover labels.
+- Refactored the overview health construction around a lightweight account
+  snapshot and added safe live reload behavior when an account is edited.
+- Increased folder listing Modified and Actions column widths and added a
+  browser geometry regression test so timestamps and action icons cannot
+  overlap.
+
+### Sortable bucket and folder listings
+
+- Added clickable Name, Created, and Accounts sorting to the bucket table and
+  Name, Size, and Modified sorting to the inner folder object table.
+- Sorting is sent to the authenticated listing API and applied before
+  pagination, so changing pages preserves the selected global order. Sort state
+  resets the view to page one and supports ascending/descending toggling.
+- Added responsive table behavior and browser coverage for request parameters,
+  rendered order, and narrow viewport layout.
+
+### Bucket bulk selection and re-chunk scope
+
+- Added checkbox selection to the bucket listing, including select-all-visible
+  and fixed-bottom bulk actions for guarded deletion and re-chunking every
+  committed object in the selected buckets.
+- Selecting files inside a bucket still queues one durable re-chunk job per
+  selected object, while selecting buckets enumerates their committed objects
+  and queues the same durable jobs for each bucket.
+- Documented that re-chunking replaces the source manifest and does not
+  automatically rebuild existing physical replicas; the old replica locations
+  remain under evidence-first cleanup and must be replicated again if needed.
 
 ## 0.7.6-rc.8 - 2026-09-27
 

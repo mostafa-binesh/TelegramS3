@@ -61,15 +61,32 @@ additional connections, with separate Connections, Replication, and
 Maintenance tabs. Bucket/object account badges open per-account copy/access
 details and can queue either a whole-bucket or selected-key replication job.
 Selected bulk actions remain available from the fixed bottom action bar.
+The top-level bucket listing also supports selecting visible buckets and
+guarded bulk deletion. Re-chunking is intentionally object-scoped: it queues
+one durable job per selected object rather than treating a bucket as a single
+file.
+
+Each registered Telegram account has a durable `download_enabled` policy. A
+disabled account is excluded from replica/access read selection while its
+ownership, uploads, and evidence-first cleanup responsibilities remain intact.
+The Overview aggregates account health as connected when all configured
+accounts are connected, partial when only some are connected, and disconnected
+when none are connected; individual account indicators expose the account
+label on hover.
 
 An expired admin session is treated as an authentication state transition: the
 SPA refreshes `/session` after a `401` and returns the operator to login. It
 does not leave the operator on a stale request-error view.
 
 Bulk re-chunking gives each selected object a durable job and temporary lock.
-Reads fail closed with a retry-later message until replacement chunks and the
-manifest are committed. The previous manifest remains recoverable until the
-normal evidence-first cleanup worker handles it.
+Selecting bucket rows expands to every committed object in those buckets before
+the jobs are queued; selecting object rows queues only those objects. Reads
+fail closed with a retry-later message until replacement chunks and the manifest
+are committed. The previous manifest remains recoverable until the normal
+evidence-first cleanup worker handles it. Existing physical replicas are
+attached to the previous manifest and are not automatically re-chunked; their
+old locations are cleaned up with that manifest, so operators must queue
+replication again after re-chunking when replica copies are required.
 
 - `/_admin` and `/_admin/api/*` are implemented as an authenticated operator
   surface served by the same Rust process.
@@ -104,7 +121,10 @@ normal evidence-first cleanup worker handles it.
   accepts `search` for bucket-name filtering; `GET /_admin/api/objects` accepts
   `search` for recursive key matching within the selected bucket/prefix. Search
   results include a parent `location` and preserve download, share, link-manager,
-  delete, and direct-go-to-folder actions. These are operator-console features;
+  delete, and direct-go-to-folder actions. Both listing endpoints accept the
+  operator-console sort keys and `order=asc|desc`, applying sorting before
+  pagination so page changes preserve the global order. These are
+  operator-console features;
   S3 `ListObjects` and `ListObjectsV2` semantics are unchanged.
 - Path-style bucket names `_public` and `_admin` are reserved because those
   paths dispatch to the public-share and authenticated-admin HTTP surfaces.

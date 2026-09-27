@@ -40,11 +40,12 @@ test('accounts page saves connections and submits automatic access replication',
   const state = await mockConsole(page);
   await page.goto('/_admin/accounts');
   await expect(page.getByRole('heading', { name: 'Telegram account pool' })).toBeVisible();
-  await page.getByLabel('Label').fill('New backup');
-  await page.getByLabel('API ID').fill('123');
-  await page.getByLabel('API hash').fill('hash');
+  await page.getByRole('tab', { name: /Add account/ }).click();
+  await page.getByLabel('Account label').fill('New backup');
+  await page.getByLabel('Telegram API ID').fill('123');
+  await page.getByLabel('Telegram API hash').fill('hash');
   await page.getByLabel('Storage chat ID').fill('-1002');
-  await page.getByRole('button', { name: 'Save connection' }).click();
+  await page.getByRole('button', { name: 'Add account', exact: true }).click();
   expect(state.savedAccount).toBe(true);
   await page.getByRole('tab', { name: 'Replication' }).click();
   await page.getByLabel('Bucket').selectOption('release-test');

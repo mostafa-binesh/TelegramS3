@@ -123,6 +123,18 @@ pub struct ObjectFormatStatus {
     pub telegram_files_bytes: u64,
 }
 
+/// Lightweight account health used by the admin overview. It intentionally
+/// contains no credentials or session paths.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TelegramAccountHealthSnapshot {
+    pub id: String,
+    pub label: String,
+    pub state: String,
+    pub detail: String,
+    pub connected: bool,
+    pub download_enabled: bool,
+}
+
 fn telegram_files_bytes(manifests: &[ObjectManifest]) -> u64 {
     let mut telegram_files = HashMap::new();
     for manifest in manifests
@@ -416,6 +428,7 @@ pub struct ObjectFormatService {
     encryption: ObjectEncryption,
     traffic: Arc<TrafficCounters>,
     download_stage_metrics: Arc<DownloadStageMetricsStore>,
+    account_managers: Arc<Mutex<HashMap<String, Arc<TelegramTransportManager>>>>,
 }
 
 /// Payload counters displayed by the operator overview.
@@ -834,6 +847,7 @@ impl ObjectFormatService {
             encryption,
             traffic: Arc::new(TrafficCounters::from_totals(traffic_totals)),
             download_stage_metrics: Arc::new(DownloadStageMetricsStore::default()),
+            account_managers: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -1054,6 +1068,45 @@ impl ObjectFormatService {
     /// Reach the shared SQLite store (single writer) for operator/auth tables.
     pub fn metadata_store(&self) -> &MetadataStore {
         &self.metadata
+    }
+
+    /// Return the current health of every configured Telegram account without
+    /// exposing bootstrap secrets. Additional account managers are cached so
+    /// this remains a cheap read on the five-second overview poll.
+    pub async fn telegram_account_health_snapshots(
+        &self,
+    ) -> Result<Vec<TelegramAccountHealthSnapshot>, ObjectFormatError> {
+        let active = self.metadata.active_connection_id()?;
+        let mut snapshots = Vec::new();
+        for account in self.metadata.list_telegram_accounts()? {
+            let manager = if active.as_deref() == Some(account.id.as_str()) {
+                Arc::clone(&self.transport_manager)
+            } else {
+                self.account_manager(&account.id).await?
+            };
+            let health = manager.health().await;
+            let state = match health.state {
+                TelegramConnectionState::Connected => "connected",
+                TelegramConnectionState::Disconnected => "disconnected",
+                TelegramConnectionState::NeedsReauth => "needs_reauth",
+                TelegramConnectionState::NotConfigured => "not_configured",
+            };
+            snapshots.push(TelegramAccountHealthSnapshot {
+                id: account.id,
+                label: account.label,
+                state: state.to_string(),
+                detail: health.detail,
+                connected: matches!(health.state, TelegramConnectionState::Connected),
+                download_enabled: account.download_enabled,
+            });
+        }
+        Ok(snapshots)
+    }
+
+    pub(crate) fn invalidate_account_manager(&self, account_id: &str) {
+        if let Ok(mut managers) = self.account_managers.lock() {
+            managers.remove(account_id);
+        }
     }
 
     pub fn create_share_link(
@@ -3517,10 +3570,39 @@ async fn read_stream_span(
             format!("missing chunk {}", span.order),
         )
     })?;
-    // Rotate deterministically across the primary location and replicas. A
-    // different chunk therefore naturally exercises a different account,
-    // while legacy manifests still take the original path.
-    let (location, selected_transport) = if chunk.replicas.is_empty() {
+    // Rotate deterministically across the primary location and replicas, but
+    // only among accounts explicitly enabled for downloads. Ownership remains
+    // untouched: this flag affects reads only, never upload or cleanup jobs.
+    let primary_account = object_format
+        .metadata
+        .active_connection_id()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let primary_enabled = match primary_account.as_deref() {
+        Some(account_id) => object_format
+            .metadata
+            .telegram_account_download_enabled(account_id)
+            .map_err(|error| io::Error::other(error.to_string()))?,
+        None => true,
+    };
+    let enabled_replicas = chunk
+        .replicas
+        .iter()
+        .filter(|replica| {
+            object_format
+                .metadata
+                .telegram_account_download_enabled(&replica.account_id)
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    let candidate_count = usize::from(primary_enabled) + enabled_replicas.len();
+    if candidate_count == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no Telegram account enabled for downloading this object",
+        ));
+    }
+    let selected = (span.order as usize) % candidate_count;
+    let (location, selected_transport) = if primary_enabled && selected == 0 {
         (
             TelegramLocation {
                 peer_id: chunk.telegram_peer_id.clone(),
@@ -3530,35 +3612,24 @@ async fn read_stream_span(
             None,
         )
     } else {
-        let index = (span.order as usize) % (chunk.replicas.len() + 1);
-        if index == 0 {
-            (
-                TelegramLocation {
-                    peer_id: chunk.telegram_peer_id.clone(),
-                    message_id: chunk.telegram_message_id,
-                    document_id: chunk.telegram_document_id.clone(),
-                },
-                None,
-            )
-        } else {
-            let replica = &chunk.replicas[index - 1];
-            let manager = object_format
-                .account_manager(&replica.account_id)
-                .await
-                .map_err(|error| io::Error::other(error.to_string()))?;
-            let transport = manager
-                .current()
-                .await
-                .map_err(|error| io::Error::other(error.to_string()))?;
-            (
-                TelegramLocation {
-                    peer_id: replica.telegram_peer_id.clone(),
-                    message_id: replica.telegram_message_id,
-                    document_id: replica.telegram_document_id.clone(),
-                },
-                Some(transport),
-            )
-        }
+        let replica_index = selected.saturating_sub(usize::from(primary_enabled));
+        let replica = enabled_replicas[replica_index];
+        let manager = object_format
+            .account_manager(&replica.account_id)
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let transport = manager
+            .current()
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        (
+            TelegramLocation {
+                peer_id: replica.telegram_peer_id.clone(),
+                message_id: replica.telegram_message_id,
+                document_id: replica.telegram_document_id.clone(),
+            },
+            Some(transport),
+        )
     };
     let message_id = i32::try_from(location.message_id).map_err(|_| {
         io::Error::new(

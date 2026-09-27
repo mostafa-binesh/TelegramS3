@@ -107,6 +107,7 @@ async function mockAdminApi(
     expireOnNextBuckets?: boolean;
     browserBuckets?: Array<{ name: string; created_at: string }>;
     browserObjects?: Array<Record<string, unknown>>;
+    telegramAccounts?: Array<{ id: string; label: string; state: string; detail: string; connected: boolean; download_enabled: boolean }>;
   } = {}
 ) {
   let loggedIn = false;
@@ -123,6 +124,8 @@ async function mockAdminApi(
   let delayedFirstObjectList = false;
   let delayedNestedObjectList = false;
   let stageTestSample: Record<string, unknown> | null = null;
+  const rechunkRequests: Array<Record<string, unknown>> = [];
+  const accountRows = [{ id: 'primary', label: 'Primary account', phone: '+15551234567', state: 'configured', storage_chat_id: '-1001234567890', replica_objects: 0, access_objects: 0, download_enabled: true, created_at: 1, updated_at: 1 }];
   await page.route('**/_admin/api/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace('/_admin/api', '');
@@ -163,7 +166,8 @@ async function mockAdminApi(
         recovery: { ...overview.recovery, issue_count: recoveryIssues.length, unacknowledged_count: recoveryIssues.length, issues: recoveryIssues },
         telegram: { ...overview.telegram, connection_state: 'needs_reauth', detail: 'Telegram storage is not connected' }
       };
-      return route.fulfill({ json: connectionRemoved ? clearedOverview : { ...overview, stage_metrics: { ...overview.stage_metrics, last_test: stageTestSample }, storage: { ...overview.storage, chunk_size: chunkSize }, recovery: { ...overview.recovery, issue_count: recoveryIssues.length, unacknowledged_count: recoveryIssues.length, issues: recoveryIssues } } });
+      const overviewTelegram = options.telegramAccounts ? { ...overview.telegram, connection_state: options.telegramAccounts.every((account) => account.connected) ? 'connected' : options.telegramAccounts.some((account) => account.connected) ? 'partial' : 'disconnected', accounts: options.telegramAccounts } : overview.telegram;
+      return route.fulfill({ json: connectionRemoved ? clearedOverview : { ...overview, stage_metrics: { ...overview.stage_metrics, last_test: stageTestSample }, storage: { ...overview.storage, chunk_size: chunkSize }, recovery: { ...overview.recovery, issue_count: recoveryIssues.length, unacknowledged_count: recoveryIssues.length, issues: recoveryIssues }, telegram: overviewTelegram } });
     }
     if (path === '/telegram/disconnect' && request.method() === 'POST') {
       connectionRemoved = true;
@@ -228,18 +232,31 @@ async function mockAdminApi(
     if (path === '/telegram/wizard/cancel' && request.method() === 'POST') {
       return route.fulfill({ json: { ok: true } });
     }
-    if (path === '/accounts' && request.method() === 'GET') {
-      return route.fulfill({ json: { accounts: [{ id: 'primary', label: 'Primary account', phone: '+15551234567', state: 'configured', storage_chat_id: '-1001234567890', replica_objects: 0, access_objects: 0, created_at: 1, updated_at: 1 }] } });
+    if (path === '/accounts' && request.method() === 'GET') return route.fulfill({ json: { accounts: accountRows } });
+    if (path === '/accounts' && request.method() === 'POST') {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      const account = { id: String(body.id ?? `account-${accountRows.length + 1}`), label: String(body.label ?? 'Account'), phone: body.phone ?? null, state: 'configured', storage_chat_id: body.telegram_storage_chat_id ?? '-1001234567890', replica_objects: 0, access_objects: 0, download_enabled: body.download_enabled !== false, created_at: 2, updated_at: 2 };
+      const existing = accountRows.findIndex((item) => item.id === account.id);
+      if (existing >= 0) accountRows[existing] = account;
+      else accountRows.push(account);
+      return route.fulfill({ json: { account, refresh_error: null } });
     }
     if (path === '/replication' && request.method() === 'GET') return route.fulfill({ json: { jobs: [] } });
     if (path === '/rechunk' && request.method() === 'GET') return route.fulfill({ json: { jobs: [] } });
+    if (path === '/rechunk' && request.method() === 'POST') { rechunkRequests.push(request.postDataJSON() as Record<string, unknown>); return route.fulfill({ status: 202, json: { jobs: [] } }); }
     if (path === '/replicas' && request.method() === 'GET') return route.fulfill({ json: { replicas: [] } });
     if (path === '/buckets' && request.method() === 'GET') {
       const params = new URL(request.url()).searchParams;
       const search = (params.get('search') ?? '').toLowerCase();
       const page = Number(params.get('page') ?? '1');
       const pageSize = Number(params.get('page_size') ?? '25');
-      const matching = buckets.filter((bucket) => bucket.name.toLowerCase().includes(search));
+      const sort = params.get('sort') ?? 'name';
+      const order = params.get('order') === 'desc' ? -1 : 1;
+      const matching = buckets.filter((bucket) => bucket.name.toLowerCase().includes(search)).sort((a, b) => {
+        const left = sort === 'created_at' ? a.created_at : a.name;
+        const right = sort === 'created_at' ? b.created_at : b.name;
+        return left.localeCompare(right) * order;
+      });
       const start = (page - 1) * pageSize;
       return route.fulfill({ json: { buckets: matching.slice(start, start + pageSize), page, page_size: pageSize, total: matching.length, has_more: start + pageSize < matching.length, search } });
     }
@@ -292,6 +309,13 @@ async function mockAdminApi(
       const matching = search ? allObjects.filter((object) => String(object.key).toLowerCase().includes(search)).map((object) => ({ ...object, location: String(object.key).includes('/') ? `${String(object.key).slice(0, String(object.key).lastIndexOf('/') + 1)}` : null })) : allObjects;
       const page = Number(params.get('page') ?? '1');
       const pageSize = Number(params.get('page_size') ?? '25');
+      const sort = params.get('sort') ?? 'name';
+      const order = params.get('order') === 'desc' ? -1 : 1;
+      matching.sort((a, b) => {
+        const left = sort === 'size' ? Number(a.size ?? 0) : sort === 'last_modified' ? String(a.last_modified ?? '') : String(a.name ?? a.key);
+        const right = sort === 'size' ? Number(b.size ?? 0) : sort === 'last_modified' ? String(b.last_modified ?? '') : String(b.name ?? b.key);
+        return (typeof left === 'number' && typeof right === 'number' ? left - right : String(left).localeCompare(String(right))) * order;
+      });
       const start = (page - 1) * pageSize;
       return route.fulfill({ json: { prefix, folders: search ? [] : (prefix ? [] : ['docs']), objects: matching.slice(start, start + pageSize), page, page_size: pageSize, total: (search ? matching : (prefix ? nestedObjects : [...new Set(['docs', ...allObjects.map((object) => String(object.key).includes('/') ? String(object.key).split('/')[0] : '')].filter(Boolean))])).length, has_more: start + pageSize < matching.length, search } });
     }
@@ -340,6 +364,7 @@ async function mockAdminApi(
     }
     return route.fulfill({ json: {} });
   });
+  return { rechunkRequests };
 }
 
 test('recovers from a stale CSRF token without requiring a page refresh', async ({ page }) => {
@@ -578,6 +603,149 @@ test('bucket and object search supports pagination and direct folder navigation'
   expect(objectRequests.at(-1)).not.toContain('delimiter=1');
   await page.getByRole('button', { name: 'Go to folder archive/reports/' }).click();
   await expect(page.getByRole('heading', { name: 'Bucket / archive-26 / archive / reports' })).toBeVisible();
+});
+
+test('bucket and folder columns sort across the paginated API listing', async ({ page }) => {
+  const browserBuckets = [
+    { name: 'zulu', created_at: '2026-02-01T00:00:00Z' },
+    { name: 'alpha', created_at: '2026-01-01T00:00:00Z' }
+  ];
+  const browserObjects = [
+    { key: 'large.bin', name: 'large.bin', size: 40, last_modified: '2026-01-02T00:00:00Z', shared_links: 0 },
+    { key: 'small.bin', name: 'small.bin', size: 10, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }
+  ];
+  await mockAdminApi(page, { browserBuckets, browserObjects });
+  const bucketRequests: string[] = [];
+  const objectRequests: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === '/_admin/api/buckets' && request.method() === 'GET') bucketRequests.push(url.search);
+    if (url.pathname === '/_admin/api/objects' && request.method() === 'GET') objectRequests.push(url.search);
+  });
+
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Buckets' }).click();
+
+  await expect(page.locator('.bucket-table tbody tr').first()).toContainText('alpha');
+  await page.getByRole('button', { name: 'Sort buckets by Name Sort descending' }).click();
+  await expect.poll(() => bucketRequests.at(-1) ?? '').toContain('sort=name&order=desc');
+  await expect(page.locator('.bucket-table tbody tr').first()).toContainText('zulu');
+
+  await page.getByRole('button', { name: /^zulu created/ }).click();
+  await expect(page.getByRole('table').last()).toBeVisible();
+  await page.getByRole('button', { name: 'Sort objects by Size Sort ascending' }).click();
+  await expect.poll(() => objectRequests.at(-1) ?? '').toContain('sort=size&order=asc');
+  await expect.poll(() => page.locator('.object-name').allTextContents()).toEqual(['small.bin', 'large.bin']);
+
+  await page.getByRole('button', { name: 'Sort objects by Size Sort descending' }).click();
+  await expect.poll(() => objectRequests.at(-1) ?? '').toContain('sort=size&order=desc');
+  await expect.poll(() => page.locator('.object-name').allTextContents()).toEqual(['large.bin', 'small.bin']);
+  const row = page.locator('.kv-table tbody tr').filter({hasText: 'large.bin'}).first();
+  const modifiedBox = await row.locator('td').nth(3).boundingBox();
+  const actionsBox = await row.locator('td').nth(4).boundingBox();
+  expect(modifiedBox).not.toBeNull();
+  expect(actionsBox).not.toBeNull();
+  expect(modifiedBox!.x + modifiedBox!.width).toBeLessThanOrEqual(actionsBox!.x + 1);
+});
+
+test('bucket list supports bulk selection with a guarded bulk delete', async ({ page }) => {
+  await mockAdminApi(page, { browserBuckets: [
+    { name: 'photos', created_at: '2026-01-01T00:00:00Z' },
+    { name: 'archives', created_at: '2026-01-02T00:00:00Z' }
+  ] });
+  const deleteRequests: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'DELETE' && new URL(request.url()).pathname.startsWith('/_admin/api/buckets/')) deleteRequests.push(new URL(request.url()).pathname);
+  });
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Buckets' }).click();
+  await page.getByRole('checkbox', { name: 'Select bucket photos' }).check();
+  await page.getByRole('checkbox', { name: 'Select bucket archives' }).check();
+  await expect(page.getByText('2 selected')).toBeVisible();
+  await page.getByRole('button', { name: 'Delete buckets' }).click();
+  await expect(page.getByRole('heading', { name: 'Delete selected buckets?' })).toBeVisible();
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect.poll(() => deleteRequests.length).toBe(2);
+  await expect(page.getByText('No buckets yet. Create one above to start the file browser.')).toBeVisible();
+});
+
+test('bucket bulk selection can queue re-chunking for every committed object', async ({ page }) => {
+  const state = await mockAdminApi(page, {
+    browserBuckets: [
+      { name: 'photos', created_at: '2026-01-01T00:00:00Z' },
+      { name: 'archives', created_at: '2026-01-02T00:00:00Z' }
+    ],
+    browserObjects: [
+      { key: 'one.bin', name: 'one.bin', size: 12, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 },
+      { key: 'two.bin', name: 'two.bin', size: 24, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }
+    ]
+  });
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Buckets' }).click();
+  await page.getByRole('checkbox', { name: 'Select bucket photos' }).check();
+  await page.getByRole('checkbox', { name: 'Select bucket archives' }).check();
+  await page.getByRole('button', { name: 'Re-chunk files' }).click();
+  await expect(page.getByRole('heading', { name: 'Re-chunk files in selected buckets' })).toBeVisible();
+  await page.getByLabel('New chunk size (MiB)').fill('4');
+  await page.getByRole('button', { name: 'Queue re-chunking' }).click();
+  await expect.poll(() => state.rechunkRequests.length).toBe(2);
+  expect(state.rechunkRequests).toEqual(expect.arrayContaining([
+    expect.objectContaining({ bucket: 'photos', keys: ['one.bin', 'two.bin'], new_chunk_size: 4 * 1048576 }),
+    expect.objectContaining({ bucket: 'archives', keys: ['one.bin', 'two.bin'], new_chunk_size: 4 * 1048576 })
+  ]));
+});
+
+test('account cards use one add/edit form and persist download eligibility', async ({ page }) => {
+  await mockAdminApi(page);
+  let saved: Record<string, unknown> | null = null;
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/_admin/api/accounts' && request.method() === 'POST') saved = request.postDataJSON() as Record<string, unknown>;
+  });
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Accounts' }).click();
+  await page.getByRole('tab', { name: /Add account/ }).click();
+  await page.getByLabel('Account label').fill('Replica account');
+  await page.getByLabel('Telegram API ID').fill('54321');
+  await page.getByLabel('Telegram API hash').fill('replica-hash');
+  await page.getByLabel('Storage chat ID').fill('-1009876543210');
+  await page.getByLabel('Use this account for downloads').uncheck();
+  await page.getByRole('button', { name: 'Add account', exact: true }).click();
+  await expect(page.locator('.notice[role="status"]')).toContainText('Account saved');
+  expect(saved).toMatchObject({ label: 'Replica account', telegram_api_id: '54321', download_enabled: false });
+  await page.getByRole('tab', { name: /Replica account/ }).click();
+  await expect(page.getByRole('heading', { name: 'Edit Replica account' })).toBeVisible();
+});
+
+test('overview aggregates account health and names each account status dot', async ({ page }) => {
+  await mockAdminApi(page, {
+    telegramAccounts: [
+      { id: 'primary', label: 'Primary storage', state: 'connected', detail: 'reachable', connected: true, download_enabled: true },
+      { id: 'backup', label: 'Backup storage', state: 'disconnected', detail: 'needs reauth', connected: false, download_enabled: false }
+    ]
+  });
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  const health = page.locator('.health');
+  await expect(health).toContainText('Telegram · partial');
+  await expect(health.locator('.account-dot')).toHaveCount(2);
+  await expect(health.locator('.account-dot').nth(0)).toHaveAttribute('title', 'Primary storage');
+  await expect(health.locator('.account-dot').nth(1)).toHaveAttribute('title', 'Backup storage');
+  await expect(health.locator('.account-dot').nth(0)).toHaveClass(/connected/);
+  await expect(health.locator('.account-dot').nth(1)).toHaveClass(/disconnected/);
 });
 
 test('top-level bucket search finds nested objects across buckets', async ({ page }) => {

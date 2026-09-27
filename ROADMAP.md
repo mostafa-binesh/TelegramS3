@@ -219,8 +219,8 @@ Completed in this increment:
   sub-tabs
 - bucket and object browsing now use bounded server-side pages, searchable
   bucket names, recursive object search, result location breadcrumbs, direct
-  parent-folder navigation, and the existing per-object actions for search
-  results
+  parent-folder navigation, sortable bucket/object columns across paginated
+  results, and the existing per-object actions for search results
 - `_public` and `_admin` are reserved at the shared bucket-creation boundary;
   S3 clients receive `InvalidBucketName` and the admin form receives a clear
   validation error
@@ -334,6 +334,16 @@ Multi-user boundary for the next increment:
 - [x] Browser and migration coverage for the operator paths, including expired
   session redirect, staged diagnostic tests, account tabs, replica details,
   fixed bulk actions, and recursive search location navigation.
+- [x] Refactored account management into selectable account cards with one
+  add/edit form, including persisted per-account download eligibility.
+- [x] Added aggregate Telegram health (`connected`, `partial`, or
+  `disconnected`) with per-account status indicators and cached account
+  transports for overview and replica reads.
+- [x] Widened folder table geometry so modified timestamps and action controls
+  remain separate at desktop widths, with browser regression coverage.
+- [x] Added visible-bucket checkbox selection, select-all-visible behavior, and
+  fixed-bottom bulk deletion/re-chunk actions; bucket re-chunking expands to
+  every committed object while object-row re-chunking remains supported.
 
 Remaining Phase 10 work:
 
