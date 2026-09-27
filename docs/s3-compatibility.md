@@ -65,6 +65,9 @@ features, so they are documented separately.
   broken-file problems,
   plus the logical size of unique committed Telegram chunk payloads (reused
   multipart references are counted once and protocol overhead is excluded),
+  and a bounded Download stage metrics testing section that separates first
+  chunk, Telegram, retry-wait, decrypt, checksum-verify, and total read time
+  for recent public/admin/S3 streams,
   operator accounts (superadmin-only add/remove), in-app bucket
   creation, and a bucket/object browser (prefix folders + directory markers +
   delete + per-file **upload/download**). Binary content is streamed through

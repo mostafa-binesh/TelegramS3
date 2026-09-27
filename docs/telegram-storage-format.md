@@ -192,6 +192,15 @@ chunk-boundary idle gaps without buffering a whole object; the maximum active
 window is `prefetch + 1` chunks. Dropping the client stream drops outstanding
 prefetch work as well.
 
+The first requested span is intentionally fetched on its own before the
+speculative window is opened. This first-chunk priority improves time to first
+byte while preserving manifest order and the same bounded concurrency limit.
+The authenticated Overview exposes a bounded, process-local testing snapshot
+for recent reads: surface, chunk and payload counts, first-chunk latency,
+Telegram and retry-wait time, decrypt time, checksum-verification time, and
+total duration. The snapshot retains only the latest 20 samples and is not
+part of the manifest, metadata journal, recovery state, or traffic totals.
+
 Public share and authenticated admin responses advertise `Accept-Ranges: bytes`
 and support a single `Range` request with `Content-Range`. During a streamed
 read, transient Telegram/proxy failures keep the response open while the same

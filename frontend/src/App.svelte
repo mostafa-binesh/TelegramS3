@@ -17,6 +17,7 @@
     getStorageSettings,
     getSession,
     listBuckets,
+    searchObjects as searchAllObjects,
     listMultipartUploads,
     listObjects,
     listUsers,
@@ -39,6 +40,7 @@
     BucketInfo,
     ObjectEntry,
     ObjectsState,
+    SearchResult,
     OverviewState,
     SessionState,
     SharedLink,
@@ -97,6 +99,12 @@
   let bucketSearch = '';
   let bucketPage = 1;
   let bucketTotal = 0;
+  let globalSearchResults: SearchResult[] = [];
+  let globalSearchPage = 1;
+  let globalSearchTotal = 0;
+  let globalSearchLoading = false;
+  let globalSearchError = '';
+  let globalSearchRequestSerial = 0;
   let objectSearch = '';
   let objectPage = 1;
   let objectTotal = 0;
@@ -149,7 +157,7 @@
   let usersError = '';
   let bucketsError = '';
   let objectsError = '';
-  $: anyLoading = overviewLoading || usersLoading || bucketsLoading || objectsLoading;
+  $: anyLoading = overviewLoading || usersLoading || bucketsLoading || objectsLoading || globalSearchLoading;
   $: if (session?.authenticated && routeLoadKey !== loadedRouteKey) {
     const requestedRouteKey = routeLoadKey;
     loadedRouteKey = routeLoadKey;
@@ -556,6 +564,44 @@
     navigate({ view: 'buckets', bucket: name, prefix: '' });
   }
 
+  async function refreshGlobalSearch(options: { page?: number } = {}) {
+    const search = bucketSearch.trim();
+    if (!search) {
+      globalSearchResults = [];
+      globalSearchTotal = 0;
+      globalSearchError = '';
+      globalSearchLoading = false;
+      return;
+    }
+    const csrf = session?.csrf_token;
+    const requestedPage = options.page ?? globalSearchPage;
+    const requestSerial = ++globalSearchRequestSerial;
+    globalSearchLoading = true;
+    globalSearchError = '';
+    try {
+      const res = await searchAllObjects(csrf, search, { page: requestedPage, pageSize: browserPageSize });
+      if (requestSerial === globalSearchRequestSerial && bucketSearch.trim() === search) {
+        globalSearchResults = res.results ?? [];
+        globalSearchPage = res.page ?? requestedPage;
+        globalSearchTotal = res.total ?? globalSearchResults.length;
+      }
+    } catch (cause) {
+      if (requestSerial === globalSearchRequestSerial && bucketSearch.trim() === search) {
+        globalSearchError = normalizeError(cause);
+        notifyError(globalSearchError);
+      }
+    } finally {
+      if (requestSerial === globalSearchRequestSerial) globalSearchLoading = false;
+    }
+  }
+
+  async function refreshBucketPage() {
+    await Promise.all([
+      refreshBuckets(),
+      refreshGlobalSearch({ page: globalSearchPage })
+    ]);
+  }
+
   function exitBucket() {
     listing = null;
     objectsError = '';
@@ -568,10 +614,12 @@
   function searchBuckets(value: string) {
     bucketSearch = value;
     bucketPage = 1;
+    globalSearchPage = 1;
     if (bucketSearchTimer) clearTimeout(bucketSearchTimer);
     bucketSearchTimer = setTimeout(() => {
       bucketSearchTimer = null;
       void refreshBuckets({ page: 1 });
+      void refreshGlobalSearch({ page: 1 });
     }, 240);
   }
 
@@ -579,6 +627,12 @@
     const lastPage = Math.max(1, Math.ceil(bucketTotal / browserPageSize));
     bucketPage = Math.min(lastPage, Math.max(1, page));
     void refreshBuckets({ page: bucketPage });
+  }
+
+  function goToGlobalSearchPage(page: number) {
+    const lastPage = Math.max(1, Math.ceil(globalSearchTotal / browserPageSize));
+    globalSearchPage = Math.min(lastPage, Math.max(1, page));
+    void refreshGlobalSearch({ page: globalSearchPage });
   }
 
   function searchObjects(value: string) {
@@ -740,6 +794,18 @@
     objectSearch = '';
     objectPage = 1;
     navigate({ view: 'buckets', bucket: selectedBucket, prefix: location });
+  }
+
+  function openGlobalSearchResult(result: SearchResult) {
+    if (bucketSearchTimer) clearTimeout(bucketSearchTimer);
+    bucketSearchTimer = null;
+    bucketSearch = '';
+    globalSearchResults = [];
+    globalSearchTotal = 0;
+    objectSearch = '';
+    objectPage = 1;
+    selectedKeys = [];
+    navigate({ view: 'buckets', bucket: result.bucket, prefix: result.location ?? '' });
   }
 
   function gotoCrumb(i: number) {
@@ -1048,7 +1114,7 @@
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} {bucketSearch} {bucketPage} {bucketTotal} {objectSearch} {objectPage} {objectTotal} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBuckets()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} {bucketSearch} {bucketPage} {bucketTotal} globalSearchResults={globalSearchResults} globalSearchPage={globalSearchPage} globalSearchTotal={globalSearchTotal} globalSearchLoading={globalSearchLoading} globalSearchError={globalSearchError} {objectSearch} {objectPage} {objectTotal} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onGlobalSearchPage={goToGlobalSearchPage} onOpenSearchResult={openGlobalSearchResult} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBucketPage()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'users'}
       {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} error={usersError} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={(id: string) => requestDelete({ type: 'operator', name: users.find((user) => user.id === id)?.username ?? id, key: id })} onAdd={openOperatorModal}/>{:else if routeLoadError}<LoadError title="Could not load operator accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
     {/if}

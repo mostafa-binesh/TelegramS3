@@ -24,7 +24,7 @@ use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use s3s::dto::StreamingBlob;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::ops::Range;
@@ -414,6 +414,7 @@ pub struct ObjectFormatService {
     staging_budget: u64,
     encryption: ObjectEncryption,
     traffic: Arc<TrafficCounters>,
+    download_stage_metrics: Arc<DownloadStageMetricsStore>,
 }
 
 /// Payload counters displayed by the operator overview.
@@ -429,6 +430,181 @@ pub struct TrafficSnapshot {
     pub client_download_bytes: u64,
     pub telegram_upload_bytes: u64,
     pub telegram_download_bytes: u64,
+}
+
+/// Bounded read-stage diagnostics exposed to the authenticated Overview.
+/// Samples are intentionally process-local; they are for live troubleshooting,
+/// not durable accounting or recovery state.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct DownloadStageMetrics {
+    pub active_requests: u64,
+    pub completed_requests: u64,
+    pub failed_requests: u64,
+    pub recent: Vec<DownloadStageSample>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DownloadStageSample {
+    pub request_id: u64,
+    pub surface: String,
+    pub started_at: String,
+    pub status: String,
+    pub chunks: u64,
+    pub client_bytes: u64,
+    pub telegram_bytes: u64,
+    pub telegram_retries: u64,
+    pub first_chunk_us: Option<u64>,
+    pub telegram_us: u64,
+    pub retry_wait_us: u64,
+    pub decrypt_us: u64,
+    pub verify_us: u64,
+    pub total_us: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Default)]
+struct DownloadStageMetricsStore {
+    next_request_id: AtomicU64,
+    active_requests: AtomicU64,
+    completed_requests: AtomicU64,
+    failed_requests: AtomicU64,
+    recent: Mutex<VecDeque<DownloadStageSample>>,
+}
+
+struct DownloadStageAccumulator {
+    request_id: u64,
+    surface: &'static str,
+    started: StdInstant,
+    started_at: String,
+    chunks: u64,
+    client_bytes: u64,
+    telegram_bytes: u64,
+    telegram_retries: u64,
+    first_chunk_us: Option<u64>,
+    telegram_us: u64,
+    retry_wait_us: u64,
+    decrypt_us: u64,
+    verify_us: u64,
+}
+
+struct DownloadStageGuard {
+    store: Arc<DownloadStageMetricsStore>,
+    sample: Option<DownloadStageAccumulator>,
+}
+
+impl DownloadStageMetricsStore {
+    fn start(self: &Arc<Self>, surface: &'static str) -> DownloadStageGuard {
+        self.active_requests.fetch_add(1, Ordering::Relaxed);
+        DownloadStageGuard {
+            store: Arc::clone(self),
+            sample: Some(DownloadStageAccumulator {
+                request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed) + 1,
+                surface,
+                started: StdInstant::now(),
+                started_at: OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string()),
+                chunks: 0,
+                client_bytes: 0,
+                telegram_bytes: 0,
+                telegram_retries: 0,
+                first_chunk_us: None,
+                telegram_us: 0,
+                retry_wait_us: 0,
+                decrypt_us: 0,
+                verify_us: 0,
+            }),
+        }
+    }
+
+    fn snapshot(&self) -> DownloadStageMetrics {
+        DownloadStageMetrics {
+            active_requests: self.active_requests.load(Ordering::Relaxed),
+            completed_requests: self.completed_requests.load(Ordering::Relaxed),
+            failed_requests: self.failed_requests.load(Ordering::Relaxed),
+            recent: self
+                .recent
+                .lock()
+                .map(|samples| samples.iter().cloned().rev().collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn finish(
+        &self,
+        sample: DownloadStageAccumulator,
+        status: &'static str,
+        error: Option<String>,
+    ) {
+        self.active_requests.fetch_sub(1, Ordering::Relaxed);
+        if status == "failed" {
+            self.failed_requests.fetch_add(1, Ordering::Relaxed);
+        } else if status == "completed" {
+            self.completed_requests.fetch_add(1, Ordering::Relaxed);
+        }
+        let output = DownloadStageSample {
+            request_id: sample.request_id,
+            surface: sample.surface.to_string(),
+            started_at: sample.started_at,
+            status: status.to_string(),
+            chunks: sample.chunks,
+            client_bytes: sample.client_bytes,
+            telegram_bytes: sample.telegram_bytes,
+            telegram_retries: sample.telegram_retries,
+            first_chunk_us: sample.first_chunk_us,
+            telegram_us: sample.telegram_us,
+            retry_wait_us: sample.retry_wait_us,
+            decrypt_us: sample.decrypt_us,
+            verify_us: sample.verify_us,
+            total_us: sample.started.elapsed().as_micros() as u64,
+            error,
+        };
+        if let Ok(mut recent) = self.recent.lock() {
+            recent.push_back(output);
+            while recent.len() > 20 {
+                recent.pop_front();
+            }
+        }
+    }
+}
+
+impl DownloadStageGuard {
+    fn record_chunk(&mut self, result: &ReadSpanResult) {
+        let Some(sample) = self.sample.as_mut() else {
+            return;
+        };
+        sample.chunks += 1;
+        sample.telegram_bytes = sample.telegram_bytes.saturating_add(result.telegram_bytes);
+        sample.telegram_retries = sample
+            .telegram_retries
+            .saturating_add(result.telegram_retries);
+        sample.telegram_us = sample.telegram_us.saturating_add(result.telegram_us);
+        sample.retry_wait_us = sample.retry_wait_us.saturating_add(result.retry_wait_us);
+        sample.decrypt_us = sample.decrypt_us.saturating_add(result.decrypt_us);
+        sample.verify_us = sample.verify_us.saturating_add(result.verify_us);
+    }
+
+    fn record_emitted(&mut self, bytes: u64) {
+        let Some(sample) = self.sample.as_mut() else {
+            return;
+        };
+        sample.client_bytes = sample.client_bytes.saturating_add(bytes);
+        if sample.first_chunk_us.is_none() {
+            sample.first_chunk_us = Some(sample.started.elapsed().as_micros() as u64);
+        }
+    }
+
+    fn finish(&mut self, status: &'static str, error: Option<String>) {
+        if let Some(sample) = self.sample.take() {
+            self.store.finish(sample, status, error);
+        }
+    }
+}
+
+impl Drop for DownloadStageGuard {
+    fn drop(&mut self) {
+        self.finish("cancelled", None);
+    }
 }
 
 #[derive(Default)]
@@ -639,6 +815,7 @@ impl ObjectFormatService {
             staging_budget: 10 * 1024 * 1024 * 1024,
             encryption,
             traffic: Arc::new(TrafficCounters::from_totals(traffic_totals)),
+            download_stage_metrics: Arc::new(DownloadStageMetricsStore::default()),
         })
     }
 
@@ -655,6 +832,10 @@ impl ObjectFormatService {
             session: self.traffic_snapshot(&self.traffic.session),
             total: self.traffic_snapshot(&self.traffic.total),
         }
+    }
+
+    pub fn download_stage_metrics(&self) -> DownloadStageMetrics {
+        self.download_stage_metrics.snapshot()
     }
 
     fn traffic_snapshot(&self, counters: &TrafficCounterValues) -> TrafficSnapshot {
@@ -2200,7 +2381,8 @@ impl ObjectFormatService {
 
     /// Emit one decrypted + checksum-verified slice per [`ReadSpan`], bounded by
     /// the chunk size and configured prefetch window, and never allocating a
-    /// whole object in memory.
+    /// whole object in memory. The first requested span is fetched on its own;
+    /// speculative prefetch starts only after that span is ready for the client.
     ///
     /// This is the single shared streaming reader used by both the S3
     /// `get_object` path and the `/_admin` download endpoint so their byte
@@ -2210,35 +2392,61 @@ impl ObjectFormatService {
         this: Arc<Self>,
         manifest: &ObjectManifest,
         spans: Vec<ReadSpan>,
+        surface: &'static str,
     ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + 'static + use<> {
         let pin = this.pin_object(manifest.object_id);
+        let stage = this.download_stage_metrics.start(surface);
         let concurrency = usize::try_from(this.download_prefetch_chunks().saturating_add(1))
             .unwrap_or(usize::MAX)
             .max(1);
-        let buffered = futures::stream::iter(spans)
+        let mut spans = spans.into_iter();
+        let first_span = spans.next();
+        let remaining_spans = spans.collect::<Vec<_>>();
+        let first = futures::stream::iter(first_span)
+            .map({
+                let object_format = Arc::clone(&this);
+                let manifest = manifest.clone();
+                move |span| read_stream_span(Arc::clone(&object_format), manifest.clone(), span)
+            })
+            .buffered(1);
+        let prefetched = futures::stream::iter(remaining_spans)
             .map({
                 let object_format = Arc::clone(&this);
                 let manifest = manifest.clone();
                 move |span| read_stream_span(Arc::clone(&object_format), manifest.clone(), span)
             })
             .buffered(concurrency);
+        let buffered = first.chain(prefetched);
         let buffered = Box::pin(buffered);
         futures::stream::unfold(
-            (buffered, this, pin, false),
-            |(mut buffered, object_format, pin, done)| async move {
+            (buffered, this, pin, stage, false),
+            |(mut buffered, object_format, pin, mut stage, done)| async move {
                 if done {
+                    stage.finish("cancelled", None);
                     return None;
                 }
                 match buffered.as_mut().next().await {
-                    Some(Ok((length, bytes))) => Some((
-                        Ok({
-                            object_format.add_client_download_bytes(length);
-                            bytes
-                        }),
-                        (buffered, object_format, pin, false),
-                    )),
-                    Some(Err(error)) => Some((Err(error), (buffered, object_format, pin, true))),
-                    None => None,
+                    Some(Ok(result)) => {
+                        let length = result.length;
+                        stage.record_chunk(&result);
+                        stage.record_emitted(length);
+                        let bytes = result.bytes;
+                        Some((
+                            Ok({
+                                object_format.add_client_download_bytes(length);
+                                bytes
+                            }),
+                            (buffered, object_format, pin, stage, false),
+                        ))
+                    }
+                    Some(Err(error)) => {
+                        stage.finish("failed", Some(error.to_string()));
+                        Some((Err(error), (buffered, object_format, pin, stage, true)))
+                    }
+                    None => {
+                        stage.finish("completed", None);
+                        None
+                    }
                 }
             },
         )
@@ -2919,13 +3127,20 @@ impl ObjectFormatService {
     async fn download_message_bytes_for_stream(
         &self,
         message_id: i32,
-    ) -> Result<Vec<u8>, ObjectFormatError> {
+    ) -> Result<TelegramStreamRead, ObjectFormatError> {
+        let started = StdInstant::now();
         let current_transport = self.transport_manager.current().await;
         if current_transport
             .as_ref()
             .is_ok_and(|transport| transport.is_mock())
         {
-            return self.download_message_bytes_once(message_id).await;
+            let bytes = self.download_message_bytes_once(message_id).await?;
+            return Ok(TelegramStreamRead {
+                telegram_us: started.elapsed().as_micros() as u64,
+                bytes,
+                retries: 0,
+                retry_wait_us: 0,
+            });
         }
         let retry_policy = current_transport
             .map(|transport| transport.retry_policy())
@@ -2937,6 +3152,12 @@ impl ObjectFormatService {
             || self.download_message_bytes_once(message_id),
         )
         .await
+        .map(|result| TelegramStreamRead {
+            telegram_us: started.elapsed().as_micros() as u64,
+            bytes: result.bytes,
+            retries: result.retries,
+            retry_wait_us: result.retry_wait_us,
+        })
     }
 
     async fn download_message_bytes_once(
@@ -3102,13 +3323,15 @@ async fn retry_telegram_read_for_stream<F, Fut>(
     message_id: i32,
     recovery_window: StdDuration,
     mut read: F,
-) -> Result<Vec<u8>, ObjectFormatError>
+) -> Result<TelegramRetryResult, ObjectFormatError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, ObjectFormatError>>,
 {
     let deadline = StdInstant::now() + recovery_window;
     let mut attempt = 1_u32;
+    let mut retries = 0_u64;
+    let mut retry_wait_us = 0_u64;
     loop {
         let remaining = deadline.saturating_duration_since(StdInstant::now());
         if remaining.is_zero() {
@@ -3135,7 +3358,13 @@ where
             }
         };
         match result {
-            Ok(bytes) => return Ok(bytes),
+            Ok(bytes) => {
+                return Ok(TelegramRetryResult {
+                    bytes,
+                    retries,
+                    retry_wait_us,
+                });
+            }
             Err(error) => {
                 if !ObjectFormatService::is_retryable_telegram_read_error(&error) {
                     return Err(error);
@@ -3162,6 +3391,8 @@ where
                     "holding Telegram-backed stream open while retrying chunk download"
                 );
                 tokio::time::sleep(wait).await;
+                retries = retries.saturating_add(1);
+                retry_wait_us = retry_wait_us.saturating_add(wait.as_micros() as u64);
                 if wait >= remaining {
                     return Err(error);
                 }
@@ -3171,11 +3402,24 @@ where
     }
 }
 
+struct TelegramRetryResult {
+    bytes: Vec<u8>,
+    retries: u64,
+    retry_wait_us: u64,
+}
+
+struct TelegramStreamRead {
+    bytes: Vec<u8>,
+    retries: u64,
+    retry_wait_us: u64,
+    telegram_us: u64,
+}
+
 async fn read_stream_span(
     object_format: Arc<ObjectFormatService>,
     manifest: ObjectManifest,
     span: ReadSpan,
-) -> Result<(u64, Bytes), io::Error> {
+) -> Result<ReadSpanResult, io::Error> {
     let chunk = manifest.chunks.get(span.order as usize).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -3188,7 +3432,7 @@ async fn read_stream_span(
             format!("telegram message id out of range for chunk {}", span.order),
         )
     })?;
-    let ciphertext = object_format
+    let telegram = object_format
         .download_message_bytes_for_stream(message_id)
         .await
         .map_err(|error| {
@@ -3201,14 +3445,21 @@ async fn read_stream_span(
             );
             io::Error::other(error.to_string())
         })?;
+    let telegram_bytes = telegram.bytes.len() as u64;
+    let telegram_retries = telegram.retries;
+    let telegram_us = telegram.telegram_us;
+    let retry_wait_us = telegram.retry_wait_us;
+    let decrypt_started = StdInstant::now();
     let plaintext = if manifest.encryption.enabled {
         let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
         object_format
-            .decrypt_chunk(source_object_id, source_order, &ciphertext)
+            .decrypt_chunk(source_object_id, source_order, &telegram.bytes)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?
     } else {
-        ciphertext
+        telegram.bytes
     };
+    let decrypt_us = decrypt_started.elapsed().as_micros() as u64;
+    let verify_started = StdInstant::now();
     let actual_checksum = sha256_hex(&plaintext);
     if actual_checksum != span.checksum {
         return Err(io::Error::new(
@@ -3219,6 +3470,7 @@ async fn read_stream_span(
             ),
         ));
     }
+    let verify_us = verify_started.elapsed().as_micros() as u64;
     let start = span.offset_within_chunk as usize;
     let end = start + span.length as usize;
     if plaintext.len() < end {
@@ -3233,7 +3485,27 @@ async fn read_stream_span(
             ),
         ));
     }
-    Ok((span.length, Bytes::copy_from_slice(&plaintext[start..end])))
+    Ok(ReadSpanResult {
+        length: span.length,
+        bytes: Bytes::copy_from_slice(&plaintext[start..end]),
+        telegram_bytes,
+        telegram_retries,
+        telegram_us,
+        retry_wait_us,
+        decrypt_us,
+        verify_us,
+    })
+}
+
+struct ReadSpanResult {
+    length: u64,
+    bytes: Bytes,
+    telegram_bytes: u64,
+    telegram_retries: u64,
+    telegram_us: u64,
+    retry_wait_us: u64,
+    decrypt_us: u64,
+    verify_us: u64,
 }
 
 fn verify_staged_chunks(
@@ -3512,7 +3784,8 @@ mod tests {
         .await
         .expect("stream read should recover within its window");
 
-        assert_eq!(result, vec![4, 5, 6]);
+        assert_eq!(result.bytes, vec![4, 5, 6]);
+        assert_eq!(result.retries, 5);
         assert_eq!(attempts.load(Ordering::SeqCst), 6);
     }
 
@@ -3600,7 +3873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bounded_prefetch_stream_preserves_order_and_setting() {
+    async fn first_chunk_priority_preserves_order_and_setting() {
         let tempdir = TempDir::new().expect("tempdir");
         let service = Arc::new(sample_service(&tempdir).await);
         service.set_chunk_size(1024).expect("small chunks");
@@ -3623,10 +3896,16 @@ mod tests {
             .expect("put");
         let plan =
             ObjectFormatService::plan_read(&manifest, 0..payload.len() as u64).expect("read plan");
-        let pieces =
-            ObjectFormatService::read_spans_to_stream(Arc::clone(&service), &manifest, plan.chunks)
-                .collect::<Vec<_>>()
-                .await;
+        // The stream must still preserve object order after the first span is
+        // delivered before the configured speculative window is opened.
+        let pieces = ObjectFormatService::read_spans_to_stream(
+            Arc::clone(&service),
+            &manifest,
+            plan.chunks,
+            "test",
+        )
+        .collect::<Vec<_>>()
+        .await;
         let actual = pieces
             .into_iter()
             .map(|piece| piece.expect("stream piece"))
@@ -3634,6 +3913,13 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(actual, payload);
+        let metrics = service.download_stage_metrics();
+        assert_eq!(metrics.completed_requests, 1);
+        assert_eq!(metrics.failed_requests, 0);
+        assert_eq!(metrics.recent[0].surface, "test");
+        assert_eq!(metrics.recent[0].chunks, 5);
+        assert_eq!(metrics.recent[0].client_bytes, payload.len() as u64);
+        assert!(metrics.recent[0].first_chunk_us.is_some());
     }
 
     #[test]

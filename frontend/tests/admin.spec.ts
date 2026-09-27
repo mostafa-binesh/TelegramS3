@@ -58,6 +58,28 @@ const overview = {
       telegram_download_bytes: 167_772_160
     }
   },
+  stage_metrics: {
+    active_requests: 1,
+    completed_requests: 12,
+    failed_requests: 1,
+    recent: [{
+      request_id: 42,
+      surface: 'public',
+      started_at: '2026-01-01T00:00:00Z',
+      status: 'completed',
+      chunks: 3,
+      client_bytes: 8_388_608,
+      telegram_bytes: 8_400_000,
+      telegram_retries: 1,
+      first_chunk_us: 1_250_000,
+      telegram_us: 3_200_000,
+      retry_wait_us: 50_000,
+      decrypt_us: 1_200,
+      verify_us: 2_400,
+      total_us: 5_100_000,
+      error: null
+    }]
+  },
   telegram: {
     session_state: 'authorized',
     connection_state: 'connected',
@@ -196,6 +218,18 @@ async function mockAdminApi(
       const matching = buckets.filter((bucket) => bucket.name.toLowerCase().includes(search));
       const start = (page - 1) * pageSize;
       return route.fulfill({ json: { buckets: matching.slice(start, start + pageSize), page, page_size: pageSize, total: matching.length, has_more: start + pageSize < matching.length, search } });
+    }
+    if (path === '/search' && request.method() === 'GET') {
+      const params = new URL(request.url()).searchParams;
+      const search = (params.get('search') ?? '').toLowerCase();
+      const page = Number(params.get('page') ?? '1');
+      const pageSize = Number(params.get('page_size') ?? '25');
+      const allObjects = options.browserObjects ?? [{ key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }];
+      const matching = buckets.flatMap((bucket) => allObjects
+        .filter((object) => `${bucket.name}/${String(object.key)}`.toLowerCase().includes(search))
+        .map((object) => ({ ...object, bucket: bucket.name, location: String(object.key).includes('/') ? `${String(object.key).slice(0, String(object.key).lastIndexOf('/') + 1)}` : null })));
+      const start = (page - 1) * pageSize;
+      return route.fulfill({ json: { results: matching.slice(start, start + pageSize), page, page_size: pageSize, total: matching.length, has_more: start + pageSize < matching.length, search } });
     }
     if (path === '/buckets' && request.method() === 'POST') {
       if (options.staleCsrfOnce && !staleCsrfRejected) {
@@ -343,6 +377,10 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
   await expect(page.getByText('256 MiB')).toBeVisible();
   await expect(page.getByText('Clients → server')).toBeVisible();
   await expect(page.getByText('Telegram → server')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Download stage metrics' })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Recent download stage timings' })).toBeVisible();
+  await expect(page.getByText('public', { exact: true })).toBeVisible();
+  await expect(page.getByText('1.3s', { exact: true })).toBeVisible();
   await page.getByRole('tab', { name: 'Total' }).click();
   await expect(page.getByRole('heading', { name: 'Traffic across all server runs' })).toBeVisible();
   await expect(page.getByRole('tab', { name: 'Total' })).toHaveAttribute('aria-selected', 'true');
@@ -462,9 +500,11 @@ test('bucket and object search supports pagination and direct folder navigation'
   await mockAdminApi(page, { browserBuckets, browserObjects });
   const bucketRequests: string[] = [];
   const objectRequests: string[] = [];
+  const searchRequests: string[] = [];
   page.on('request', (request) => {
     const url = new URL(request.url());
     if (url.pathname === '/_admin/api/buckets' && request.method() === 'GET') bucketRequests.push(url.search);
+    if (url.pathname === '/_admin/api/search' && request.method() === 'GET') searchRequests.push(url.search);
     if (url.pathname === '/_admin/api/objects' && request.method() === 'GET') objectRequests.push(url.search);
   });
 
@@ -474,12 +514,15 @@ test('bucket and object search supports pagination and direct folder navigation'
   await page.getByRole('button', { name: 'Sign in' }).click();
   await page.getByRole('button', { name: 'Buckets' }).click();
   await expect(page.getByRole('button', { name: /archive-00 created/ })).toBeVisible();
-  await page.getByRole('button', { name: 'Next' }).click();
+  await expect(page.getByRole('button', { name: 'Go to bucket page 1' })).toHaveAttribute('aria-current', 'page');
+  await page.getByRole('button', { name: 'Go to bucket page 2' }).click();
   await expect(page.getByRole('button', { name: /archive-26 created/ })).toBeVisible();
   expect(bucketRequests.at(-1)).toContain('page=2');
-  await page.getByRole('searchbox', { name: 'Search buckets' }).fill('archive-26');
+  await page.getByRole('searchbox', { name: 'Search buckets and files' }).fill('archive-26');
   await expect(page.getByRole('button', { name: /archive-26 created/ })).toBeVisible();
   await expect.poll(() => bucketRequests.at(-1) ?? '').toContain('search=archive-26');
+  await expect.poll(() => searchRequests.at(-1) ?? '').toContain('search=archive-26');
+  await expect(page.getByRole('region', { name: 'Recursive file search' })).toContainText('final-report.txt');
 
   await page.getByRole('button', { name: /archive-26 created/ }).click();
   await expect(page.getByRole('searchbox', { name: 'Search objects and folders' })).toBeVisible();
@@ -494,6 +537,35 @@ test('bucket and object search supports pagination and direct folder navigation'
   expect(objectRequests.at(-1)).not.toContain('delimiter=1');
   await page.getByRole('button', { name: 'Go to folder archive/reports/' }).click();
   await expect(page.getByRole('heading', { name: 'Bucket / archive-26 / archive / reports' })).toBeVisible();
+});
+
+test('top-level bucket search finds nested objects across buckets', async ({ page }) => {
+  const browserBuckets = [
+    { name: 'photos', created_at: '2026-01-01T00:00:00Z' },
+    { name: 'archives', created_at: '2026-01-01T00:00:00Z' }
+  ];
+  const browserObjects = [
+    { key: 'media/2026/report-final.pdf', name: 'report-final.pdf', size: 42, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }
+  ];
+  await mockAdminApi(page, { browserBuckets, browserObjects });
+  const searchRequests: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === '/_admin/api/search' && request.method() === 'GET') searchRequests.push(url.search);
+  });
+
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Buckets' }).click();
+  await page.getByRole('searchbox', { name: 'Search buckets and files' }).fill('report-final');
+  await expect.poll(() => searchRequests.at(-1) ?? '').toContain('search=report-final');
+  const results = page.getByRole('region', { name: 'Recursive file search' });
+  await expect(results).toContainText('report-final.pdf');
+  await expect(results).toContainText('archives / media/2026/');
+  await results.getByRole('button', { name: 'Open location' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Bucket / photos / media / 2026' })).toBeVisible();
 });
 
 test('a slow folder load is not replaced by the background poll', async ({ page }) => {

@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+## 0.7.6-rc.5 - 2026-09-27
+
+### Download diagnostics and first-chunk delivery
+
+- Added a bounded, process-local **Download stage metrics** section to the
+  authenticated Overview. It shows active, completed, and failed reads plus
+  recent per-request timings for first chunk delivery, Telegram fetch time,
+  retry wait, decryption, checksum verification, and total stream time.
+- Metrics identify the read surface (`public`, `admin`, or `s3`), count chunks
+  and payload bytes on each side, include Telegram retry counts, and retain at
+  most 20 recent samples. They are diagnostic telemetry only: no per-download
+  rows or stage timings are written to SQLite, and the recorder resets when
+  the process restarts.
+- Added a real-browser testing panel and Playwright coverage so an operator can
+  start a download and inspect the stage breakdown after the five-second
+  Overview refresh.
+- Changed the shared reader to prioritize the first requested chunk before
+  opening the configured speculative prefetch window. This reduces time to
+  first byte while preserving the existing ordered, bounded `0–4` prefetch
+  policy and checksum boundary.
+- Added Rust coverage proving first-chunk ordering, prefetch behavior, stage
+  sample accounting, and retry-count reporting.
+
+### Bucket and object search and navigation
+
+- Added numeric pagination and search controls to the bucket and folder
+  browser, with recursive server-side object search across buckets.
+- Search results now show their containing bucket/folder location and retain
+  direct folder navigation plus download, share, link-manager, and delete
+  actions against the canonical object key.
+- Added browser coverage for search requests, pagination, result actions, and
+  direct navigation to nested result locations.
+
 ## 0.7.6-rc.4 - 2026-09-27
 
 ### Bucket and object browser navigation

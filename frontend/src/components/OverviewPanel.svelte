@@ -37,6 +37,13 @@
     }
   };
 
+  const emptyStageMetrics = {
+    active_requests: 0,
+    completed_requests: 0,
+    failed_requests: 0,
+    recent: []
+  };
+
   function formatAge(seconds: number) {
     if (!seconds) return 'No pending work';
     const minutes = Math.floor(seconds / 60);
@@ -48,6 +55,7 @@
 
   $: transferMetrics = overview?.transfers ?? emptyTransferMetrics;
   $: trafficMetrics = overview?.traffic ?? emptyTrafficMetrics;
+  $: stageMetrics = overview?.stage_metrics ?? emptyStageMetrics;
   let trafficTab: 'session' | 'total' = 'session';
   $: trafficView = trafficMetrics[trafficTab];
   $: checks = overview?.checks ?? [];
@@ -71,6 +79,14 @@
 
   function verifierStatusLabel(status: string) {
     return status === 'disabled' ? 'Disabled' : status === 'healthy' ? 'Healthy' : status === 'attention' ? 'Needs attention' : status === 'unavailable' ? 'Unavailable' : 'Starting';
+  }
+
+  function formatStageDuration(microseconds?: number | null) {
+    if (microseconds == null) return '—';
+    if (microseconds < 1000) return `${microseconds}µs`;
+    const milliseconds = microseconds / 1000;
+    if (milliseconds < 1000) return `${milliseconds < 10 ? milliseconds.toFixed(1) : Math.round(milliseconds)}ms`;
+    return `${(milliseconds / 1000).toFixed(1)}s`;
   }
 </script>
 
@@ -154,6 +170,40 @@
           </div>
         </div>
         <p class="fine-print traffic-note">Payload totals only; protocol overhead is excluded. This session resets on restart; Total is stored in metadata and survives restarts.</p>
+      {/if}
+    </article>
+    <article class="card surface stage-metrics-card" aria-label="Download stage metrics">
+      <div class="analytics-heading"><div><p class="card-label">Performance lab</p><h2>Download stage metrics</h2></div><span class="live-chip"><span aria-hidden="true"></span>Testing view</span></div>
+      {#if loading || !overview}<div class="skeleton" style="height:180px"></div>{:else}
+        <div class="stage-summary">
+          <div><strong>{formatCount(stageMetrics.active_requests)}</strong><small>active reads</small></div>
+          <div><strong>{formatCount(stageMetrics.completed_requests)}</strong><small>completed reads</small></div>
+          <div><strong class:bad={stageMetrics.failed_requests > 0}>{formatCount(stageMetrics.failed_requests)}</strong><small>failed reads</small></div>
+        </div>
+        {#if stageMetrics.recent.length}
+          <div class="stage-table-scroll">
+            <table class="stage-table" aria-label="Recent download stage timings">
+              <thead><tr><th>Surface</th><th>Status</th><th>First chunk</th><th>Telegram</th><th>Retry wait</th><th>Decrypt</th><th>Verify</th><th>Total</th></tr></thead>
+              <tbody>
+                {#each stageMetrics.recent.slice(0, 8) as sample (sample.request_id)}
+                  <tr>
+                    <td>{sample.surface}</td>
+                    <td><span class:stage-ok={sample.status === 'completed'} class:stage-bad={sample.status === 'failed'} class="stage-status">{sample.status}</span>{#if sample.error}<small>{sample.error}</small>{/if}</td>
+                    <td>{formatStageDuration(sample.first_chunk_us)}</td>
+                    <td>{formatStageDuration(sample.telegram_us)}</td>
+                    <td>{formatStageDuration(sample.retry_wait_us)}</td>
+                    <td>{formatStageDuration(sample.decrypt_us)}</td>
+                    <td>{formatStageDuration(sample.verify_us)}</td>
+                    <td>{formatStageDuration(sample.total_us)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+          <p class="fine-print">Start a public, admin, or S3 download and wait for the five-second Overview refresh. These timings are process-local diagnostics.</p>
+        {:else}
+          <p class="fine-print">No reads recorded yet. Start a download to capture Telegram, retry, decrypt, verify, and total timings.</p>
+        {/if}
       {/if}
     </article>
     <article class="card surface verifier-card">
@@ -240,6 +290,22 @@
   .traffic-meter span.upload { background: #d59a47; }
   .traffic-row > strong { min-width: 60px; color: #203b57; font-size: .76rem; text-align: right; }
   .traffic-note { margin: 0; }
+  .stage-metrics-card { grid-column: 1 / -1; }
+  .stage-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .stage-summary > div { padding: 13px 14px; border: 1px solid #e1e9f0; border-radius: 12px; background: #fbfcfe; }
+  .stage-summary strong, .stage-summary small { display: block; }
+  .stage-summary strong { color: #203b57; font-size: 1.02rem; }
+  .stage-summary strong.bad { color: #b24646; }
+  .stage-summary small { margin-top: 4px; color: var(--muted); font-size: .68rem; }
+  .stage-table-scroll { overflow-x: auto; border: 1px solid #e1e9f0; border-radius: 12px; }
+  .stage-table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: .72rem; }
+  .stage-table th, .stage-table td { padding: 10px 9px; border-bottom: 1px solid #edf1f5; text-align: left; white-space: nowrap; }
+  .stage-table th { color: var(--muted); font-size: .64rem; letter-spacing: .06em; text-transform: uppercase; }
+  .stage-table tbody tr:last-child td { border-bottom: 0; }
+  .stage-status { padding: 4px 7px; border-radius: 999px; background: #f1f3f5; color: #68798a; font-size: .64rem; font-weight: 800; text-transform: capitalize; }
+  .stage-status.stage-ok { background: #effaf5; color: #197658; }
+  .stage-status.stage-bad { background: #fff0f0; color: #b24646; }
+  .stage-table td small { display: block; max-width: 180px; overflow: hidden; color: #b24646; font-size: .64rem; text-overflow: ellipsis; }
   .posture-card { grid-column: 1 / -1; }
   .verifier-card { grid-column: 1 / -1; }
   .score-chip.attention { border-color: #efc88b; background: #fff8e9; color: #9a630f; }
@@ -280,6 +346,6 @@
   .corrupted.attention { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); background: color-mix(in srgb, var(--danger) 5%, var(--surface)); }
   .corrupted.attention strong { color: var(--danger); }
   .card-link { margin-top: .6rem; font-size: .85rem; }
-  @media (max-width: 760px) { .analysis-grid, .insight-grid, .traffic-grid { grid-template-columns: 1fr; } .posture-card, .traffic-card, .verifier-card { grid-column: auto; } .posture-grid, .verifier-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  @media (max-width: 480px) { .metric-strip { grid-template-columns: 1fr; gap: 8px; } .posture-grid, .verifier-summary { grid-template-columns: 1fr; } .traffic-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; } .traffic-label { grid-column: 1 / -1; } .traffic-meter { grid-column: 1; } }
+  @media (max-width: 760px) { .analysis-grid, .insight-grid, .traffic-grid { grid-template-columns: 1fr; } .posture-card, .traffic-card, .verifier-card, .stage-metrics-card { grid-column: auto; } .posture-grid, .verifier-summary, .stage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 480px) { .metric-strip { grid-template-columns: 1fr; gap: 8px; } .posture-grid, .verifier-summary, .stage-summary { grid-template-columns: 1fr; } .traffic-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; } .traffic-label { grid-column: 1 / -1; } .traffic-meter { grid-column: 1; } }
 </style>

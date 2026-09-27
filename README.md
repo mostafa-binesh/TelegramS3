@@ -59,6 +59,10 @@ staging, and recovery artifacts, not committed payloads.
   to 120 seconds while a transient Telegram/proxy read is recovering.
 - **Bounded memory everywhere** — uploads and downloads stream chunk-by-chunk;
   no whole-object RAM buffering (an explicit project invariant).
+- **Download stage diagnostics** — the authenticated Overview keeps a bounded,
+  process-local sample of recent public/admin/S3 reads, separating first-chunk,
+  Telegram, retry-wait, decrypt, checksum-verify, and total timings for live
+  performance testing. It is diagnostic telemetry, not durable accounting.
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
   operator account management, in-app bucket creation, bucket/object browser
   with per-file upload, ranged download, guarded folder deletion, and resilient
@@ -276,6 +280,13 @@ recovery signals.
 Public audio/video links also use `Content-Disposition: inline` with their
 stored media type, allowing HTTP media players such as PotPlayer to probe and
 play the URL; non-media public objects retain attachment disposition.
+
+The Overview's **Download stage metrics** panel is a live testing aid for this
+path. After a public, admin, or S3 read completes (or fails), it reports the
+recent first-chunk, Telegram, retry-wait, decrypt, checksum-verify, and total
+durations, along with chunk and payload counts. Samples are process-local and
+bounded to the latest 20 reads, so this panel does not replace durable traffic
+accounting or recovery records.
 
 Per-object expiry is available as a Telegram S3 extension. Send either
 `x-amz-meta-telegram-s3-expires-at: <RFC3339 timestamp>` or

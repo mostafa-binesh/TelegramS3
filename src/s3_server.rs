@@ -555,8 +555,12 @@ async fn handle_share_request(
     let mut response = if is_head || spans.is_empty() {
         hyper::Response::new(Body::empty())
     } else {
-        let stream =
-            ObjectFormatService::read_spans_to_stream(Arc::clone(&object_format), &manifest, spans);
+        let stream = ObjectFormatService::read_spans_to_stream(
+            Arc::clone(&object_format),
+            &manifest,
+            spans,
+            "public",
+        );
         hyper::Response::new(Body::http_body_unsync(StreamBody::new(
             stream.map(|chunk| chunk.map(Frame::data)),
         )))
@@ -1157,6 +1161,7 @@ impl S3 for TelegramS3Backend {
             Arc::clone(&self.object_format),
             &manifest,
             spans.chunks,
+            "s3",
         );
         let body: StreamingBlob =
             Body::http_body_unsync(StreamBody::new(stream.map(|chunk| chunk.map(Frame::data))))
@@ -1254,6 +1259,7 @@ impl S3 for TelegramS3Backend {
             Arc::clone(&self.object_format),
             &manifest,
             spans,
+            "s3",
         );
         let body = Body::http_body_unsync(StreamBody::new(
             body_stream.map(|chunk| chunk.map(Frame::data)),

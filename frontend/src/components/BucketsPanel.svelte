@@ -3,7 +3,7 @@
   import { formatBytes, formatTimestamp } from '../lib/format';
   import LoadError from './LoadError.svelte';
   import ActionIcon from './ActionIcon.svelte';
-  import type { BucketInfo, ObjectEntry, ObjectsState } from '../lib/types';
+  import type { BucketInfo, ObjectEntry, ObjectsState, SearchResult } from '../lib/types';
 
   export let buckets: BucketInfo[] = [];
   export let selectedBucket = '';
@@ -18,6 +18,11 @@
   export let bucketSearch = '';
   export let bucketPage = 1;
   export let bucketTotal = 0;
+  export let globalSearchResults: SearchResult[] = [];
+  export let globalSearchPage = 1;
+  export let globalSearchTotal = 0;
+  export let globalSearchLoading = false;
+  export let globalSearchError = '';
   export let objectSearch = '';
   export let objectPage = 1;
   export let objectTotal = 0;
@@ -38,14 +43,37 @@
   export let onOpenShareLinks: (object: ObjectEntry) => void = () => {};
   export let onBucketSearch: (value: string) => void = () => {};
   export let onBucketPage: (page: number) => void = () => {};
+  export let onGlobalSearchPage: (page: number) => void = () => {};
+  export let onOpenSearchResult: (result: SearchResult) => void = () => {};
   export let onObjectSearch: (value: string) => void = () => {};
   export let onObjectPage: (page: number) => void = () => {};
   export let onGoToFolder: (location: string) => void = () => {};
 
+  type PageItem = number | 'ellipsis';
+
   $: selectableObjects = listing?.objects.filter((object) => !object.uploading) ?? [];
   $: allVisibleSelected = selectedKeys.length > 0 && selectedKeys.length === selectableObjects.length;
   $: bucketPageCount = Math.max(1, Math.ceil(bucketTotal / 25));
+  $: globalSearchPageCount = Math.max(1, Math.ceil(globalSearchTotal / 25));
   $: objectPageCount = Math.max(1, Math.ceil(objectTotal / 25));
+  $: bucketPageItems = pageItems(bucketPage, bucketPageCount);
+  $: globalSearchPageItems = pageItems(globalSearchPage, globalSearchPageCount);
+  $: objectPageItems = pageItems(objectPage, objectPageCount);
+
+  function pageItems(current: number, total: number): PageItem[] {
+    if (total <= 7) return Array.from({ length: total }, (_, index) => index + 1);
+
+    const visible = new Set([1, total, current, current - 1, current + 1]);
+    const pages: PageItem[] = [];
+    for (let page = 1; page <= total; page += 1) {
+      if (!visible.has(page)) {
+        if (pages.at(-1) !== 'ellipsis') pages.push('ellipsis');
+        continue;
+      }
+      pages.push(page);
+    }
+    return pages;
+  }
 
   function uploadTitle(object: ObjectEntry) {
     const done = object.upload_parts_done ?? 0;
@@ -113,17 +141,18 @@
   {#if !selectedBucket}
     <div class="browser-toolbar">
       <label class="search-field">
-        <span class="visually-hidden">Search buckets</span>
-        <input value={bucketSearch} type="search" placeholder="Search buckets…" aria-label="Search buckets" on:input={(event) => onBucketSearch((event.currentTarget as HTMLInputElement).value)} />
+        <span class="visually-hidden">Search buckets and files</span>
+        <input value={bucketSearch} type="search" placeholder="Search buckets and files…" aria-label="Search buckets and files" on:input={(event) => onBucketSearch((event.currentTarget as HTMLInputElement).value)} />
       </label>
       {#if bucketSearch}<button class="btn-link clear-search" type="button" on:click={() => onBucketSearch('')}>Clear search</button>{/if}
     </div>
-    <p class="fine-print">Select a bucket to browse its files. Bucket names may contain Unicode characters.</p>
+    <p class="fine-print">Select a bucket to browse its files. Search also checks object names recursively across every bucket.</p>
     {#if bucketsLoading}<div class="skeleton-stack" aria-label="Loading buckets"><div class="skeleton" style="height:52px"></div><div class="skeleton" style="height:52px"></div><div class="skeleton" style="height:52px"></div></div>
     {:else if bucketsError}<LoadError title="Could not load buckets" message={bucketsError} onRetry={onRefresh} />
     {:else if buckets.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">{bucketSearch ? '⌕' : '+'}</span>{bucketSearch ? 'No buckets match this search.' : 'No buckets yet. Create one above to start the file browser.'}</p>
     {:else}<ul class="checks">{#each buckets as bucket (bucket.name)}<li><div class="bucket-row"><button type="button" class="btn-link" on:click={() => onOpenBucket(bucket.name)}>{bucket.name}<small>created {formatTimestamp(bucket.created_at)}</small></button><ActionIcon name="trash" label={`Delete bucket ${bucket.name}`} tone="danger" on:click={() => onRemoveBucket(bucket.name)} disabled={busy}/></div></li>{/each}</ul>{/if}
-    {#if bucketTotal > 25}<div class="pagination" aria-label="Bucket pages"><button class="ghost" type="button" disabled={bucketPage <= 1 || bucketsLoading} on:click={() => onBucketPage(bucketPage - 1)}>Previous</button><span>Page {bucketPage} of {bucketPageCount} · {bucketTotal} buckets</span><button class="ghost" type="button" disabled={bucketPage >= bucketPageCount || bucketsLoading} on:click={() => onBucketPage(bucketPage + 1)}>Next</button></div>{/if}
+    {#if bucketTotal > 25}<nav class="pagination" aria-label="Bucket pages"><button class="pagination-arrow" type="button" aria-label="Previous bucket page" disabled={bucketPage <= 1 || bucketsLoading} on:click={() => onBucketPage(bucketPage - 1)}>←</button><div class="page-numbers">{#each bucketPageItems as item}{#if item === 'ellipsis'}<span class="pagination-ellipsis" aria-hidden="true">…</span>{:else}<button class:active-page={item === bucketPage} class="page-number" type="button" aria-label={`Go to bucket page ${item}`} aria-current={item === bucketPage ? 'page' : undefined} disabled={bucketsLoading} on:click={() => onBucketPage(item)}>{item}</button>{/if}{/each}</div><button class="pagination-arrow" type="button" aria-label="Next bucket page" disabled={bucketPage >= bucketPageCount || bucketsLoading} on:click={() => onBucketPage(bucketPage + 1)}>→</button><span class="pagination-summary">{bucketTotal} buckets</span></nav>{/if}
+    {#if bucketSearch}<section class="global-search-card" aria-label="Recursive file search"><div class="global-search-head"><div><p class="card-label">Recursive file search</p><h3>Files in all buckets</h3></div><span class="search-count">{globalSearchTotal} {globalSearchTotal === 1 ? 'match' : 'matches'}</span></div>{#if globalSearchLoading}<div class="skeleton-stack" aria-label="Searching files"><div class="skeleton" style="height:52px"></div><div class="skeleton" style="height:52px"></div></div>{:else if globalSearchError}<LoadError title="Could not search files" message={globalSearchError} onRetry={onRefresh} />{:else if globalSearchResults.length === 0}<p class="empty-state compact-empty"><span class="empty-mark" aria-hidden="true">⌕</span>No files match this search across the buckets.</p>{:else}<ul class="global-search-list">{#each globalSearchResults as result (result.bucket + result.key)}<li><div class="global-result-copy"><strong>{result.name}</strong><small>{result.bucket}{result.location ? ` / ${result.location}` : ' / root'}</small></div><button class="ghost result-open" type="button" on:click={() => onOpenSearchResult(result)}>Open location</button></li>{/each}</ul>{#if globalSearchTotal > 25}<nav class="pagination" aria-label="Recursive search pages"><button class="pagination-arrow" type="button" aria-label="Previous search page" disabled={globalSearchPage <= 1 || globalSearchLoading} on:click={() => onGlobalSearchPage(globalSearchPage - 1)}>←</button><div class="page-numbers">{#each globalSearchPageItems as item}{#if item === 'ellipsis'}<span class="pagination-ellipsis" aria-hidden="true">…</span>{:else}<button class:active-page={item === globalSearchPage} class="page-number" type="button" aria-label={`Go to search page ${item}`} aria-current={item === globalSearchPage ? 'page' : undefined} disabled={globalSearchLoading} on:click={() => onGlobalSearchPage(item)}>{item}</button>{/if}{/each}</div><button class="pagination-arrow" type="button" aria-label="Next search page" disabled={globalSearchPage >= globalSearchPageCount || globalSearchLoading} on:click={() => onGlobalSearchPage(globalSearchPage + 1)}>→</button><span class="pagination-summary">{globalSearchTotal} matches</span></nav>{/if}{/if}</section>{/if}
   {:else}
     {#if listing}
       <div class="listing-frame" class:loading={objectsLoading} aria-busy={objectsLoading}>
@@ -193,7 +222,7 @@
       {/each}
     </tbody></table></div>{/if}
       </div>
-      {#if objectTotal > 25}<div class="pagination" aria-label="Object pages"><button class="ghost" type="button" disabled={objectPage <= 1 || objectsLoading} on:click={() => onObjectPage(objectPage - 1)}>Previous</button><span>Page {objectPage} of {objectPageCount} · {objectTotal} items</span><button class="ghost" type="button" disabled={objectPage >= objectPageCount || objectsLoading} on:click={() => onObjectPage(objectPage + 1)}>Next</button></div>{/if}
+      {#if objectTotal > 25}<nav class="pagination" aria-label="Object pages"><button class="pagination-arrow" type="button" aria-label="Previous object page" disabled={objectPage <= 1 || objectsLoading} on:click={() => onObjectPage(objectPage - 1)}>←</button><div class="page-numbers">{#each objectPageItems as item}{#if item === 'ellipsis'}<span class="pagination-ellipsis" aria-hidden="true">…</span>{:else}<button class:active-page={item === objectPage} class="page-number" type="button" aria-label={`Go to object page ${item}`} aria-current={item === objectPage ? 'page' : undefined} disabled={objectsLoading} on:click={() => onObjectPage(item)}>{item}</button>{/if}{/each}</div><button class="pagination-arrow" type="button" aria-label="Next object page" disabled={objectPage >= objectPageCount || objectsLoading} on:click={() => onObjectPage(objectPage + 1)}>→</button><span class="pagination-summary">{objectTotal} items</span></nav>{/if}
     {:else if objectsLoading}<div class="skeleton-stack" aria-label="Loading files"><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div></div>
     {:else if objectsError}<LoadError title="Could not load this folder" message={objectsError} onRetry={onRefresh} />
     {/if}
@@ -211,8 +240,26 @@
   .search-field input:focus { outline: 3px solid rgba(43,130,197,.16); border-color: #68a9d2; }
   .search-hint { color: var(--muted); font-size: .75rem; }
   .clear-search { flex: 0 0 auto; font-size: .78rem; }
-  .pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 16px; color: var(--muted); font-size: .78rem; }
-  .pagination .ghost { min-height: 34px; padding: 6px 12px; }
+  .pagination { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 18px; color: var(--muted); font-size: .78rem; }
+  .page-numbers { display: flex; align-items: center; gap: 5px; }
+  .pagination-arrow, .page-number { display: inline-grid; place-items: center; min-width: 34px; height: 34px; padding: 0 8px; border: 1px solid #d8e3eb; border-radius: 10px; background: #fff; color: #3f6077; font: inherit; font-weight: 750; cursor: pointer; transition: border-color 150ms ease, background 150ms ease, color 150ms ease, box-shadow 150ms ease; }
+  .pagination-arrow { font-size: 1rem; }
+  .pagination-arrow:hover:not(:disabled), .page-number:hover:not(:disabled) { border-color: #8bb9d7; background: #f4fbff; color: var(--accent); }
+  .page-number.active-page { border-color: var(--accent); background: var(--accent); color: #fff; box-shadow: 0 5px 12px rgba(43,130,197,.2); }
+  .pagination-arrow:disabled, .page-number:disabled { cursor: not-allowed; opacity: .45; }
+  .pagination-ellipsis { display: inline-grid; place-items: center; min-width: 20px; color: #8aa0b0; font-weight: 800; }
+  .pagination-summary { margin-left: 6px; white-space: nowrap; }
+  .global-search-card { margin-top: 20px; padding: 18px; border: 1px solid #dbe8f0; border-radius: 14px; background: linear-gradient(145deg, #fbfdff, #f4faff); }
+  .global-search-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+  .global-search-head h3 { margin: 3px 0 0; color: #203b57; font-size: 1rem; }
+  .search-count { color: #2b82c5; font-size: .75rem; font-weight: 800; white-space: nowrap; }
+  .global-search-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+  .global-search-list li { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 12px; border: 1px solid #e1edf4; border-radius: 11px; background: #fff; }
+  .global-result-copy { display: grid; gap: 3px; min-width: 0; }
+  .global-result-copy strong { overflow-wrap: anywhere; color: #203b57; }
+  .global-result-copy small { overflow-wrap: anywhere; color: var(--muted); font-size: .72rem; }
+  .result-open { flex: 0 0 auto; padding: 7px 10px; }
+  .compact-empty { margin: 0; padding: 22px 0 10px; }
   .location-link { display: block; max-width: 100%; overflow: hidden; padding: 2px 0; border: 0; background: transparent; color: #49779a; font-size: .72rem; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
   .location-link:hover { color: var(--accent); text-decoration: underline; }
   .listing-status { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 34px; margin: 0 0 8px; padding: 7px 10px; border: 1px solid #cfe4f1; border-radius: 10px; background: #f3faff; color: #2d6789; font-size: .78rem; font-weight: 750; }
@@ -270,6 +317,6 @@
   @keyframes shimmer { from { transform: translateX(-160%); } to { transform: translateX(380%); } }
   @keyframes indeterminate { 0% { transform: translateX(-110%); } 55%,100% { transform: translateX(270%); } }
   @media (prefers-reduced-motion: reduce) { .status-beacon, .upload-fill, .upload-fill::after { animation: none!important; transition: none; } .listing-frame .table-scroll { transition: none; } }
-  @media (max-width: 700px) { .browser-toolbar { align-items: stretch; flex-wrap: wrap; } .search-field { flex-basis: 100%; max-width: none; } .object-toolbar .search-hint { flex: 1 1 auto; } .pagination { flex-wrap: wrap; } }
+  @media (max-width: 700px) { .browser-toolbar { align-items: stretch; flex-wrap: wrap; } .search-field { flex-basis: 100%; max-width: none; } .object-toolbar .search-hint { flex: 1 1 auto; } .pagination { flex-wrap: wrap; } .pagination-summary { flex-basis: 100%; margin: 0; text-align: center; } .global-search-head, .global-search-list li { align-items: stretch; flex-direction: column; } .result-open { align-self: flex-start; } }
   .visually-hidden { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
 </style>

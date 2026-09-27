@@ -111,6 +111,14 @@ does not change object durability or manifest layout: each chunk is still
 verified before delivery, output remains ordered, and outstanding work is
 cancelled when the client stream ends.
 
+The first requested chunk is fetched before speculative prefetch begins to
+reduce time to first byte. The authenticated Overview's Download stage metrics
+section can be used while testing a read: it records bounded, process-local
+samples for first-chunk, Telegram, retry-wait, decrypt, checksum-verify, and
+total durations, plus retry and byte counts. These samples are diagnostic only
+and disappear on restart; they are not recovery evidence or durable transfer
+state.
+
 Public and admin responses advertise `Accept-Ranges: bytes`. If the recovery
 window is exhausted after earlier bytes were sent, a capable client can resume
 with a single `Range: bytes=<offset>-` request. Missing messages, decryption

@@ -296,6 +296,25 @@ struct ListBucketsResponse {
     search: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct SearchResultWire {
+    bucket: String,
+    #[serde(flatten)]
+    object: ObjectEntryWire,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct SearchResponse {
+    results: Vec<SearchResultWire>,
+    page: usize,
+    page_size: usize,
+    total: usize,
+    has_more: bool,
+    search: String,
+}
+
 fn rfc3339_unix(unix: i64) -> String {
     OffsetDateTime::from_unix_timestamp(unix)
         .map(|value| {
@@ -485,6 +504,7 @@ impl AdminUiState {
             (Method::GET, "buckets") => self.handle_list_buckets(request),
             (Method::POST, "buckets") => self.handle_create_bucket(request).await,
             (Method::DELETE, p) if p.starts_with("buckets/") => self.handle_delete_bucket(p),
+            (Method::GET, "search") => self.handle_search(request),
             (Method::GET, "objects") => self.handle_list_objects(request),
             (Method::POST, "objects/folder") => {
                 self.handle_create_folder(request, &principal).await
@@ -883,6 +903,102 @@ impl AdminUiState {
             StatusCode::OK,
             ListBucketsResponse {
                 buckets: wire,
+                page,
+                page_size,
+                total,
+                has_more,
+                search,
+            },
+        )
+    }
+
+    fn handle_search(&self, request: Request<Incoming>) -> Response<Body> {
+        let query = parse_list_params(request.uri().query().unwrap_or(""));
+        let search = query.get("search").cloned().unwrap_or_default();
+        if search.len() > 256 {
+            return json_error(StatusCode::BAD_REQUEST, "search query too long");
+        }
+        let page = match parse_page_param(&query, "page", 1) {
+            Ok(value) => value,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
+        let page_size = match parse_page_param(&query, "page_size", 25) {
+            Ok(value) if value <= 100 => value,
+            Ok(_) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "page_size must be between 1 and 100",
+                );
+            }
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, &message),
+        };
+
+        let search_lower = search.trim().to_lowercase();
+        if search_lower.is_empty() {
+            return json_response(
+                StatusCode::OK,
+                SearchResponse {
+                    results: Vec::new(),
+                    page,
+                    page_size,
+                    total: 0,
+                    has_more: false,
+                    search,
+                },
+            );
+        }
+
+        let buckets = match self.object_format.list_buckets() {
+            Ok(buckets) => buckets,
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        };
+        let mut matches = Vec::new();
+        for bucket in buckets {
+            let bucket_name = bucket.name;
+            let manifests = match self.object_format.list_bucket_manifests(&bucket_name, None) {
+                Ok(manifests) => manifests,
+                Err(error) => {
+                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                }
+            };
+            for manifest in manifests {
+                let key = manifest.key.clone();
+                let searchable = format!("{bucket_name}/{key}").to_lowercase();
+                if !searchable.contains(&search_lower) {
+                    continue;
+                }
+                let shared_links = match self.store().share_link_count(&bucket_name, &key) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                    }
+                };
+                let location = key.rsplit_once('/').map(|(parent, _)| format!("{parent}/"));
+                matches.push(SearchResultWire {
+                    bucket: bucket_name.clone(),
+                    object: object_to_wire(&manifest, &key, shared_links, location),
+                });
+            }
+        }
+        matches.sort_by(|a, b| {
+            a.bucket
+                .cmp(&b.bucket)
+                .then_with(|| a.object.key.cmp(&b.object.key))
+        });
+
+        let total = matches.len();
+        let start = page.saturating_sub(1).saturating_mul(page_size);
+        let end = start.saturating_add(page_size).min(total);
+        let has_more = end < total;
+        let results = if start < total {
+            matches.into_iter().skip(start).take(end - start).collect()
+        } else {
+            Vec::new()
+        };
+        json_response(
+            StatusCode::OK,
+            SearchResponse {
+                results,
                 page,
                 page_size,
                 total,
@@ -1372,6 +1488,7 @@ impl AdminUiState {
                 Arc::clone(&self.object_format),
                 &manifest,
                 spans,
+                "admin",
             );
             Response::new(Body::http_body_unsync(StreamBody::new(
                 stream.map(|chunk| chunk.map(Frame::data)),
@@ -2031,6 +2148,7 @@ impl AdminUiState {
             .unwrap_or_else(|_| empty_object());
         let durable = self.object_format.durable_metrics().unwrap_or_default();
         let traffic = self.object_format.traffic_metrics();
+        let stage_metrics = self.object_format.download_stage_metrics();
         let acknowledgements = self
             .object_format
             .metadata_store()
@@ -2100,6 +2218,7 @@ impl AdminUiState {
                 "storage": storage,
                 "transfers": durable,
                 "traffic": traffic,
+                "stage_metrics": stage_metrics,
                 "recovery": recovery,
                 "verifier": verifier,
                 "telegram": telegram,

@@ -3,6 +3,7 @@ import type {
   MultipartUpload,
   BucketsState,
   ObjectsState,
+  SearchState,
   OverviewState,
   SessionState,
   StorageSettingsState,
@@ -207,6 +208,17 @@ export function listBuckets(
   if (options.pageSize) qp.set('page_size', String(options.pageSize));
   const suffix = qp.toString() ? `?${qp.toString()}` : '';
   return requestJson<BucketsState>(`/buckets${suffix}`, csrf);
+}
+
+export function searchObjects(
+  csrf: string | null | undefined,
+  search: string,
+  options: { page?: number; pageSize?: number } = {}
+) {
+  const qp = new URLSearchParams({ search });
+  if (options.page) qp.set('page', String(options.page));
+  if (options.pageSize) qp.set('page_size', String(options.pageSize));
+  return requestJson<SearchState>(`/search?${qp.toString()}`, csrf);
 }
 
 export function createBucket(csrf?: string | null, name = '') {

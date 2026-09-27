@@ -48,6 +48,19 @@ export interface ObjectEntry {
   upload_error?: string | null;
 }
 
+export interface SearchResult extends ObjectEntry {
+  bucket: string;
+}
+
+export interface SearchState {
+  results: SearchResult[];
+  page?: number;
+  page_size?: number;
+  total?: number;
+  has_more?: boolean;
+  search?: string;
+}
+
 export interface SharedLink {
   id: string;
   url?: string | null;
@@ -114,6 +127,31 @@ export interface TrafficMetrics {
   total: TrafficSnapshot;
 }
 
+export interface DownloadStageSample {
+  request_id: number;
+  surface: string;
+  started_at: string;
+  status: string;
+  chunks: number;
+  client_bytes: number;
+  telegram_bytes: number;
+  telegram_retries: number;
+  first_chunk_us?: number | null;
+  telegram_us: number;
+  retry_wait_us: number;
+  decrypt_us: number;
+  verify_us: number;
+  total_us: number;
+  error?: string | null;
+}
+
+export interface DownloadStageMetrics {
+  active_requests: number;
+  completed_requests: number;
+  failed_requests: number;
+  recent: DownloadStageSample[];
+}
+
 export interface RecoveryIssue {
   /** Stable fingerprint used to acknowledge this issue. */
   id: string;
@@ -157,6 +195,7 @@ export interface OverviewState {
   storage?: StorageCard;
   transfers?: DurableMetrics;
   traffic?: TrafficMetrics;
+  stage_metrics?: DownloadStageMetrics;
   recovery?: RecoveryState;
   verifier?: VerifierState;
   telegram?: {
