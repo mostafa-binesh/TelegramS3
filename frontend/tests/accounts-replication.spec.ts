@@ -25,7 +25,11 @@ async function mockConsole(page: import('@playwright/test').Page) {
     if (path === '/rechunk' && request.method() === 'GET') return route.fulfill({ json: { jobs: [] } });
     if (path === '/rechunk' && request.method() === 'POST') { rechunkBody = request.postDataJSON(); return route.fulfill({ status: 202, json: { jobs: [] } }); }
     if (path === '/buckets' && request.method() === 'GET') return route.fulfill({ json: { buckets: [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }], page: 1, page_size: 25, total: 1, has_more: false } });
-    if (path === '/objects' && request.method() === 'GET') return route.fulfill({ json: { prefix: '', folders: [], objects: [{ key: 'sample.bin', name: 'sample.bin', size: 10, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }], page: 1, page_size: 25, total: 1, has_more: false } });
+    if (path === '/objects' && request.method() === 'GET') return route.fulfill({ json: { prefix: '', folders: [], objects: [{ key: 'sample.bin', name: 'sample.bin', size: 10, last_modified: '2026-01-01T00:00:00Z', shared_links: 0, replica_accounts: 2, access_accounts: 1 }], page: 1, page_size: 25, total: 1, has_more: false } });
+    if (path === '/replicas' && request.method() === 'GET') return route.fulfill({ json: { replicas: [
+      { object_id: 'object-1', bucket: 'release-test', key: 'sample.bin', chunk_order: 0, account_id: 'backup', account_label: 'Backup', mode: 'replica', peer_id: '-1002', message_id: 42, document_id: 'doc-42', state: 'ready', updated_at: 1 },
+      { object_id: 'object-1', bucket: 'release-test', key: 'sample.bin', chunk_order: 0, account_id: 'backup', account_label: 'Backup', mode: 'access', peer_id: '-1001', message_id: 42, document_id: 'doc-42', state: 'ready', updated_at: 1 }
+    ] } });
     if (path === '/objects/delete' && request.method() === 'POST') return route.fulfill({ json: { ok: true } });
     return route.fulfill({ json: {} });
   });
@@ -42,12 +46,40 @@ test('accounts page saves connections and submits automatic access replication',
   await page.getByLabel('Storage chat ID').fill('-1002');
   await page.getByRole('button', { name: 'Save connection' }).click();
   expect(state.savedAccount).toBe(true);
+  await page.getByRole('tab', { name: 'Replication' }).click();
   await page.getByLabel('Bucket').selectOption('release-test');
   await page.getByLabel('Schedule').selectOption('automatic');
   await page.getByLabel('Target mode').selectOption('access');
-  await page.getByRole('button', { name: 'Queue replication' }).click();
+  await page.getByRole('button', { name: 'Queue bucket replication' }).click();
   await expect(page.getByText('Replication job queued')).toBeVisible();
   expect(state.replicationBody).toMatchObject({ bucket: 'release-test', mode: 'automatic', access_mode: 'access' });
+});
+
+test('replica badge shows account details and bulk replication keeps the selected keys', async ({ page }) => {
+  const state = await mockConsole(page);
+  await page.goto('/_admin/buckets');
+  await page.getByRole('button', { name: /^release-test/ }).click();
+
+  await page.getByRole('button', { name: 'Show account copies and access for sample.bin' }).click();
+  await expect(page.getByRole('dialog', { name: /release-test\/sample.bin/ })).toBeVisible();
+  const replicaDialog = page.getByRole('dialog', { name: /release-test\/sample.bin/ });
+  await expect(replicaDialog.getByText('Backup').first()).toBeVisible();
+  await expect(replicaDialog.getByText(/Physical replica · chunk/).first()).toBeVisible();
+  await page.getByRole('button', { name: 'Close account access details' }).click();
+
+  await page.getByRole('checkbox', { name: 'Select sample.bin' }).check();
+  await page.getByRole('button', { name: 'Replicate' }).click();
+  await expect(page.getByText('Scope:')).toContainText('1 selected object');
+  await page.getByLabel('Schedule').selectOption('automatic');
+  await page.getByLabel('Target mode').selectOption('access');
+  await page.getByRole('button', { name: 'Queue selected replication' }).click();
+  await expect(page.getByText('Replication queued for 1 selected object(s).')).toBeVisible();
+  expect(state.replicationBody).toMatchObject({
+    bucket: 'release-test',
+    keys: ['sample.bin'],
+    mode: 'automatic',
+    access_mode: 'access'
+  });
 });
 
 test('bucket selection opens the re-chunk size dialog and queues selected keys', async ({ page }) => {

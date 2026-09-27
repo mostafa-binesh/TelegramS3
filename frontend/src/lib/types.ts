@@ -154,6 +154,8 @@ export interface DownloadStageMetrics {
   active_requests: number;
   completed_requests: number;
   failed_requests: number;
+  test_active_requests: number;
+  last_test?: DownloadStageSample | null;
   recent: DownloadStageSample[];
 }
 
@@ -307,6 +309,7 @@ export interface ReplicationJob {
   bucket: string;
   mode: 'one_time' | 'automatic' | string;
   access_mode: 'replica' | 'access' | string;
+  object_keys?: string[];
   state: string;
   objects_total: number;
   objects_done: number;

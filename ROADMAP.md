@@ -324,12 +324,16 @@ Multi-user boundary for the next increment:
 
 - [x] Additive schema migration for multiple Telegram connections and durable
   replication/re-chunk job state.
+- [x] Schema v16 preserves existing replication jobs while adding durable
+  selected-object scopes for bulk replication.
 - [x] One-time and automatic bucket replication controls with physical-copy and
   access-only modes.
 - [x] Replica/access badges, account detail inspection, and round-robin chunk
   reads across ready physical replicas.
 - [x] Bulk re-chunk queue with progress and temporary object locks.
-- [x] Browser and migration coverage for the operator paths.
+- [x] Browser and migration coverage for the operator paths, including expired
+  session redirect, staged diagnostic tests, account tabs, replica details,
+  fixed bulk actions, and recursive search location navigation.
 
 Remaining Phase 10 work:
 

@@ -6,7 +6,7 @@
   export let busy = false;
   const links = [
     ['overview','Overview'],['buckets','Buckets'],['transfers','Transfers'],
-    ['recovery','Recovery'],['telegram','Telegram settings'],['accounts','Accounts'],['users','Operators']
+    ['recovery','Recovery'],['telegram','Storage settings'],['accounts','Accounts'],['users','Operators']
   ] as const;
 </script>
 <aside>

@@ -40,9 +40,12 @@ Each object is represented by:
 3. a local index row and journal entry
 4. optional multipart session and part rows while an upload is in progress
 
-Schema v15 additionally stores an account registry, durable replication jobs,
-replica/access locations, and re-chunk locks/jobs. These rows are additive and
-do not rewrite existing object ownership. `ChunkRef.replicas` is optional so
+Schema v16 additionally stores an account registry, durable replication jobs,
+selected-object replication scopes, replica/access locations, and re-chunk
+locks/jobs. The `object_keys_json` migration is additive: an empty array keeps
+existing whole-bucket replication behavior, while a populated array limits a
+job to the selected keys. These rows are additive and do not rewrite existing
+object ownership. `ChunkRef.replicas` is optional so
 schema-v2 manifests remain readable; each location identifies its account,
 mode (`replica` or `access`), peer, message, and document. The primary chunk
 location remains authoritative for legacy manifests.

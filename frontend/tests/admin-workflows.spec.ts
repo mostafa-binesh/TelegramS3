@@ -596,8 +596,7 @@ test('upload modal sends the selected object expiry through the resumable upload
 test('storage policy tab loads, applies MiB to bytes, and reports a save failure', async ({ page }) => {
   await mockAdminApi(page, { storageFailure: true });
   await signIn(page);
-  await page.getByRole('button', { name: 'Telegram settings' }).click();
-  await page.getByRole('tab', { name: /Storage policy/ }).click();
+  await page.getByRole('button', { name: 'Storage settings' }).click();
   await expect(page.getByRole('heading', { name: 'Give every upload the right-sized runway.' })).toBeVisible();
   await expect(page.locator('.policy-grid')).toHaveCSS('display', 'grid');
   await expect(page.locator('.policy-card').first()).toHaveCSS('border-radius', '22px');
@@ -645,8 +644,7 @@ test('overview shows verifier timing, broken-file totals, and its problem list',
 test('storage policy can disable the verifier and overview reports it', async ({ page }) => {
   await mockAdminApi(page);
   await signIn(page);
-  await page.getByRole('button', { name: 'Telegram settings' }).click();
-  await page.getByRole('tab', { name: /Storage policy/ }).click();
+  await page.getByRole('button', { name: 'Storage settings' }).click();
   await page.getByLabel('Enable automatic recovery verification').uncheck();
   const [saveRequest] = await Promise.all([
     page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/telegram/storage-settings') && candidate.method() === 'POST'),
@@ -664,8 +662,7 @@ test('storage policy can disable the verifier and overview reports it', async ({
 test('storage policy success is reflected after leaving and returning to the tab', async ({ page }) => {
   await mockAdminApi(page);
   await signIn(page);
-  await page.getByRole('button', { name: 'Telegram settings' }).click();
-  await page.getByRole('tab', { name: /Storage policy/ }).click();
+  await page.getByRole('button', { name: 'Storage settings' }).click();
   await page.getByRole('button', { name: '8 MiB', exact: true }).click();
   await page.getByLabel('Parallel download prefetch chunks').fill('2');
   await page.getByRole('spinbutton', { name: 'Verification interval seconds' }).fill('900');
@@ -675,8 +672,7 @@ test('storage policy success is reflected after leaving and returning to the tab
     page.getByRole('button', { name: 'Apply storage policy' }).click()
   ]);
   await expect(page.locator('p.storage-message[role="status"]')).toContainText('Storage policy updated.');
-  await page.getByRole('tab', { name: /Connection/ }).click();
-  await page.getByRole('tab', { name: /Storage policy/ }).click();
+  await page.getByRole('button', { name: 'Storage settings' }).click();
   await expect(page.getByText('8.00 MiB now')).toBeVisible();
   await expect(page.getByLabel('Parallel download prefetch chunks')).toHaveValue('2');
   await expect(page.getByRole('spinbutton', { name: 'Verification interval seconds' })).toHaveValue('900');
@@ -686,7 +682,7 @@ test('storage policy success is reflected after leaving and returning to the tab
 test('connection removal shows the account and stays disabled until its exact number is entered', async ({ page }) => {
   await mockAdminApi(page);
   await signIn(page);
-  await page.getByRole('button', { name: 'Telegram settings' }).click();
+  await page.getByRole('button', { name: 'Accounts' }).click();
   await page.getByRole('button', { name: 'Remove connection' }).first().click();
   const removeButton = page.locator('.compact-modal').getByRole('button', { name: 'Remove connection' });
   await expect(removeButton).toBeDisabled();

@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+## 0.7.6-rc.8 - 2026-09-27
+
+### Unified account workspace and replication controls
+
+- Moved the primary Telegram connection out of the storage settings page and
+  into the Accounts workspace, so primary and additional accounts share one
+  consistent connection UI.
+- Added separate Connections, Replication, and Maintenance tabs under
+  Accounts, with the primary account clearly identified and destructive account
+  actions kept scoped to the selected connection.
+- Added account/copy/access badges to bucket and object rows. The details dialog
+  now shows physical replicas, access-only accounts, storage chats, chunk
+  coverage, and the applicable replication controls.
+- Added one-time or automatic replication controls for whole buckets and for
+  selected object keys. Bulk replication uses the same durable job queue as the
+  detail view.
+- Added fixed-bottom bulk actions for replicate, move, delete, and re-chunk so
+  selected-object controls remain available while browsing long listings.
+
+### Session recovery and navigation reliability
+
+- Expired authenticated sessions now synchronize state and return the operator
+  to login instead of leaving an API error page that can only be repaired by a
+  manual refresh.
+- Search-result “open location” now preserves the recursive object search after
+  navigation, so a result remains visible even when it is not on the first page
+  of its containing folder.
+- Preserved the existing listing during folder transitions and fixed replica
+  detail rendering for accounts that have both physical-copy and access-only
+  records for the same chunk.
+
+### Download diagnostics and compatibility
+
+- Added a dedicated Download stage metrics test action. It performs an isolated
+  diagnostic read and reports its own sample, rather than reusing the latest
+  ordinary client download.
+- Added schema v16's additive replication object-key scope. Existing jobs keep
+  whole-bucket semantics, while newly queued selected-key jobs persist their
+  exact scope across restart and worker recovery.
+- Added browser coverage for expired-session recovery, account relocation and
+  tabs, replica/access detail rendering, bulk replication payloads, search
+  navigation, and the standalone stage-metrics test; added migration coverage
+  for preserving existing replication jobs.
+
 ## 0.7.6-rc.7 - 2026-09-27
 
 ### Replica account badge accuracy

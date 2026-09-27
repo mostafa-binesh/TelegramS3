@@ -84,10 +84,16 @@ staging, and recovery artifacts, not committed payloads.
   be registered, including the same Telegram account with separate session
   files. Buckets support one-time or automatic physical replication or
   access-only sharing; replica/access badges and per-chunk account details are
-  visible in Buckets, and ready replicas participate in round-robin reads.
+  visible in Buckets, and ready replicas participate in round-robin reads. The
+  Accounts workspace owns primary and additional connections together, with
+  separate Connections, Replication, and Maintenance tabs; selected objects
+  can be replicated from the same details flow as whole buckets.
 - **Maintenance queues** — selected bucket objects can be re-chunked through a
   bounded durable worker. Objects are locked and report temporary
   unavailability while their replacement manifest is published.
+- **Session recovery** — an expired admin session synchronizes with the
+  guest-safe session endpoint and returns to the login screen instead of
+  leaving a stale “not authenticated” error in the SPA.
 
 ## What's implemented
 

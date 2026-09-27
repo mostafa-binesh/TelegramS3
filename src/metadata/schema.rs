@@ -96,6 +96,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_download_prefetch_setting(connection)?;
         ensure_traffic_totals_schema(connection)?;
         ensure_multi_account_schema(connection)?;
+        ensure_replication_scope_schema(connection)?;
         return Ok(());
     }
 
@@ -360,6 +361,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_download_prefetch_setting(connection)?;
     ensure_traffic_totals_schema(connection)?;
     ensure_multi_account_schema(connection)?;
+    ensure_replication_scope_schema(connection)?;
     Ok(())
 }
 
@@ -406,6 +408,7 @@ fn ensure_multi_account_schema(connection: &mut Connection) -> Result<(), Metada
             source_account_id TEXT NOT NULL,
             target_account_id TEXT NOT NULL,
             bucket TEXT NOT NULL,
+            object_keys_json TEXT NOT NULL DEFAULT '[]',
             mode TEXT NOT NULL,
             access_mode TEXT NOT NULL,
             state TEXT NOT NULL DEFAULT 'queued',
@@ -474,6 +477,23 @@ fn ensure_multi_account_schema(connection: &mut Connection) -> Result<(), Metada
         connection.execute(
             "UPDATE telegram_accounts SET bootstrap_json=?2,updated_at=?3 WHERE id=?1",
             params![connection_id, bootstrap, now],
+        )?;
+    }
+    Ok(())
+}
+
+/// Replication scope is additive. An empty JSON array retains the original
+/// whole-bucket behavior; populated arrays limit a job to selected object keys.
+fn ensure_replication_scope_schema(connection: &mut Connection) -> Result<(), MetadataError> {
+    let has_column: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('replication_jobs') WHERE name='object_keys_json')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_column {
+        connection.execute(
+            "ALTER TABLE replication_jobs ADD COLUMN object_keys_json TEXT NOT NULL DEFAULT '[]'",
+            [],
         )?;
     }
     Ok(())
@@ -905,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v15_adds_account_and_maintenance_tables() {
+    fn schema_v16_adds_account_and_maintenance_tables_and_scope_column() {
         let store = MetadataStore::open_in_memory().expect("open");
         store
             .with_connection(|connection| {
@@ -925,9 +945,64 @@ mod tests {
                         .optional()?;
                     assert_eq!(found.as_deref(), Some(table));
                 }
+                let has_scope: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('replication_jobs') WHERE name='object_keys_json')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert!(has_scope);
                 Ok(())
             })
             .expect("tables");
+    }
+
+    #[test]
+    fn migration_from_version_fifteen_adds_replication_scope_without_losing_jobs() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("metadata.sqlite");
+        {
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE schema_version (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        version INTEGER NOT NULL,
+                        applied_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_version (id, version, applied_at)
+                    VALUES (1, 15, '2026-09-27T00:00:00Z');
+                    CREATE TABLE replication_jobs (
+                        id TEXT PRIMARY KEY,
+                        source_account_id TEXT NOT NULL,
+                        target_account_id TEXT NOT NULL,
+                        bucket TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        access_mode TEXT NOT NULL,
+                        state TEXT NOT NULL DEFAULT 'queued',
+                        objects_total INTEGER NOT NULL DEFAULT 0,
+                        objects_done INTEGER NOT NULL DEFAULT 0,
+                        chunks_total INTEGER NOT NULL DEFAULT 0,
+                        chunks_done INTEGER NOT NULL DEFAULT 0,
+                        bytes_done INTEGER NOT NULL DEFAULT 0,
+                        next_run INTEGER,
+                        last_run INTEGER,
+                        error TEXT,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+                    INSERT INTO replication_jobs(id,source_account_id,target_account_id,bucket,mode,access_mode,created_at,updated_at)
+                    VALUES ('legacy-job','source','target','backups','one_time','replica',1,1);
+                    "#,
+                )
+                .expect("seed");
+        }
+
+        let store = MetadataStore::open(&path).expect("migrate");
+        assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+        let jobs = store.list_replication_jobs().expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].object_keys.is_empty());
     }
 
     #[test]

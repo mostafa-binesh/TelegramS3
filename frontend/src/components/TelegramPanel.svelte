@@ -42,6 +42,7 @@
   export let storageSettingsError = '';
   export let storageSettingsMessage = '';
   export let onSaveStorageSettings: () => Promise<void> = async () => {};
+  export let hideTabs = false;
 
   let showRemoveConnection = false;
   let deleteUploadedFiles = false;
@@ -110,10 +111,10 @@
   }
 </script>
 
-<div class="settings-tabs" role="tablist" aria-label="Telegram settings sections">
+{#if !hideTabs}<div class="settings-tabs" role="tablist" aria-label="Telegram settings sections">
   <button class:active={telegramTab === 'connection'} type="button" role="tab" aria-selected={telegramTab === 'connection'} on:click={() => onTabChange('connection')}><span class="tab-icon">⌁</span><span><strong>Connection</strong><small>Account and health</small></span></button>
   <button class:active={telegramTab === 'storage'} type="button" role="tab" aria-selected={telegramTab === 'storage'} on:click={() => onTabChange('storage')}><span class="tab-icon storage-tab-icon">◈</span><span><strong>Storage policy</strong><small>Chunk size and flow</small></span></button>
-</div>
+</div>{/if}
 
 {#if showWizard && wizardComponent}
   <svelte:component

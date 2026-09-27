@@ -6,6 +6,7 @@ export const BASE = '/_admin';
 export type ViewName = 'overview' | 'buckets' | 'transfers' | 'recovery' | 'telegram' | 'accounts' | 'users';
 export type RecoveryTab = 'issues' | 'transfers';
 export type TelegramTab = 'connection' | 'proxy' | 'storage';
+export type AccountsTab = 'connections' | 'replication' | 'maintenance';
 
 export interface Route {
   view: ViewName;
@@ -15,6 +16,7 @@ export interface Route {
   prefix: string;
   recoveryTab: RecoveryTab;
   telegramTab: TelegramTab;
+  accountsTab: AccountsTab;
 }
 
 const DEFAULT_ROUTE: Route = {
@@ -22,7 +24,8 @@ const DEFAULT_ROUTE: Route = {
   bucket: '',
   prefix: '',
   recoveryTab: 'issues',
-  telegramTab: 'connection'
+  telegramTab: 'connection',
+  accountsTab: 'connections'
 };
 
 const VIEWS: ViewName[] = ['overview', 'buckets', 'transfers', 'recovery', 'telegram', 'accounts', 'users'];
@@ -69,6 +72,13 @@ export function parseRoute(pathname: string): Route {
       telegramTab: tail[0] === 'proxy' ? 'proxy' : tail[0] === 'storage' ? 'storage' : 'connection'
     };
   }
+  if (view === 'accounts') {
+    return {
+      ...DEFAULT_ROUTE,
+      view,
+      accountsTab: tail[0] === 'replication' ? 'replication' : tail[0] === 'maintenance' ? 'maintenance' : 'connections'
+    };
+  }
   return { ...DEFAULT_ROUTE, view };
 }
 
@@ -83,6 +93,7 @@ export function routePath(route: Partial<Route>): string {
   if (view === 'recovery' && route.recoveryTab === 'transfers') parts.push('transfers');
   if (view === 'telegram' && route.telegramTab === 'proxy') parts.push('proxy');
   if (view === 'telegram' && route.telegramTab === 'storage') parts.push('storage');
+  if (view === 'accounts' && route.accountsTab && route.accountsTab !== 'connections') parts.push(route.accountsTab);
   return `${BASE}/${parts.map(encodeURIComponent).join('/')}`;
 }
 
@@ -127,6 +138,7 @@ function normalizeView(next: Partial<Route>): Partial<Route> {
     bucket: next.bucket ?? '',
     prefix: next.prefix ?? '',
     recoveryTab: next.recoveryTab ?? 'issues',
-    telegramTab: next.telegramTab ?? 'connection'
+    telegramTab: next.telegramTab ?? 'connection',
+    accountsTab: next.accountsTab ?? 'connections'
   };
 }

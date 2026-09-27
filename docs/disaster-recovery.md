@@ -2,13 +2,19 @@
 
 ## Local Metadata Lost
 
-Schema v15 account and maintenance rows are part of the recovery boundary.
+Schema v16 account, scoped-replication, and maintenance rows are part of the
+recovery boundary.
 Back up `metadata.sqlite` before adding or scheduling replication. Restoring
 the database restores account definitions, replica/access maps, pending job
 progress, and re-chunk locks; queued workers resume after restart. Inspect
 failed replication or re-chunk jobs before retrying them. An access-only record
 is not a second copy: it is recoverable only while the target session can read
 the shared Telegram chat.
+
+For legacy replication jobs, `object_keys_json` is migrated to an empty array,
+which preserves their original whole-bucket scope. New selected-key jobs keep
+their exact key list durably, so a restart cannot silently expand a bulk
+selection into a whole-bucket copy.
 
 1. Stop the server.
 2. Preserve the current Telegram session and data directories.

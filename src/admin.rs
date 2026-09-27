@@ -196,6 +196,8 @@ struct ReplicationRequest {
     source_account_id: String,
     target_account_id: String,
     bucket: String,
+    #[serde(default)]
+    keys: Vec<String>,
     mode: String,
     access_mode: String,
 }
@@ -533,6 +535,7 @@ impl AdminUiState {
             (Method::POST, "session/logout") => self.handle_logout(&principal).await,
             (Method::POST, "session/refresh") => self.handle_refresh(&principal).await,
             (Method::GET, "overview") => self.handle_overview(&principal).await,
+            (Method::POST, "stage-metrics/test") => self.handle_stage_metrics_test().await,
             (Method::GET, "accounts") => self.handle_list_accounts(),
             (Method::POST, "accounts") => self.handle_save_account(request).await,
             (Method::DELETE, p) if p.starts_with("accounts/") => self.handle_delete_account(p),
@@ -676,6 +679,16 @@ impl AdminUiState {
         }
     }
 
+    async fn handle_stage_metrics_test(&self) -> Response<Body> {
+        match self.object_format.clone().run_download_stage_test().await {
+            Ok(sample) => json_response(
+                StatusCode::OK,
+                serde_json::json!({"ok": true, "sample": sample}),
+            ),
+            Err(error) => json_error(StatusCode::CONFLICT, &error.to_string()),
+        }
+    }
+
     async fn handle_queue_replication(&self, request: Request<Incoming>) -> Response<Body> {
         let body = match read_json::<ReplicationRequest>(request).await {
             Ok(body) => body,
@@ -684,10 +697,23 @@ impl AdminUiState {
         if body.bucket.trim().is_empty() {
             return json_error(StatusCode::BAD_REQUEST, "bucket is required");
         }
+        let keys = body
+            .keys
+            .into_iter()
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+            .collect::<Vec<_>>();
+        if keys.len() > 1024 {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "at most 1024 object keys may be selected",
+            );
+        }
         match self.store().queue_replication(
             &body.source_account_id,
             &body.target_account_id,
             body.bucket.trim(),
+            &keys,
             &body.mode,
             &body.access_mode,
         ) {

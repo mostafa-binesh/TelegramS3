@@ -470,6 +470,8 @@ mod tests {
     use rusqlite::OptionalExtension;
     use uuid::Uuid;
 
+    use crate::metadata::SCHEMA_VERSION;
+
     use super::MetadataStore;
 
     #[test]
@@ -483,7 +485,7 @@ mod tests {
             store.telegram_chunk_size().expect("read"),
             Some(8 * 1024 * 1024)
         );
-        assert_eq!(store.schema_version().expect("schema"), 15);
+        assert_eq!(store.schema_version().expect("schema"), SCHEMA_VERSION);
     }
 
     #[test]
@@ -537,7 +539,7 @@ mod tests {
         );
 
         store.migrate().expect("idempotent migration");
-        assert_eq!(store.schema_version().expect("schema"), 15);
+        assert_eq!(store.schema_version().expect("schema"), SCHEMA_VERSION);
         assert_eq!(
             store
                 .telegram_recovery_verify_interval_secs()

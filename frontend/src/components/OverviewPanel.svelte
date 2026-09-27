@@ -11,6 +11,8 @@
   export let acknowledgedCount = 0;
   export let onRefresh: () => void = () => {};
   export let onRecovery: () => void = () => {};
+  export let onStageMetricsTest: () => void = () => {};
+  export let stageTestBusy = false;
 
   const emptyTransferMetrics = {
     pending_jobs: 0,
@@ -41,6 +43,8 @@
     active_requests: 0,
     completed_requests: 0,
     failed_requests: 0,
+    test_active_requests: 0,
+    last_test: null,
     recent: []
   };
 
@@ -173,13 +177,21 @@
       {/if}
     </article>
     <article class="card surface stage-metrics-card" aria-label="Download stage metrics">
-      <div class="analytics-heading"><div><p class="card-label">Performance lab</p><h2>Download stage metrics</h2></div><span class="live-chip"><span aria-hidden="true"></span>Testing view</span></div>
+      <div class="analytics-heading"><div><p class="card-label">Performance lab</p><h2>Download stage metrics</h2></div><div class="stage-actions"><span class="live-chip"><span aria-hidden="true"></span>Testing view</span><button class="ghost" type="button" on:click={onStageMetricsTest} disabled={stageTestBusy || stageMetrics.test_active_requests > 0}>{stageTestBusy || stageMetrics.test_active_requests > 0 ? 'Testing…' : 'Run test'}</button></div></div>
       {#if loading || !overview}<div class="skeleton" style="height:180px"></div>{:else}
         <div class="stage-summary">
           <div><strong>{formatCount(stageMetrics.active_requests)}</strong><small>active reads</small></div>
           <div><strong>{formatCount(stageMetrics.completed_requests)}</strong><small>completed reads</small></div>
           <div><strong class:bad={stageMetrics.failed_requests > 0}>{formatCount(stageMetrics.failed_requests)}</strong><small>failed reads</small></div>
         </div>
+        {#if stageMetrics.last_test}
+          <div class="diagnostic-test" aria-label="Last diagnostic stage test">
+            <div class="diagnostic-heading"><div><strong>Last diagnostic test</strong><small>One verified chunk from a committed object</small></div><span class:stage-ok={stageMetrics.last_test.status === 'completed'} class:stage-bad={stageMetrics.last_test.status === 'failed'} class="stage-status">{stageMetrics.last_test.status}</span></div>
+            <div class="diagnostic-grid"><span>First chunk <strong>{formatStageDuration(stageMetrics.last_test.first_chunk_us)}</strong></span><span>Telegram <strong>{formatStageDuration(stageMetrics.last_test.telegram_us)}</strong></span><span>Decrypt <strong>{formatStageDuration(stageMetrics.last_test.decrypt_us)}</strong></span><span>Verify <strong>{formatStageDuration(stageMetrics.last_test.verify_us)}</strong></span><span>Total <strong>{formatStageDuration(stageMetrics.last_test.total_us)}</strong></span></div>
+          </div>
+        {:else}
+          <p class="fine-print">Run a dedicated one-chunk diagnostic to measure the server path without borrowing the latest client download.</p>
+        {/if}
         {#if stageMetrics.recent.length}
           <div class="stage-table-scroll">
             <table class="stage-table" aria-label="Recent download stage timings">
@@ -240,6 +252,15 @@
   .analytics-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
   .analytics-heading h2 { margin: .25rem 0 0; }
   .live-chip { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; padding: 6px 9px; border: 1px solid #b8dfce; border-radius: 999px; background: #effaf5; color: #197658; font-size: .7rem; font-weight: 800; }
+  .stage-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; justify-content: flex-end; }
+  .diagnostic-test { display: grid; gap: 12px; padding: 13px 14px; border: 1px solid #c8dff0; border-radius: 13px; background: linear-gradient(135deg,#f5fbff,#f9fcff); }
+  .diagnostic-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .diagnostic-heading strong, .diagnostic-heading small { display: block; }
+  .diagnostic-heading strong { color: #24526f; font-size: .78rem; }
+  .diagnostic-heading small { margin-top: 3px; color: var(--muted); font-size: .7rem; }
+  .diagnostic-grid { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 8px; }
+  .diagnostic-grid span { color: var(--muted); font-size: .68rem; }
+  .diagnostic-grid strong { display: block; margin-top: 4px; color: #203b57; font-size: .8rem; }
   .live-chip span { width: 7px; height: 7px; border-radius: 50%; background: #2e9a73; box-shadow: 0 0 0 4px rgba(46,154,115,.12); }
   .score-chip { flex: 0 0 auto; padding: 6px 9px; border: 1px solid #efc88b; border-radius: 999px; background: #fff8e9; color: #9a630f; font-size: .7rem; font-weight: 800; }
   .score-chip.clear, .score-chip.healthy { border-color: #b8dfce; background: #effaf5; color: #197658; }

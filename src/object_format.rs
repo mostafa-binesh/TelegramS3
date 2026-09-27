@@ -441,6 +441,8 @@ pub struct DownloadStageMetrics {
     pub active_requests: u64,
     pub completed_requests: u64,
     pub failed_requests: u64,
+    pub test_active_requests: u64,
+    pub last_test: Option<DownloadStageSample>,
     pub recent: Vec<DownloadStageSample>,
 }
 
@@ -469,6 +471,8 @@ struct DownloadStageMetricsStore {
     active_requests: AtomicU64,
     completed_requests: AtomicU64,
     failed_requests: AtomicU64,
+    test_active_requests: AtomicU64,
+    last_test: Mutex<Option<DownloadStageSample>>,
     recent: Mutex<VecDeque<DownloadStageSample>>,
 }
 
@@ -496,6 +500,9 @@ struct DownloadStageGuard {
 impl DownloadStageMetricsStore {
     fn start(self: &Arc<Self>, surface: &'static str) -> DownloadStageGuard {
         self.active_requests.fetch_add(1, Ordering::Relaxed);
+        if surface == "diagnostic-test" {
+            self.test_active_requests.fetch_add(1, Ordering::Relaxed);
+        }
         DownloadStageGuard {
             store: Arc::clone(self),
             sample: Some(DownloadStageAccumulator {
@@ -523,6 +530,8 @@ impl DownloadStageMetricsStore {
             active_requests: self.active_requests.load(Ordering::Relaxed),
             completed_requests: self.completed_requests.load(Ordering::Relaxed),
             failed_requests: self.failed_requests.load(Ordering::Relaxed),
+            test_active_requests: self.test_active_requests.load(Ordering::Relaxed),
+            last_test: self.last_test.lock().ok().and_then(|sample| sample.clone()),
             recent: self
                 .recent
                 .lock()
@@ -560,6 +569,12 @@ impl DownloadStageMetricsStore {
             total_us: sample.started.elapsed().as_micros() as u64,
             error,
         };
+        if sample.surface == "diagnostic-test" {
+            self.test_active_requests.fetch_sub(1, Ordering::Relaxed);
+            if let Ok(mut last_test) = self.last_test.lock() {
+                *last_test = Some(output.clone());
+            }
+        }
         if let Ok(mut recent) = self.recent.lock() {
             recent.push_back(output);
             while recent.len() > 20 {
@@ -839,6 +854,53 @@ impl ObjectFormatService {
 
     pub fn download_stage_metrics(&self) -> DownloadStageMetrics {
         self.download_stage_metrics.snapshot()
+    }
+
+    /// Run a bounded, one-chunk diagnostic read against the first committed
+    /// object. The result is recorded separately from ordinary downloads so
+    /// the Overview test button never re-labels the latest client request.
+    pub async fn run_download_stage_test(
+        self: Arc<Self>,
+    ) -> Result<DownloadStageSample, ObjectFormatError> {
+        let manifest = self
+            .list_manifests()?
+            .into_iter()
+            .filter(|manifest| {
+                manifest.commit_state == crate::manifest::CommitState::Committed
+                    && !manifest.chunks.is_empty()
+                    && !manifest.is_expired(OffsetDateTime::now_utc())
+            })
+            .min_by(|left, right| {
+                left.bucket
+                    .cmp(&right.bucket)
+                    .then_with(|| left.key.cmp(&right.key))
+            })
+            .ok_or_else(|| {
+                ObjectFormatError::InvalidRead(
+                    "no committed non-empty object is available for a stage test".into(),
+                )
+            })?;
+        let first_chunk = manifest
+            .chunks
+            .first()
+            .expect("filtered non-empty manifest");
+        let spans = Self::plan_read(
+            &manifest,
+            first_chunk.offset..first_chunk.offset + first_chunk.size,
+        )?
+        .chunks;
+        let mut stream = Box::pin(Self::read_spans_to_stream(
+            Arc::clone(&self),
+            &manifest,
+            spans,
+            "diagnostic-test",
+        ));
+        while let Some(result) = futures::StreamExt::next(&mut stream).await {
+            result.map_err(|error| ObjectFormatError::InvalidRead(error.to_string()))?;
+        }
+        self.download_stage_metrics().last_test.ok_or_else(|| {
+            ObjectFormatError::InvalidRead("stage test did not produce a sample".into())
+        })
     }
 
     fn traffic_snapshot(&self, counters: &TrafficCounterValues) -> TrafficSnapshot {

@@ -39,6 +39,7 @@ pub struct ReplicationJob {
     pub source_account_id: String,
     pub target_account_id: String,
     pub bucket: String,
+    pub object_keys: Vec<String>,
     pub mode: String,
     pub access_mode: String,
     pub state: String,
@@ -185,6 +186,7 @@ impl MetadataStore {
         source_account_id: &str,
         target_account_id: &str,
         bucket: &str,
+        object_keys: &[String],
         mode: &str,
         access_mode: &str,
     ) -> Result<ReplicationJob, MetadataError> {
@@ -201,11 +203,12 @@ impl MetadataStore {
         let id = Uuid::new_v4().to_string();
         let now = crate::durable::now();
         let next_run = (mode == "automatic").then_some(now);
+        let object_keys_json = serde_json::to_string(object_keys)?;
         self.with_connection(|connection| {
             connection.execute(
-                r#"INSERT INTO replication_jobs(id,source_account_id,target_account_id,bucket,mode,access_mode,state,next_run,created_at,updated_at)
-                   VALUES(?1,?2,?3,?4,?5,?6,'queued',?7,?8,?8)"#,
-                params![id,source_account_id,target_account_id,bucket,mode,access_mode,next_run,now],
+                r#"INSERT INTO replication_jobs(id,source_account_id,target_account_id,bucket,object_keys_json,mode,access_mode,state,next_run,created_at,updated_at)
+                   VALUES(?1,?2,?3,?4,?5,?6,?7,'queued',?8,?9,?9)"#,
+                params![id,source_account_id,target_account_id,bucket,object_keys_json,mode,access_mode,next_run,now],
             )?;
             load_replication_job(connection, &id)
         })
@@ -213,7 +216,7 @@ impl MetadataStore {
 
     pub fn list_replication_jobs(&self) -> Result<Vec<ReplicationJob>, MetadataError> {
         self.with_connection(|connection| {
-            let mut stmt = connection.prepare("SELECT id,source_account_id,target_account_id,bucket,mode,access_mode,state,objects_total,objects_done,chunks_total,chunks_done,bytes_done,next_run,last_run,error,created_at,updated_at FROM replication_jobs ORDER BY updated_at DESC")?;
+            let mut stmt = connection.prepare("SELECT id,source_account_id,target_account_id,bucket,object_keys_json,mode,access_mode,state,objects_total,objects_done,chunks_total,chunks_done,bytes_done,next_run,last_run,error,created_at,updated_at FROM replication_jobs ORDER BY updated_at DESC")?;
             let rows = stmt.query_map([], row_replication_job)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(MetadataError::from)
         })
@@ -325,7 +328,7 @@ impl MetadataStore {
             let id: Option<String> = tx.query_row("SELECT id FROM replication_jobs WHERE state='queued' OR (state='scheduled' AND next_run IS NOT NULL AND next_run<=?1) ORDER BY updated_at ASC LIMIT 1", [now], |row| row.get(0)).optional()?;
             let Some(id) = id else { tx.commit()?; return Ok(None); };
             tx.execute("UPDATE replication_jobs SET state='processing',updated_at=?2 WHERE id=?1", params![id,now])?;
-            let job = tx.query_row("SELECT id,source_account_id,target_account_id,bucket,mode,access_mode,state,objects_total,objects_done,chunks_total,chunks_done,bytes_done,next_run,last_run,error,created_at,updated_at FROM replication_jobs WHERE id=?1", [&id], row_replication_job)?;
+            let job = tx.query_row("SELECT id,source_account_id,target_account_id,bucket,object_keys_json,mode,access_mode,state,objects_total,objects_done,chunks_total,chunks_done,bytes_done,next_run,last_run,error,created_at,updated_at FROM replication_jobs WHERE id=?1", [&id], row_replication_job)?;
             tx.commit()?;
             Ok(Some(job))
         })
@@ -383,7 +386,7 @@ fn load_replication_job(
     connection: &rusqlite::Connection,
     id: &str,
 ) -> Result<ReplicationJob, MetadataError> {
-    Ok(connection.query_row("SELECT id,source_account_id,target_account_id,bucket,mode,access_mode,state,objects_total,objects_done,chunks_total,chunks_done,bytes_done,next_run,last_run,error,created_at,updated_at FROM replication_jobs WHERE id=?1", [id], row_replication_job)?)
+    Ok(connection.query_row("SELECT id,source_account_id,target_account_id,bucket,object_keys_json,mode,access_mode,state,objects_total,objects_done,chunks_total,chunks_done,bytes_done,next_run,last_run,error,created_at,updated_at FROM replication_jobs WHERE id=?1", [id], row_replication_job)?)
 }
 
 fn row_replication_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReplicationJob> {
@@ -392,19 +395,20 @@ fn row_replication_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReplicationJ
         source_account_id: row.get(1)?,
         target_account_id: row.get(2)?,
         bucket: row.get(3)?,
-        mode: row.get(4)?,
-        access_mode: row.get(5)?,
-        state: row.get(6)?,
-        objects_total: row.get(7)?,
-        objects_done: row.get(8)?,
-        chunks_total: row.get(9)?,
-        chunks_done: row.get(10)?,
-        bytes_done: row.get(11)?,
-        next_run: row.get(12)?,
-        last_run: row.get(13)?,
-        error: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        object_keys: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+        mode: row.get(5)?,
+        access_mode: row.get(6)?,
+        state: row.get(7)?,
+        objects_total: row.get(8)?,
+        objects_done: row.get(9)?,
+        chunks_total: row.get(10)?,
+        chunks_done: row.get(11)?,
+        bytes_done: row.get(12)?,
+        next_run: row.get(13)?,
+        last_run: row.get(14)?,
+        error: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
     })
 }
 

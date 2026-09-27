@@ -56,7 +56,15 @@ are rescheduled. `replica` mode uploads encrypted chunk bytes to the target
 connection; `access` mode records a shared-chat location without uploading a
 second copy. A chunk may have several account locations and the shared reader
 rotates across them; an access-only target must be able to resolve the source
-peer.
+peer. The Accounts workspace is the single home for the primary connection and
+additional connections, with separate Connections, Replication, and
+Maintenance tabs. Bucket/object account badges open per-account copy/access
+details and can queue either a whole-bucket or selected-key replication job.
+Selected bulk actions remain available from the fixed bottom action bar.
+
+An expired admin session is treated as an authentication state transition: the
+SPA refreshes `/session` after a `401` and returns the operator to login. It
+does not leave the operator on a stale request-error view.
 
 Bulk re-chunking gives each selected object a durable job and temporary lock.
 Reads fail closed with a retry-later message until replacement chunks and the

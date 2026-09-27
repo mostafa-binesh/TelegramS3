@@ -588,7 +588,14 @@ impl ObjectFormatService {
             self.account_manager(&job.source_account_id).await?
         };
         let source_transport = source_manager.current().await?;
-        let manifests = self.list_bucket_manifests(&job.bucket, None)?;
+        let mut manifests = self.list_bucket_manifests(&job.bucket, None)?;
+        if !job.object_keys.is_empty() {
+            let selected = job
+                .object_keys
+                .iter()
+                .collect::<std::collections::HashSet<_>>();
+            manifests.retain(|manifest| selected.contains(&manifest.key));
+        }
         let objects_total = manifests.len() as u64;
         let chunks_total = manifests
             .iter()

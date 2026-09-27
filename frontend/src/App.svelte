@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { currentRoute, navigate, route, routePath, type Route, type TelegramTab, type ViewName } from './lib/router';
+  import { currentRoute, navigate, route, routePath, type AccountsTab, type Route, type TelegramTab, type ViewName } from './lib/router';
   import { notifyError, notifySuccess } from './lib/toasts';
   import Sidebar from './components/Sidebar.svelte';
   import HealthBadge from './components/HealthBadge.svelte';
@@ -36,6 +36,7 @@
     setSessionUpdateHandler,
     queueRechunk,
     listReplicas,
+    runStageMetricsTest,
   } from './lib/api';
   import {normalizeError} from './lib/format';
   import type {
@@ -121,7 +122,8 @@
   $: currentPrefix = $route.prefix;
   $: recoveryTab = $route.recoveryTab;
   $: telegramTab = $route.telegramTab;
-  $: routeLoadKey = `${$route.view}|${$route.bucket}|${$route.prefix}|${$route.recoveryTab}|${$route.telegramTab}`;
+  $: accountsTab = $route.accountsTab;
+  $: routeLoadKey = `${$route.view}|${$route.bucket}|${$route.prefix}|${$route.recoveryTab}|${$route.telegramTab}|${$route.accountsTab}`;
   let listing: ObjectsState | null = null;
   let objectsRequestSerial = 0;
   // Keep the last successful multipart activity snapshot per folder. A short
@@ -154,6 +156,10 @@
   let replicaTitle = '';
   let replicaLoading = false;
   let replicaError = '';
+  let replicaScopeKeys: string[] = [];
+  let replicaScopeLabel = '';
+  let replicaBucket = '';
+  let stageTestBusy = false;
   let showRechunkModal = false;
   let newChunkSizeMiB = '8';
   let moveBucket = '';
@@ -224,7 +230,12 @@
   onMount(() => {
     const clearSessionUpdateHandler = setSessionUpdateHandler((next) => {
       session = next;
-      if (!next.authenticated) overview = null;
+      if (!next.authenticated) {
+        overview = null;
+        overviewError = '';
+        routeLoadError = '';
+        navigate({ view: 'overview' }, { replace: true });
+      }
     });
     const canonical = routePath(currentRoute());
     if (window.location.pathname !== canonical) navigate(currentRoute(), { replace: true });
@@ -260,7 +271,7 @@
       }
     } catch (cause) {
       overviewError = normalizeError(cause);
-      notifyError(overviewError);
+      if (session?.authenticated !== false) notifyError(overviewError);
     } finally {
       loading = false;
     }
@@ -276,6 +287,7 @@
       const [loadedOverview] = await Promise.all([getOverview(), loadOverviewPanel()]);
       overview = loadedOverview;
       overviewError = '';
+      await refreshTelegramSettings();
       notifySuccess(`Signed in as ${session?.user?.username}.`);
     } catch (cause) {
       loginError = normalizeError(cause);
@@ -292,7 +304,7 @@
       overviewError = '';
     } catch (cause) {
       overviewError = normalizeError(cause);
-      notifyError(overviewError);
+      if (session?.authenticated !== false) notifyError(overviewError);
     } finally {
       overviewLoading = false;
     }
@@ -493,8 +505,22 @@
   function switchView(next: ViewName) {
     if (next === 'buckets') navigate({ view: 'buckets', bucket: '', prefix: '' });
     else if (next === 'recovery') navigate({ view: 'recovery', recoveryTab: 'issues' });
-    else if (next === 'telegram') navigate({ view: 'telegram', telegramTab: 'connection' });
+    else if (next === 'telegram') navigate({ view: 'telegram', telegramTab: 'storage' });
     else navigate({ view: next });
+  }
+
+  async function runStageMetricsDiagnostic() {
+    if (stageTestBusy) return;
+    stageTestBusy = true;
+    try {
+      await runStageMetricsTest(session?.csrf_token);
+      await refreshOverview({ silent: true });
+      notifySuccess('Diagnostic download completed. Its timings are shown separately from regular downloads.');
+    } catch (cause) {
+      notifyError(normalizeError(cause));
+    } finally {
+      stageTestBusy = false;
+    }
   }
 
   async function openRechunkModal() {
@@ -517,11 +543,14 @@
     finally { busy = false; }
   }
 
-  async function openReplicaDetails(bucket: string, key?: string) {
+  async function openReplicaDetails(bucket: string, key?: string, keys?: string[]) {
     showReplicaModal = true;
     replicaLoading = true;
     replicaError = '';
     replicaTitle = key ? `${bucket}/${key}` : `${bucket} account access`;
+    replicaBucket = bucket;
+    replicaScopeKeys = keys ?? (key ? [key] : []);
+    replicaScopeLabel = key ? 'This object' : keys?.length ? `${keys.length} selected object(s)` : 'This bucket';
     try {
       const response = await listReplicas(session?.csrf_token, bucket);
       replicaItems = key ? response.replicas.filter((item) => item.key === key) : response.replicas;
@@ -848,7 +877,10 @@
     bucketSearch = '';
     globalSearchResults = [];
     globalSearchTotal = 0;
-    objectSearch = '';
+    // Keep the recursive search term while opening the containing prefix. The
+    // server searches the whole prefix, so a result on page 7 is visible even
+    // when the folder's first page does not contain it.
+    objectSearch = result.name;
     objectPage = 1;
     selectedKeys = [];
     navigate({ view: 'buckets', bucket: result.bucket, prefix: result.location ?? '' });
@@ -1111,13 +1143,13 @@
           <button class="btn-link" type="button" on:click={() => gotoCrumb(0)}>{selectedBucket}</button>
           {#each crumbs() as crumb, i (crumb + i)}<span>/</span><button class="btn-link" type="button" on:click={() => gotoCrumb(i + 1)}>{crumb}</button>{/each}
         </div>
-      {:else}<h1>{view==='users'?'Operators':view==='telegram'?'Telegram settings':view.charAt(0).toUpperCase()+view.slice(1)}</h1>{/if}
+      {:else}<h1>{view==='users'?'Operators':view==='telegram'?'Storage settings':view.charAt(0).toUpperCase()+view.slice(1)}</h1>{/if}
     </div><HealthBadge state={overviewLoading || !overview ? 'checking' : overview.telegram?.connection_state ?? 'checking'} detail={overviewLoading || !overview ? 'Checking Telegram connection…' : overview.telegram?.detail ?? 'Waiting for a connection check'} checkedAt={overviewLoading ? undefined : overview?.checked_at}/></header>
   {/if}
   {#if loading}
     <section class="card surface"><p>Loading…</p></section>
   {:else if setupRequired && !session?.authenticated}
-    {#if SetupWizardComponent}<svelte:component this={SetupWizardComponent} onCreated={(created: SessionState)=>{session=created;setupRequired=false;navigate({view:'telegram'});void refreshOverview();void refreshTelegramSettings();}}/>{:else}<section class="card surface"><div class="skeleton" style="height:240px"></div></section>{/if}
+    {#if SetupWizardComponent}<svelte:component this={SetupWizardComponent} onCreated={(created: SessionState)=>{session=created;setupRequired=false;navigate({view:'accounts', accountsTab:'connections'});void refreshOverview();void refreshTelegramSettings();}}/>{:else}<section class="card surface"><div class="skeleton" style="height:240px"></div></section>{/if}
   {:else if !session?.authenticated}
     <section class="login-grid">
       <div class="card surface intro-card">
@@ -1156,13 +1188,13 @@
         {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else if routeLoadError}<LoadError title="Could not load interrupted transfers" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {/if}
     {:else if view === 'telegram'}
-      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab={telegramTab} onTabChange={(tab: TelegramTab) => navigate({ view: 'telegram', telegramTab: tab })} settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} bind:downloadPrefetchChunks {downloadPrefetchChunksMin} {downloadPrefetchChunksMax} bind:recoveryVerifyEnabled bind:recoveryVerifyIntervalSecs {recoveryVerifyIntervalMin} {recoveryVerifyIntervalMax} bind:recoveryVerifyChunks {recoveryVerifyChunksMin} {recoveryVerifyChunksMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose} onRemoveConnection={removeCurrentConnection}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Telegram settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
+      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab="storage" hideTabs {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} bind:downloadPrefetchChunks {downloadPrefetchChunksMin} {downloadPrefetchChunksMax} bind:recoveryVerifyEnabled bind:recoveryVerifyIntervalSecs {recoveryVerifyIntervalMin} {recoveryVerifyIntervalMax} bind:recoveryVerifyChunks {recoveryVerifyChunksMin} {recoveryVerifyChunksMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Storage settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'overview'}
-      {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')} onStageMetricsTest={runStageMetricsDiagnostic} stageTestBusy={stageTestBusy}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} {bucketSearch} {bucketPage} {bucketTotal} globalSearchResults={globalSearchResults} globalSearchPage={globalSearchPage} globalSearchTotal={globalSearchTotal} globalSearchLoading={globalSearchLoading} globalSearchError={globalSearchError} {objectSearch} {objectPage} {objectTotal} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onGlobalSearchPage={goToGlobalSearchPage} onOpenSearchResult={openGlobalSearchResult} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBucketPage()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onRechunkSelected={openRechunkModal} onOpenReplicas={openReplicaDetails} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedKeys} {bucketSearch} {bucketPage} {bucketTotal} globalSearchResults={globalSearchResults} globalSearchPage={globalSearchPage} globalSearchTotal={globalSearchTotal} globalSearchLoading={globalSearchLoading} globalSearchError={globalSearchError} {objectSearch} {objectPage} {objectTotal} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onGlobalSearchPage={goToGlobalSearchPage} onOpenSearchResult={openGlobalSearchResult} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBucketPage()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onRechunkSelected={openRechunkModal} onOpenReplicas={openReplicaDetails} onOpenBulkReplication={() => openReplicaDetails(selectedBucket, undefined, [...selectedKeys])} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'accounts'}
-      {#if AccountsPanelComponent}<svelte:component this={AccountsPanelComponent} csrf={session?.csrf_token} buckets={buckets}/>{:else if routeLoadError}<LoadError title="Could not load accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
+      {#if AccountsPanelComponent}<svelte:component this={AccountsPanelComponent} csrf={session?.csrf_token} buckets={buckets} {accountsTab} onTabChange={(tab: AccountsTab) => navigate({ view: 'accounts', accountsTab: tab })} overview={overview} {session} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose} onRemoveConnection={removeCurrentConnection}/>{:else if routeLoadError}<LoadError title="Could not load accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'users'}
       {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} error={usersError} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={(id: string) => requestDelete({ type: 'operator', name: users.find((user) => user.id === id)?.username ?? id, key: id })} onAdd={openOperatorModal}/>{:else if routeLoadError}<LoadError title="Could not load operator accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
     {/if}
@@ -1171,7 +1203,7 @@
   {#if AdminModalsComponent}<svelte:component this={AdminModalsComponent} bind:showBucket={showBucketModal} bind:showFolder={showFolderModal} bind:showUpload={showUploadModal} bind:showOperator={showOperatorModal} bind:showMove={showMoveModal} bind:showShare={showShareModal} bind:showDelete={showDeleteModal} bind:showRechunk={showRechunkModal} bind:newBucket bind:newFolder bind:newUsername bind:newDisplay bind:newPassword bind:newRole bind:moveBucket bind:movePrefix bind:shareExpiry bind:shareDescription bind:shareUrl bind:newChunkSizeMiB selectedBucket={selectedBucket} currentPrefix={currentPrefix} shareTarget={shareTarget} shareError={shareError} shareBusy={shareBusy} deleteTarget={deleteTarget} {busy} uploadComponent={UploadBoxComponent} csrf={session?.csrf_token} onCreateBucket={makeBucket} onCreateFolder={makeFolder} onCreateOperator={makeUser} onCreateShare={createShareFromModal} onConfirmDelete={confirmDelete} onMove={moveSelected} onRechunk={queueSelectedRechunk} onUploaded={refreshObjects}/>{/if}
   <SharedLinksModal open={showSharedLinksModal} target={sharedLinksTarget} links={sharedLinks} busy={sharedLinksBusy} error={sharedLinksError} onClose={closeSharedLinksModal} onUpdateExpiry={changeSharedLinkExpiry} onRevoke={revokeSharedLink}/>
 
-  <ReplicaDetailsModal bind:open={showReplicaModal} title={replicaTitle} items={replicaItems} loading={replicaLoading} error={replicaError}/>
+  <ReplicaDetailsModal bind:open={showReplicaModal} title={replicaTitle} items={replicaItems} loading={replicaLoading} error={replicaError} csrf={session?.csrf_token} bucket={replicaBucket} scopeKeys={replicaScopeKeys} scopeLabel={replicaScopeLabel}/>
   <Toasts />
 </main>
 

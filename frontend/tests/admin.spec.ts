@@ -62,6 +62,8 @@ const overview = {
     active_requests: 1,
     completed_requests: 12,
     failed_requests: 1,
+    test_active_requests: 0,
+    last_test: null,
     recent: [{
       request_id: 42,
       surface: 'public',
@@ -102,6 +104,7 @@ async function mockAdminApi(
     delayFirstObjectListMs?: number;
     delayNestedObjectListMs?: number;
     staleCsrfOnce?: boolean;
+    expireOnNextBuckets?: boolean;
     browserBuckets?: Array<{ name: string; created_at: string }>;
     browserObjects?: Array<Record<string, unknown>>;
   } = {}
@@ -109,6 +112,7 @@ async function mockAdminApi(
   let loggedIn = false;
   let csrfToken = authenticated.csrf_token;
   let staleCsrfRejected = false;
+  let sessionExpired = false;
   let recoveryJobVisible = true;
   let connectionRemoved = false;
   let chunkSize = 1_048_576;
@@ -118,11 +122,12 @@ async function mockAdminApi(
   const users = [user];
   let delayedFirstObjectList = false;
   let delayedNestedObjectList = false;
+  let stageTestSample: Record<string, unknown> | null = null;
   await page.route('**/_admin/api/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace('/_admin/api', '');
     if (path === '/session' && request.method() === 'GET') {
-      return route.fulfill({ json: loggedIn ? { ...authenticated, csrf_token: csrfToken } : { authenticated: false } });
+      return route.fulfill({ json: loggedIn && !sessionExpired ? { ...authenticated, csrf_token: csrfToken } : { authenticated: false } });
     }
     if (path === '/session/login' && request.method() === 'POST') {
       loggedIn = true;
@@ -136,7 +141,20 @@ async function mockAdminApi(
     if (path === '/setup' && request.method() === 'GET') {
       return route.fulfill({ json: { setup_required: false } });
     }
-    if (!loggedIn) return route.fulfill({ status: 401, json: { error: 'unauthorized' } });
+    if (options.expireOnNextBuckets && path === '/buckets' && request.method() === 'GET' && !sessionExpired) {
+      sessionExpired = true;
+      return route.fulfill({ status: 401, json: { error: 'session expired' } });
+    }
+    if (!loggedIn || sessionExpired) return route.fulfill({ status: 401, json: { error: 'unauthorized' } });
+    if (path === '/stage-metrics/test' && request.method() === 'POST') {
+      stageTestSample = {
+        request_id: 99, surface: 'diagnostic-test', started_at: '2026-01-01T00:00:00Z', status: 'completed',
+        chunks: 1, client_bytes: 1_048_576, telegram_bytes: 1_050_000, telegram_retries: 0,
+        first_chunk_us: 2_000_000, telegram_us: 1_800_000, retry_wait_us: 0, decrypt_us: 1_100,
+        verify_us: 2_100, total_us: 3_900_000, error: null
+      };
+      return route.fulfill({ json: { ok: true, sample: stageTestSample } });
+    }
     if (path === '/overview') {
       const recoveryIssues = options.recoveryIssues ?? [];
       const clearedOverview = {
@@ -145,7 +163,7 @@ async function mockAdminApi(
         recovery: { ...overview.recovery, issue_count: recoveryIssues.length, unacknowledged_count: recoveryIssues.length, issues: recoveryIssues },
         telegram: { ...overview.telegram, connection_state: 'needs_reauth', detail: 'Telegram storage is not connected' }
       };
-      return route.fulfill({ json: connectionRemoved ? clearedOverview : { ...overview, storage: { ...overview.storage, chunk_size: chunkSize }, recovery: { ...overview.recovery, issue_count: recoveryIssues.length, unacknowledged_count: recoveryIssues.length, issues: recoveryIssues } } });
+      return route.fulfill({ json: connectionRemoved ? clearedOverview : { ...overview, stage_metrics: { ...overview.stage_metrics, last_test: stageTestSample }, storage: { ...overview.storage, chunk_size: chunkSize }, recovery: { ...overview.recovery, issue_count: recoveryIssues.length, unacknowledged_count: recoveryIssues.length, issues: recoveryIssues } } });
     }
     if (path === '/telegram/disconnect' && request.method() === 'POST') {
       connectionRemoved = true;
@@ -210,6 +228,12 @@ async function mockAdminApi(
     if (path === '/telegram/wizard/cancel' && request.method() === 'POST') {
       return route.fulfill({ json: { ok: true } });
     }
+    if (path === '/accounts' && request.method() === 'GET') {
+      return route.fulfill({ json: { accounts: [{ id: 'primary', label: 'Primary account', phone: '+15551234567', state: 'configured', storage_chat_id: '-1001234567890', replica_objects: 0, access_objects: 0, created_at: 1, updated_at: 1 }] } });
+    }
+    if (path === '/replication' && request.method() === 'GET') return route.fulfill({ json: { jobs: [] } });
+    if (path === '/rechunk' && request.method() === 'GET') return route.fulfill({ json: { jobs: [] } });
+    if (path === '/replicas' && request.method() === 'GET') return route.fulfill({ json: { replicas: [] } });
     if (path === '/buckets' && request.method() === 'GET') {
       const params = new URL(request.url()).searchParams;
       const search = (params.get('search') ?? '').toLowerCase();
@@ -379,6 +403,10 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
   await expect(page.getByText('Telegram → server')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Download stage metrics' })).toBeVisible();
   await expect(page.getByRole('table', { name: 'Recent download stage timings' })).toBeVisible();
+  const stageTestRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/_admin/api/stage-metrics/test' && request.method() === 'POST');
+  await page.getByRole('button', { name: 'Run test' }).click();
+  await stageTestRequest;
+  await expect(page.getByLabel('Last diagnostic stage test')).toContainText('diagnostic test');
   await expect(page.getByText('public', { exact: true })).toBeVisible();
   await expect(page.getByText('1.3s', { exact: true })).toBeVisible();
   await page.getByRole('tab', { name: 'Total' }).click();
@@ -390,8 +418,8 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
   await expect(page.locator('.account-avatar')).toHaveText('A');
   await expect(page.locator('.account-kicker')).toHaveText('Signed in as');
   await expect(page.getByRole('button', { name: 'Sign out' }).locator('svg')).toBeVisible();
-  await page.getByRole('button', { name: 'Telegram settings' }).click();
-  await expect(page.getByRole('heading', { name: 'Your storage connection, beautifully in sync.' })).toBeVisible();
+  await page.getByRole('button', { name: 'Storage settings' }).click();
+  await expect(page.getByRole('heading', { name: 'Give every upload the right-sized runway.' })).toBeVisible();
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page.getByRole('heading', { name: 'Sign in to manage storage' })).toBeVisible();
 });
@@ -410,6 +438,18 @@ test('overview refreshes traffic telemetry every five seconds', async ({ page })
 
   const requestsAfterInitialLoad = overviewRequests;
   await expect.poll(() => overviewRequests, { timeout: 6_500 }).toBeGreaterThan(requestsAfterInitialLoad);
+});
+
+test('expired authentication returns the operator to login instead of an API error page', async ({ page }) => {
+  await mockAdminApi(page, { expireOnNextBuckets: true });
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Buckets' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Sign in to manage storage' })).toBeVisible();
+  await expect(page.getByText('Not authenticated')).toHaveCount(0);
 });
 
 test('responsive navigation remains usable on a narrow viewport', async ({ page }) => {
@@ -453,12 +493,13 @@ test('the console stays within the viewport across phone, tablet, and desktop wi
     await expect(page.getByRole('heading', { name: 'Transfer activity' })).toBeVisible();
     await expectNoHorizontalOverflow();
 
-    await page.getByRole('button', { name: 'Telegram settings' }).click();
-    await expect(page.getByRole('heading', { name: 'Your storage connection, beautifully in sync.' })).toBeVisible();
+    await page.getByRole('button', { name: 'Storage settings' }).click();
+    await expect(page.getByRole('heading', { name: 'Give every upload the right-sized runway.' })).toBeVisible();
     await expectNoHorizontalOverflow();
   }
 
   await page.setViewportSize({ width: 320, height: 900 });
+  await page.getByRole('button', { name: 'Accounts' }).click();
   await page.getByRole('button', { name: 'Edit account setup' }).click();
   await expect(page.getByRole('heading', { name: 'Start with your Telegram app' })).toBeVisible();
   await expectNoHorizontalOverflow();
@@ -632,7 +673,7 @@ test('telegram account wizard validates, preserves, saves, and authorizes the ac
   await page.getByLabel('Username').fill('admin');
   await page.getByLabel('Password').fill('correct-password');
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByRole('button', { name: 'Telegram settings' }).click();
+  await page.getByRole('button', { name: 'Accounts' }).click();
   await expect(page.getByRole('heading', { name: 'Your storage connection, beautifully in sync.' })).toBeVisible();
   await page.getByRole('button', { name: 'Edit account setup' }).click();
 
@@ -645,14 +686,14 @@ test('telegram account wizard validates, preserves, saves, and authorizes the ac
   await page.getByRole('button', { name: 'Continue' }).click();
 
   await expect(page.getByRole('heading', { name: 'Choose where objects live' })).toBeVisible();
-  await page.getByLabel('Storage chat ID').fill('-1009876543210');
+  await page.locator('.wizard-page').getByLabel('Storage chat ID').fill('-1009876543210');
   await page.getByRole('button', { name: 'Continue' }).click();
 
   await expect(page.getByRole('heading', { name: 'Make the connection reliable' })).toBeVisible();
-  await page.getByLabel('Connection mode').selectOption('socks5');
-  await page.getByLabel('Proxy URL').fill('socks5://127.0.0.1:12334');
+  await page.locator('.wizard-page').getByLabel('Connection mode').selectOption('socks5');
+  await page.locator('.wizard-page').getByLabel('Proxy URL').fill('socks5://127.0.0.1:12334');
   await page.getByRole('button', { name: 'Back' }).click();
-  await expect(page.getByLabel('Storage chat ID')).toHaveValue('-1009876543210');
+  await expect(page.locator('.wizard-page').getByLabel('Storage chat ID')).toHaveValue('-1009876543210');
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.getByRole('button', { name: 'Review & sign in' }).click();
 
@@ -690,7 +731,7 @@ test('telegram account wizard keeps the sign-in step open when settings cannot b
   await page.getByLabel('Username').fill('admin');
   await page.getByLabel('Password').fill('correct-password');
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByRole('button', { name: 'Telegram settings' }).click();
+  await page.getByRole('button', { name: 'Accounts' }).click();
   await page.getByRole('button', { name: 'Edit account setup' }).click();
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.getByRole('button', { name: 'Continue' }).click();
@@ -754,7 +795,7 @@ test('connection removal clears recovery attention items from the panel', async 
   await page.getByLabel('Username').fill('admin');
   await page.getByLabel('Password').fill('correct-password');
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByRole('button', { name: 'Telegram settings' }).click();
+  await page.getByRole('button', { name: 'Accounts' }).click();
   await page.getByRole('button', { name: 'Remove connection' }).first().click();
   const checkboxRow = page.locator('.checkbox-row');
   const checkboxBox = await checkboxRow.locator('input').boundingBox();

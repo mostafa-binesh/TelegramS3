@@ -44,6 +44,10 @@ function isInvalidCsrfError(cause: unknown): cause is ApiError {
     && cause.message.trim().toLowerCase() === 'invalid csrf token';
 }
 
+function isUnauthenticatedError(cause: unknown): cause is ApiError {
+  return cause instanceof ApiError && cause.status === 401;
+}
+
 async function synchronizeSession(): Promise<SessionState | null> {
   if (!csrfRecoveryPromise) {
     csrfRecoveryPromise = (async () => {
@@ -115,6 +119,11 @@ async function requestJson<T>(
   try {
     return await send(csrf);
   } catch (cause) {
+    if (isUnauthenticatedError(cause)) {
+      // Refresh the in-memory session immediately. App.svelte turns this into
+      // the login screen, so expired cookies never leave a stale error page.
+      await synchronizeSession();
+    }
     if (isInvalidCsrfError(cause)) {
       const session = await synchronizeSession();
       if (session?.authenticated && session.csrf_token) {
@@ -235,9 +244,16 @@ export function listReplicationJobs(csrf?: string | null) {
 
 export function queueReplication(csrf: string | null | undefined, body: {
   source_account_id: string; target_account_id: string; bucket: string;
-  mode: 'one_time' | 'automatic'; access_mode: 'replica' | 'access';
+  mode: 'one_time' | 'automatic'; access_mode: 'replica' | 'access'; keys?: string[];
 }) {
   return requestJson<{job: ReplicationJob}>('/replication', csrf, {method: 'POST', body});
+}
+
+export function runStageMetricsTest(csrf?: string | null) {
+  return requestJson<{ ok: boolean; sample?: import('./types').DownloadStageSample }>('/stage-metrics/test', csrf, {
+    method: 'POST',
+    body: {}
+  });
 }
 
 export function listReplicas(csrf: string | null | undefined, bucket?: string) {
@@ -393,6 +409,9 @@ async function withCsrfRecovery<T>(
   try {
     return await action(csrf);
   } catch (cause) {
+    if (isUnauthenticatedError(cause)) {
+      await synchronizeSession();
+    }
     if (isInvalidCsrfError(cause)) {
       const session = await synchronizeSession();
       if (session?.authenticated && session.csrf_token) {
