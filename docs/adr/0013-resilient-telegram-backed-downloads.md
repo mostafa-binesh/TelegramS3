@@ -27,6 +27,10 @@ signal, even though the handler already supported single byte ranges.
 - Advertise `Accept-Ranges: bytes` on public-share and authenticated admin
   responses and preserve the existing `Range`/`Content-Range` behavior so
   clients can resume after the recovery window is exhausted.
+- For public responses, use inline content disposition for stored audio/video
+  media and attachment disposition for other content. Keep the stored media
+  type and range headers unchanged so HTTP media clients can probe and play
+  without changing the object format.
 - Log exhausted object-stream chunk failures with object, chunk, and Telegram
   message identifiers without changing object visibility or recovery state.
 

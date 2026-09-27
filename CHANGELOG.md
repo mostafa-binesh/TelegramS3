@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.7.6-rc.1 - 2026-09-27
+
+### Public media streaming
+
+- Public audio and video links now use `Content-Disposition: inline` while
+  retaining the original filename. This lets HTTP media clients such as
+  PotPlayer treat a public MP4/MP3 URL as playable media instead of treating
+  it only as an attachment download.
+- Public links continue to send the correct stored media type,
+  `Content-Length`, `Accept-Ranges`, and `Content-Range` headers, so players
+  can probe media metadata and seek/resume through byte ranges. Non-media
+  public objects remain attachments.
+
 ### Admin session resilience
 
 - The admin SPA now detects the specific `invalid csrf token` response caused
@@ -15,6 +28,13 @@
   and does not loop after the single recovery attempt.
 - Added browser coverage proving that a rejected bucket action is retried with
   the refreshed token and succeeds without a page reload.
+
+### Tests and documentation
+
+- Added public media-header integration coverage and documented the streaming
+  behavior and compatibility boundary across the README, roadmap,
+  configuration, S3 compatibility, storage-format, disaster-recovery, and
+  architecture decision documents.
 
 ## 0.7.5 - 2026-09-27
 

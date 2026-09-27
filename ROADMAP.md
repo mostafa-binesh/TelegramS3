@@ -234,6 +234,9 @@ Completed in this increment:
 - download streams now support a bounded, database-backed parallel prefetch
   window of `0–4` extra verified chunks, configurable from Telegram settings;
   output order, checksum boundaries, and memory use remain bounded
+- public audio/video links now advertise inline media disposition while
+  non-media links remain attachments, preserving range-based player probing
+  without changing stored objects
 - browser reception now supports bounded resumable chunks, authoritative offset
   re-sync, pause/resume while the reception lease remains active, and explicit
   cancellation cleanup; server restart resumption remains intentionally

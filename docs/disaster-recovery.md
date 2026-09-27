@@ -103,6 +103,10 @@ window is exhausted after earlier bytes were sent, a capable client can resume
 with a single `Range: bytes=<offset>-` request. Missing messages, decryption
 failures, and checksum mismatches are not retried as network failures; they
 remain object recovery issues and must be handled through the recovery workflow.
+Public audio/video links additionally use inline content disposition so media
+players can issue their normal metadata and range probes. This is only an HTTP
+response-header behavior; it does not change the stored manifest or Telegram
+documents.
 
 ### Telegram Rate Limit (`FLOOD_WAIT`)
 

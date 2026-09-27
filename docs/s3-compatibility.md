@@ -109,6 +109,10 @@ features, so they are documented separately.
   and keeps a bounded number of additional verified chunks ready in order
   while keeping the response open for up to 120 seconds. Missing messages,
   decryption failures, and checksum failures are not retried.
+- Public `audio/*` and `video/*` share responses use inline content disposition
+  with the stored media type, which lets HTTP media players probe and play the
+  link. Other public objects remain attachment downloads; this does not alter
+  S3 object bytes or range semantics.
 - The object browser shows object expiry, accepts seconds-based expiry for
   browser uploads, and creates opaque `/_public/` share URLs with an optional expiry.
   Share URLs are public bearer capabilities bounded by object expiry. Each row

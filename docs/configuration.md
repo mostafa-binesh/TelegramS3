@@ -93,6 +93,9 @@ chunks in parallel, but preserves output order and never emits a prefetched
 chunk before its decryption and checksum verification complete. Public share
 responses advertise `Accept-Ranges: bytes`; a client can resume an exhausted
 stream with a single byte range without any additional setting.
+For public links, stored `audio/*` and `video/*` objects use
+`Content-Disposition: inline` so media players can open the URL directly;
+other content types continue to use attachment disposition.
 
 ## Operator accounts
 

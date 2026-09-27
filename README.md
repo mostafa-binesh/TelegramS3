@@ -267,6 +267,9 @@ transient Telegram/network failure while fetching one chunk keeps the S3,
 admin, or public response open while the server retries for up to 120 seconds;
 missing messages, decryption failures, and checksum failures remain hard
 recovery signals.
+Public audio/video links also use `Content-Disposition: inline` with their
+stored media type, allowing HTTP media players such as PotPlayer to probe and
+play the URL; non-media public objects retain attachment disposition.
 
 Per-object expiry is available as a Telegram S3 extension. Send either
 `x-amz-meta-telegram-s3-expires-at: <RFC3339 timestamp>` or

@@ -254,7 +254,8 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
     let q = encode_query(&[("bucket", &bucket), ("key", key)]);
     let upload_path = format!("/_admin/api/objects/content?{q}");
 
-    // Upload raw bytes with Content-Type application/octet-stream.
+    // Upload raw bytes with a media type so the public-share player contract
+    // can be verified independently of the byte-preserving assertions.
     let upload = raw_request(
         &client,
         &bind_addr,
@@ -263,7 +264,7 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
         &[
             ("Cookie", &cookie),
             ("X-CSRF-Token", &csrf),
-            ("Content-Type", "application/octet-stream"),
+            ("Content-Type", "video/mp4"),
         ],
         &raw,
     )
@@ -293,7 +294,7 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
     .await;
     assert_eq!(full.status, 200, "content full GET");
     assert_eq!(full.body, raw, "full GET body must equal raw bytes");
-    assert_eq!(header(&full, "content-type"), "application/octet-stream");
+    assert_eq!(header(&full, "content-type"), "video/mp4");
     assert_eq!(
         header(&full, "content-length"),
         raw.len().to_string(),
@@ -400,6 +401,11 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
         header(&shared, "content-disposition").contains("hello.txt"),
         "public share should preserve the object filename, got {:?}",
         shared.headers.get("content-disposition")
+    );
+    assert_eq!(
+        header(&shared, "content-disposition").split(';').next(),
+        Some("inline"),
+        "public media shares must be playable by HTTP media clients"
     );
     assert_eq!(
         header(&shared, "accept-ranges"),

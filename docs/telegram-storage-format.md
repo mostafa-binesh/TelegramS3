@@ -200,6 +200,10 @@ the response ends with the already-sent bytes intact; a capable client can
 request the remaining range and resume. Missing Telegram messages, decryption
 failures, and checksum mismatches are not treated as transient network errors
 and remain recovery signals.
+Public media manifests retain their stored `audio/*` or `video/*` content type
+and receive inline disposition at the HTTP boundary, so players can probe the
+URL without changing the encrypted chunk or manifest format. Other public
+objects retain attachment disposition.
 
 ## Multipart Manifest Composition
 

@@ -2198,11 +2198,27 @@ fn parse_content_range(
 /// `Content-Disposition: attachment; filename="…"` with an ASCII fallback and
 /// RFC 5987 percent-encoding for non-ASCII names.
 pub(crate) fn content_disposition(basename: &str) -> String {
+    content_disposition_with_mode("attachment", basename)
+}
+
+/// Public audio/video links should be treated as playable media by clients
+/// such as PotPlayer while retaining a useful filename for save operations.
+pub(crate) fn media_content_disposition(basename: &str, content_type: &str) -> String {
+    let media_type = content_type.to_ascii_lowercase();
+    let mode = if media_type.starts_with("audio/") || media_type.starts_with("video/") {
+        "inline"
+    } else {
+        "attachment"
+    };
+    content_disposition_with_mode(mode, basename)
+}
+
+fn content_disposition_with_mode(mode: &str, basename: &str) -> String {
     if basename.is_ascii() && !basename.contains(['"', '\\', '\r', '\n']) {
-        return format!("attachment; filename=\"{basename}\"");
+        return format!("{mode}; filename=\"{basename}\"");
     }
     let encoded = percent_encode_filename(basename);
-    format!("attachment; filename=\"download\"; filename*=UTF-8''{encoded}")
+    format!("{mode}; filename=\"download\"; filename*=UTF-8''{encoded}")
 }
 
 fn percent_encode_filename(value: &str) -> String {

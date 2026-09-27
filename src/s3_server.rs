@@ -572,8 +572,9 @@ async fn handle_share_request(
         HeaderValue::from_str(&manifest.checksum.whole_object)
             .unwrap_or(HeaderValue::from_static("")),
     );
-    if let Ok(value) = HeaderValue::from_str(&crate::admin::content_disposition(
+    if let Ok(value) = HeaderValue::from_str(&crate::admin::media_content_disposition(
         &crate::admin::basename_key(&manifest.key),
+        &manifest.content_type,
     )) {
         response
             .headers_mut()
