@@ -329,12 +329,13 @@ it reads the current session and retries the rejected administrative request at
 most once. This affects only control-plane request handling and does not alter
 object manifests, chunk checksums, or Telegram storage layout.
 
-The authenticated overview also reports process-scoped payload telemetry: bytes
-received from and sent to clients, plus bytes received from and sent to
-Telegram. These counters are atomic in the shared object-format service, are
-refreshed by the UI every five seconds, exclude protocol overhead, and reset
-when the server process restarts. They do not participate in manifest recovery
-or object visibility.
+The authenticated overview also reports payload telemetry in two tabs: `This
+session` shows bytes received from and sent to clients plus bytes received from
+and sent to Telegram since the current process started, while `Total` shows the
+same four payload counters across all server runs. The all-time counters are
+stored in metadata schema v14 and restored during service startup. Both views
+refresh every five seconds, exclude protocol overhead, and do not participate
+in manifest recovery or object visibility.
 
 The same overview snapshot reports the logical size of unique committed
 Telegram chunk payloads. It uses the remote chunk references in committed

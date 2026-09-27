@@ -94,6 +94,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_connection_removal_schema(connection)?;
         ensure_share_schema(connection)?;
         ensure_download_prefetch_setting(connection)?;
+        ensure_traffic_totals_schema(connection)?;
         return Ok(());
     }
 
@@ -241,6 +242,24 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS traffic_totals (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            client_upload_bytes TEXT NOT NULL DEFAULT '0',
+            client_download_bytes TEXT NOT NULL DEFAULT '0',
+            telegram_upload_bytes TEXT NOT NULL DEFAULT '0',
+            telegram_download_bytes TEXT NOT NULL DEFAULT '0',
+            updated_at TEXT NOT NULL
+        );
+
+        INSERT OR IGNORE INTO traffic_totals (
+            id,
+            client_upload_bytes,
+            client_download_bytes,
+            telegram_upload_bytes,
+            telegram_download_bytes,
+            updated_at
+        ) VALUES (1, '0', '0', '0', '0', '');
+
         CREATE TABLE IF NOT EXISTS transfer_jobs (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             id TEXT NOT NULL UNIQUE,
@@ -338,6 +357,31 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_connection_removal_schema(connection)?;
     ensure_share_schema(connection)?;
     ensure_download_prefetch_setting(connection)?;
+    ensure_traffic_totals_schema(connection)?;
+    Ok(())
+}
+
+fn ensure_traffic_totals_schema(connection: &mut Connection) -> Result<(), MetadataError> {
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS traffic_totals (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            client_upload_bytes TEXT NOT NULL DEFAULT '0',
+            client_download_bytes TEXT NOT NULL DEFAULT '0',
+            telegram_upload_bytes TEXT NOT NULL DEFAULT '0',
+            telegram_download_bytes TEXT NOT NULL DEFAULT '0',
+            updated_at TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO traffic_totals (
+            id,
+            client_upload_bytes,
+            client_download_bytes,
+            telegram_upload_bytes,
+            telegram_download_bytes,
+            updated_at
+        ) VALUES (1, '0', '0', '0', '0', '');
+        "#,
+    )?;
     Ok(())
 }
 
@@ -627,6 +671,7 @@ fn create_private_metadata_file(path: &std::path::Path) -> Result<(), MetadataEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::TrafficCounterKind;
     use tempfile::tempdir;
 
     #[test]
@@ -693,6 +738,51 @@ mod tests {
                 .telegram_download_prefetch_chunks()
                 .expect("prefetch setting"),
             Some(DEFAULT_DOWNLOAD_PREFETCH_CHUNKS)
+        );
+    }
+
+    #[test]
+    fn migration_from_version_thirteen_adds_persistent_traffic_totals() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("metadata.sqlite");
+        {
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE schema_version (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        version INTEGER NOT NULL,
+                        applied_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_version (id, version, applied_at)
+                    VALUES (1, 13, '2026-09-27T00:00:00Z');
+                    "#,
+                )
+                .expect("seed");
+        }
+
+        let store = MetadataStore::open(&path).expect("migrate");
+        assert_eq!(store.schema_version().expect("schema"), SCHEMA_VERSION);
+        store
+            .increment_traffic_total(TrafficCounterKind::TelegramDownload, 42)
+            .expect("increment");
+        assert_eq!(
+            store
+                .traffic_totals()
+                .expect("totals")
+                .telegram_download_bytes,
+            42
+        );
+        drop(store);
+
+        let reopened = MetadataStore::open(&path).expect("reopen");
+        assert_eq!(
+            reopened
+                .traffic_totals()
+                .expect("reopened totals")
+                .telegram_download_bytes,
+            42
         );
     }
 

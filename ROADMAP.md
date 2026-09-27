@@ -210,7 +210,8 @@ Completed in this increment:
 - the admin console now uses full-width responsive layout, loading skeletons,
   animated dismissible notifications, recovery sub-tabs, and analysis cards for
   storage composition, transfer pipeline, system checks, storage safeguards, and
-  process-scoped client/Telegram traffic refreshed every five seconds
+  client/Telegram traffic refreshed every five seconds, with This session and
+  metadata-backed all-time Total views
 - browser uploads are serialized, retried after transient request failures, and
   follow the durable transfer job through chunk progress in the upload queue
 - the admin console now has history-routed bucket/folder locations, SVG

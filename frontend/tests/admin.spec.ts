@@ -45,10 +45,18 @@ const overview = {
     cleanup_recovery_required: 1
   },
   traffic: {
-    client_upload_bytes: 1_048_576,
-    client_download_bytes: 8_388_608,
-    telegram_upload_bytes: 4_194_304,
-    telegram_download_bytes: 16_777_216
+    session: {
+      client_upload_bytes: 1_048_576,
+      client_download_bytes: 8_388_608,
+      telegram_upload_bytes: 4_194_304,
+      telegram_download_bytes: 16_777_216
+    },
+    total: {
+      client_upload_bytes: 11_534_336,
+      client_download_bytes: 92_274_688,
+      telegram_upload_bytes: 46_137_344,
+      telegram_download_bytes: 167_772_160
+    }
   },
   telegram: {
     session_state: 'authorized',
@@ -293,10 +301,15 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
   await expect(page.getByRole('heading', { name: 'Transfer pipeline' })).toBeVisible();
   await expect(page.getByLabel('Transfer pipeline chart')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Traffic since process start' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'This session' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByText('Telegram files')).toBeVisible();
   await expect(page.getByText('256 MiB')).toBeVisible();
   await expect(page.getByText('Clients → server')).toBeVisible();
   await expect(page.getByText('Telegram → server')).toBeVisible();
+  await page.getByRole('tab', { name: 'Total' }).click();
+  await expect(page.getByRole('heading', { name: 'Traffic across all server runs' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Total' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByText('11 MiB')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'System checks' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Storage safeguards' })).toBeVisible();
   await expect(page.locator('.account-avatar')).toHaveText('A');

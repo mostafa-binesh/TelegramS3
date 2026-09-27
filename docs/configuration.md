@@ -159,6 +159,12 @@ counted once; Telegram protocol, message, and encryption-envelope overhead are
 not included, and the value is derived from existing manifests without a
 database migration.
 
+The Overview's Network usage card has `This session` and `Total` tabs. The
+session tab resets when the process starts; the total tab reports the four
+payload counters accumulated across all server runs and stores them in metadata
+schema v14. Both tabs refresh every five seconds and exclude protocol and
+transport overhead.
+
 ## Required Runtime Settings
 
 - chunk size

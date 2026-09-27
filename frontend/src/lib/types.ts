@@ -90,11 +90,16 @@ export interface DurableMetrics {
   cleanup_recovery_required: number;
 }
 
-export interface TrafficMetrics {
+export interface TrafficSnapshot {
   client_upload_bytes: number;
   client_download_bytes: number;
   telegram_upload_bytes: number;
   telegram_download_bytes: number;
+}
+
+export interface TrafficMetrics {
+  session: TrafficSnapshot;
+  total: TrafficSnapshot;
 }
 
 export interface RecoveryIssue {

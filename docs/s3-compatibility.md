@@ -59,8 +59,8 @@ features, so they are documented separately.
   operator-console convenience only; the server still requires the signed
   session claim and matching CSRF header for every mutating endpoint.
 - The dashboard reports storage overview, endpoint details, capacity, live
-  transfer-pipeline analytics, five-second process-scoped client/Telegram
-  traffic telemetry, system checks, storage safeguards, Telegram
+  transfer-pipeline analytics, five-second client/Telegram traffic telemetry
+  with session and all-time views, system checks, storage safeguards, Telegram
   readiness, sampled recovery-verifier enabled/disabled state, timing, and
   broken-file problems,
   plus the logical size of unique committed Telegram chunk payloads (reused

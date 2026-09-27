@@ -7,6 +7,7 @@ use crate::manifest::{
 };
 use crate::metadata::{
     BucketRecord, JournalEntry, MetadataError, MetadataStatus, MetadataStore, OperationKind,
+    TrafficCounterKind, TrafficTotals,
 };
 use crate::multipart::{MultipartCompletionPlan, MultipartPart, MultipartSession, MultipartState};
 use crate::telegram::{
@@ -412,12 +413,15 @@ pub struct ObjectFormatService {
     traffic: Arc<TrafficCounters>,
 }
 
-/// Process-scoped payload counters used by the operator overview. They are
-/// intentionally not persisted: the dashboard describes traffic observed by
-/// this server process, while object durability remains in the metadata and
-/// Telegram manifests.
+/// Payload counters displayed by the operator overview.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct TrafficMetrics {
+    pub session: TrafficSnapshot,
+    pub total: TrafficSnapshot,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TrafficSnapshot {
     pub client_upload_bytes: u64,
     pub client_download_bytes: u64,
     pub telegram_upload_bytes: u64,
@@ -426,10 +430,30 @@ pub struct TrafficMetrics {
 
 #[derive(Default)]
 struct TrafficCounters {
+    session: TrafficCounterValues,
+    total: TrafficCounterValues,
+}
+
+#[derive(Default)]
+struct TrafficCounterValues {
     client_upload_bytes: AtomicU64,
     client_download_bytes: AtomicU64,
     telegram_upload_bytes: AtomicU64,
     telegram_download_bytes: AtomicU64,
+}
+
+impl TrafficCounters {
+    fn from_totals(totals: TrafficTotals) -> Self {
+        Self {
+            session: TrafficCounterValues::default(),
+            total: TrafficCounterValues {
+                client_upload_bytes: AtomicU64::new(totals.client_upload_bytes),
+                client_download_bytes: AtomicU64::new(totals.client_download_bytes),
+                telegram_upload_bytes: AtomicU64::new(totals.telegram_upload_bytes),
+                telegram_download_bytes: AtomicU64::new(totals.telegram_download_bytes),
+            },
+        }
+    }
 }
 
 #[derive(Default)]
@@ -578,6 +602,7 @@ impl ObjectFormatService {
         encryption: ObjectEncryption,
     ) -> Result<Self, ObjectFormatError> {
         let data_dir = data_dir.as_ref().to_path_buf();
+        let traffic_totals = metadata.traffic_totals()?;
         fs::create_dir_all(data_dir.join(STAGING_ROOT))?;
         fs::create_dir_all(data_dir.join(MANIFEST_ROOT))?;
         fs::create_dir_all(data_dir.join(CHUNK_ROOT))?;
@@ -610,7 +635,7 @@ impl ObjectFormatService {
             ))),
             staging_budget: 10 * 1024 * 1024 * 1024,
             encryption,
-            traffic: Arc::new(TrafficCounters::default()),
+            traffic: Arc::new(TrafficCounters::from_totals(traffic_totals)),
         })
     }
 
@@ -624,35 +649,77 @@ impl ObjectFormatService {
 
     pub fn traffic_metrics(&self) -> TrafficMetrics {
         TrafficMetrics {
-            client_upload_bytes: self.traffic.client_upload_bytes.load(Ordering::Relaxed),
-            client_download_bytes: self.traffic.client_download_bytes.load(Ordering::Relaxed),
-            telegram_upload_bytes: self.traffic.telegram_upload_bytes.load(Ordering::Relaxed),
-            telegram_download_bytes: self.traffic.telegram_download_bytes.load(Ordering::Relaxed),
+            session: self.traffic_snapshot(&self.traffic.session),
+            total: self.traffic_snapshot(&self.traffic.total),
         }
     }
 
+    fn traffic_snapshot(&self, counters: &TrafficCounterValues) -> TrafficSnapshot {
+        TrafficSnapshot {
+            client_upload_bytes: counters.client_upload_bytes.load(Ordering::Relaxed),
+            client_download_bytes: counters.client_download_bytes.load(Ordering::Relaxed),
+            telegram_upload_bytes: counters.telegram_upload_bytes.load(Ordering::Relaxed),
+            telegram_download_bytes: counters.telegram_download_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_traffic(
+        &self,
+        kind: TrafficCounterKind,
+        session_counter: &AtomicU64,
+        total_counter: &AtomicU64,
+        bytes: u64,
+    ) {
+        if bytes == 0 {
+            return;
+        }
+        session_counter.fetch_add(bytes, Ordering::Relaxed);
+        if let Err(error) = self.metadata.increment_traffic_total(kind, bytes) {
+            warn!(
+                ?error,
+                counter = kind.column(),
+                bytes,
+                "failed to persist traffic total"
+            );
+            return;
+        }
+        total_counter.fetch_add(bytes, Ordering::Relaxed);
+    }
+
     pub(crate) fn add_client_upload_bytes(&self, bytes: u64) {
-        self.traffic
-            .client_upload_bytes
-            .fetch_add(bytes, Ordering::Relaxed);
+        self.record_traffic(
+            TrafficCounterKind::ClientUpload,
+            &self.traffic.session.client_upload_bytes,
+            &self.traffic.total.client_upload_bytes,
+            bytes,
+        );
     }
 
     fn add_client_download_bytes(&self, bytes: u64) {
-        self.traffic
-            .client_download_bytes
-            .fetch_add(bytes, Ordering::Relaxed);
+        self.record_traffic(
+            TrafficCounterKind::ClientDownload,
+            &self.traffic.session.client_download_bytes,
+            &self.traffic.total.client_download_bytes,
+            bytes,
+        );
     }
 
     fn add_telegram_upload_bytes(&self, bytes: u64) {
-        self.traffic
-            .telegram_upload_bytes
-            .fetch_add(bytes, Ordering::Relaxed);
+        self.record_traffic(
+            TrafficCounterKind::TelegramUpload,
+            &self.traffic.session.telegram_upload_bytes,
+            &self.traffic.total.telegram_upload_bytes,
+            bytes,
+        );
     }
 
     fn add_telegram_download_bytes(&self, bytes: u64) {
-        self.traffic
-            .telegram_download_bytes
-            .fetch_add(bytes, Ordering::Relaxed);
+        self.record_traffic(
+            TrafficCounterKind::TelegramDownload,
+            &self.traffic.session.telegram_download_bytes,
+            &self.traffic.total.telegram_download_bytes,
+            bytes,
+        );
     }
 
     pub fn staging_budget(&self) -> u64 {
@@ -3931,6 +3998,25 @@ mod tests {
         assert_eq!(status.committed_objects, 1);
         assert_eq!(status.recovery_required_objects, 0);
         assert_eq!(status.telegram_files_bytes, 3);
+    }
+
+    #[tokio::test]
+    async fn traffic_metrics_separate_session_and_persisted_total() {
+        let tempdir = TempDir::new().expect("tempdir");
+        unsafe {
+            env::set_var("TELEGRAM_TRANSPORT_RUNTIME", "mock");
+        }
+        let config = test_config(&tempdir);
+        let service = ObjectFormatService::open(&config).await.expect("service");
+        service.add_client_upload_bytes(10);
+        assert_eq!(service.traffic_metrics().session.client_upload_bytes, 10);
+        assert_eq!(service.traffic_metrics().total.client_upload_bytes, 10);
+        drop(service);
+
+        let reopened = ObjectFormatService::open(&config).await.expect("reopen");
+        let metrics = reopened.traffic_metrics();
+        assert_eq!(metrics.session.client_upload_bytes, 0);
+        assert_eq!(metrics.total.client_upload_bytes, 10);
     }
 
     #[test]

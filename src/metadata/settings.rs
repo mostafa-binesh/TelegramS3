@@ -1,5 +1,5 @@
 use super::rows::timestamp_now;
-use super::{MetadataError, MetadataStore};
+use super::{MetadataError, MetadataStore, TrafficCounterKind, TrafficTotals};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -25,6 +25,53 @@ pub struct TelegramBootstrapSettings {
 }
 
 impl MetadataStore {
+    pub(crate) fn traffic_totals(&self) -> Result<TrafficTotals, MetadataError> {
+        self.with_connection(|connection| {
+            let values = connection.query_row(
+                "SELECT client_upload_bytes, client_download_bytes, telegram_upload_bytes, telegram_download_bytes FROM traffic_totals WHERE id=1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )?;
+            Ok(TrafficTotals {
+                client_upload_bytes: parse_traffic_total("client_upload_bytes", &values.0)?,
+                client_download_bytes: parse_traffic_total("client_download_bytes", &values.1)?,
+                telegram_upload_bytes: parse_traffic_total("telegram_upload_bytes", &values.2)?,
+                telegram_download_bytes: parse_traffic_total("telegram_download_bytes", &values.3)?,
+            })
+        })
+    }
+
+    pub(crate) fn increment_traffic_total(
+        &self,
+        kind: TrafficCounterKind,
+        bytes: u64,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|connection| {
+            let column = kind.column();
+            let current: String = connection.query_row(
+                &format!("SELECT {column} FROM traffic_totals WHERE id=1"),
+                [],
+                |row| row.get(0),
+            )?;
+            let current = parse_traffic_total(column, &current)?;
+            let next = current.checked_add(bytes).ok_or_else(|| {
+                MetadataError::InvalidManifest(format!("traffic total overflow for {column}"))
+            })?;
+            connection.execute(
+                &format!("UPDATE traffic_totals SET {column}=?1, updated_at=?2 WHERE id=1"),
+                params![next.to_string(), timestamp_now()?],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn telegram_chunk_size(&self) -> Result<Option<u64>, MetadataError> {
         self.with_connection(|connection| {
             let value: Option<String> = connection
@@ -404,6 +451,12 @@ impl MetadataStore {
     }
 }
 
+fn parse_traffic_total(name: &str, value: &str) -> Result<u64, MetadataError> {
+    value
+        .parse::<u64>()
+        .map_err(|_| MetadataError::InvalidManifest(format!("invalid stored traffic total {name}")))
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::OptionalExtension;
@@ -422,7 +475,7 @@ mod tests {
             store.telegram_chunk_size().expect("read"),
             Some(8 * 1024 * 1024)
         );
-        assert_eq!(store.schema_version().expect("schema"), 13);
+        assert_eq!(store.schema_version().expect("schema"), 14);
     }
 
     #[test]
@@ -476,7 +529,7 @@ mod tests {
         );
 
         store.migrate().expect("idempotent migration");
-        assert_eq!(store.schema_version().expect("schema"), 13);
+        assert_eq!(store.schema_version().expect("schema"), 14);
         assert_eq!(
             store
                 .telegram_recovery_verify_interval_secs()

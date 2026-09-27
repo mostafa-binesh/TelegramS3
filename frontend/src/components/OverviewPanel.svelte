@@ -23,10 +23,18 @@
   };
 
   const emptyTrafficMetrics = {
-    client_upload_bytes: 0,
-    client_download_bytes: 0,
-    telegram_upload_bytes: 0,
-    telegram_download_bytes: 0
+    session: {
+      client_upload_bytes: 0,
+      client_download_bytes: 0,
+      telegram_upload_bytes: 0,
+      telegram_download_bytes: 0
+    },
+    total: {
+      client_upload_bytes: 0,
+      client_download_bytes: 0,
+      telegram_upload_bytes: 0,
+      telegram_download_bytes: 0
+    }
   };
 
   function formatAge(seconds: number) {
@@ -40,6 +48,8 @@
 
   $: transferMetrics = overview?.transfers ?? emptyTransferMetrics;
   $: trafficMetrics = overview?.traffic ?? emptyTrafficMetrics;
+  let trafficTab: 'session' | 'total' = 'session';
+  $: trafficView = trafficMetrics[trafficTab];
   $: checks = overview?.checks ?? [];
   $: passingChecks = checks.filter((check) => check.ok).length;
   let now = Date.now();
@@ -123,23 +133,27 @@
       {#if loading || !overview}<div class="skeleton" style="height:132px"></div>{:else if checks.length === 0}<p class="fine-print">No health checks were reported in this snapshot.</p>{:else}<div class="check-list">{#each checks as check (check.label)}<div class="check-row"><span class:ok={check.ok} class="check-dot" aria-hidden="true"></span><div><strong>{check.label}</strong><small>{check.detail}</small></div><span class:ok={check.ok} class="check-state">{check.ok ? 'Ready' : 'Review'}</span></div>{/each}</div>{/if}
     </article>
     <article class="card surface traffic-card">
-      <div class="analytics-heading"><div><p class="card-label">Network usage</p><h2>Traffic since process start</h2></div><span class="live-chip"><span aria-hidden="true"></span>Refreshes every 5s</span></div>
+      <div class="analytics-heading"><div><p class="card-label">Network usage</p><h2>{trafficTab === 'session' ? 'Traffic since process start' : 'Traffic across all server runs'}</h2></div><span class="live-chip"><span aria-hidden="true"></span>Refreshes every 5s</span></div>
       {#if loading || !overview}<div class="skeleton" style="height:154px"></div>{:else}
-        {@const clientPeak = Math.max(trafficMetrics.client_upload_bytes, trafficMetrics.client_download_bytes, 1)}
-        {@const telegramPeak = Math.max(trafficMetrics.telegram_upload_bytes, trafficMetrics.telegram_download_bytes, 1)}
+        <div class="traffic-tabs" role="tablist" aria-label="Network usage period">
+          <button class:active={trafficTab === 'session'} type="button" role="tab" aria-selected={trafficTab === 'session'} on:click={() => trafficTab = 'session'}>This session</button>
+          <button class:active={trafficTab === 'total'} type="button" role="tab" aria-selected={trafficTab === 'total'} on:click={() => trafficTab = 'total'}>Total</button>
+        </div>
+        {@const clientPeak = Math.max(trafficView.client_upload_bytes, trafficView.client_download_bytes, 1)}
+        {@const telegramPeak = Math.max(trafficView.telegram_upload_bytes, trafficView.telegram_download_bytes, 1)}
         <div class="traffic-grid">
           <div class="traffic-channel">
             <div class="traffic-channel-heading"><div><strong>Clients</strong><small>S3 and admin connections</small></div><span class="traffic-badge client">API</span></div>
-            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon download" aria-hidden="true">↓</span><span>Download<small>Server → clients</small></span></span><div class="traffic-meter"><span class="download" style={`width:${(trafficMetrics.client_download_bytes / clientPeak) * 100}%`}></span></div><strong>{formatBytes(trafficMetrics.client_download_bytes)}</strong></div>
-            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon upload" aria-hidden="true">↑</span><span>Upload<small>Clients → server</small></span></span><div class="traffic-meter"><span class="upload" style={`width:${(trafficMetrics.client_upload_bytes / clientPeak) * 100}%`}></span></div><strong>{formatBytes(trafficMetrics.client_upload_bytes)}</strong></div>
+            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon download" aria-hidden="true">↓</span><span>Download<small>Server → clients</small></span></span><div class="traffic-meter"><span class="download" style={`width:${(trafficView.client_download_bytes / clientPeak) * 100}%`}></span></div><strong>{formatBytes(trafficView.client_download_bytes)}</strong></div>
+            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon upload" aria-hidden="true">↑</span><span>Upload<small>Clients → server</small></span></span><div class="traffic-meter"><span class="upload" style={`width:${(trafficView.client_upload_bytes / clientPeak) * 100}%`}></span></div><strong>{formatBytes(trafficView.client_upload_bytes)}</strong></div>
           </div>
           <div class="traffic-channel">
             <div class="traffic-channel-heading"><div><strong>Telegram server</strong><small>Storage chat payloads</small></div><span class="traffic-badge telegram">TG</span></div>
-            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon download" aria-hidden="true">↓</span><span>Download<small>Telegram → server</small></span></span><div class="traffic-meter"><span class="download" style={`width:${(trafficMetrics.telegram_download_bytes / telegramPeak) * 100}%`}></span></div><strong>{formatBytes(trafficMetrics.telegram_download_bytes)}</strong></div>
-            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon upload" aria-hidden="true">↑</span><span>Upload<small>Server → Telegram</small></span></span><div class="traffic-meter"><span class="upload" style={`width:${(trafficMetrics.telegram_upload_bytes / telegramPeak) * 100}%`}></span></div><strong>{formatBytes(trafficMetrics.telegram_upload_bytes)}</strong></div>
+            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon download" aria-hidden="true">↓</span><span>Download<small>Telegram → server</small></span></span><div class="traffic-meter"><span class="download" style={`width:${(trafficView.telegram_download_bytes / telegramPeak) * 100}%`}></span></div><strong>{formatBytes(trafficView.telegram_download_bytes)}</strong></div>
+            <div class="traffic-row"><span class="traffic-label"><span class="traffic-icon upload" aria-hidden="true">↑</span><span>Upload<small>Server → Telegram</small></span></span><div class="traffic-meter"><span class="upload" style={`width:${(trafficView.telegram_upload_bytes / telegramPeak) * 100}%`}></span></div><strong>{formatBytes(trafficView.telegram_upload_bytes)}</strong></div>
           </div>
         </div>
-        <p class="fine-print traffic-note">Payload totals only; protocol overhead is excluded. Counters reset when the server process restarts.</p>
+        <p class="fine-print traffic-note">Payload totals only; protocol overhead is excluded. This session resets on restart; Total is stored in metadata and survives restarts.</p>
       {/if}
     </article>
     <article class="card surface verifier-card">
@@ -200,6 +214,9 @@
   .check-state { color: #a66a0b; font-size: .65rem; font-weight: 800; text-transform: uppercase; }
   .check-state.ok { color: #197658; }
   .traffic-card { grid-column: 1 / -1; }
+  .traffic-tabs { display: inline-flex; gap: 4px; margin: 0 0 16px; padding: 4px; border: 1px solid #dce6ee; border-radius: 10px; background: #f3f7fa; }
+  .traffic-tabs button { padding: 7px 12px; border: 0; border-radius: 7px; background: transparent; color: #617891; font-size: .72rem; font-weight: 800; }
+  .traffic-tabs button.active { background: #fff; color: #2369a3; box-shadow: 0 1px 3px rgba(32,59,87,.12); }
   .traffic-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
   .traffic-channel { min-width: 0; padding: 15px; border: 1px solid #e1e9f0; border-radius: 14px; background: #fbfcfe; }
   .traffic-channel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 16px; }

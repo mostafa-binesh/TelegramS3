@@ -245,9 +245,10 @@ object actions until the final manifest is published.
 6. Use the authenticated `/_admin` dashboard to recheck storage overview,
    capacity, Telegram readiness, bucket visibility (including buckets created
    from the UI), and bootstrap status before resuming writes.
-   The overview's client/Telegram traffic counters are process-scoped and
-   start a new baseline after the restored server process starts; they are not
-   durable recovery evidence.
+   The Overview's `This session` client/Telegram traffic counters start a new
+   baseline after the restored server process starts. The `Total` counters are
+   stored in metadata schema v14 and survive the restart; they are operational
+   payload accounting, not durable object-recovery evidence.
    The Overview's Telegram-files size is manifest-derived and remains
    meaningful after restart, but it represents logical committed chunk bytes,
    not Telegram protocol overhead or a remote account quota.

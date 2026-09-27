@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.7.6-rc.3 - 2026-09-27
+
+### Persistent Overview traffic tabs
+
+- Split Overview network usage into `This session` and `Total` tabs while
+  preserving the existing five-second refresh cadence and separate client and
+  Telegram upload/download channels.
+- Added metadata schema v14 with durable lifetime payload counters. Totals are
+  restored after process restart and are updated from the same payload byte
+  accounting used by the session view; protocol overhead remains excluded.
+- Added migration, persistence/reopen, backend API, and browser tab-selection
+  coverage. Existing object and transfer data are unchanged.
+
 ## 0.7.6-rc.2 - 2026-09-27
 
 ### Telegram storage size in Overview

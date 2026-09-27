@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 13;
+const SCHEMA_VERSION: u32 = 14;
 
 #[derive(Debug, Error)]
 pub enum MetadataError {
@@ -91,6 +91,33 @@ pub struct MetadataStatus {
     pub active_objects: u64,
     pub staged_objects: u64,
     pub recovery_markers: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrafficCounterKind {
+    ClientUpload,
+    ClientDownload,
+    TelegramUpload,
+    TelegramDownload,
+}
+
+impl TrafficCounterKind {
+    pub(crate) fn column(self) -> &'static str {
+        match self {
+            Self::ClientUpload => "client_upload_bytes",
+            Self::ClientDownload => "client_download_bytes",
+            Self::TelegramUpload => "telegram_upload_bytes",
+            Self::TelegramDownload => "telegram_download_bytes",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TrafficTotals {
+    pub client_upload_bytes: u64,
+    pub client_download_bytes: u64,
+    pub telegram_upload_bytes: u64,
+    pub telegram_download_bytes: u64,
 }
 
 pub struct MetadataStore {

@@ -252,6 +252,14 @@ async fn authenticated_admin_surface_serves_dashboard_and_session_lifecycle() {
         overview_json["storage"]["telegram_files_bytes"].as_u64(),
         Some(0)
     );
+    assert_eq!(
+        overview_json["traffic"]["session"]["client_upload_bytes"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        overview_json["traffic"]["total"]["telegram_download_bytes"].as_u64(),
+        Some(0)
+    );
 
     // The startup scan runs concurrently with the listener, so give it a moment to land.
     let mut recovery = Value::Null;
