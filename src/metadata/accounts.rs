@@ -1,6 +1,6 @@
 use super::{MetadataError, MetadataStore, TelegramBootstrapSettings};
 use rusqlite::{OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,13 +56,22 @@ pub struct ReplicationJob {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RechunkReplicaTarget {
+    pub account_id: String,
+    pub access_mode: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RechunkJob {
     pub id: String,
     pub bucket: String,
     pub key: String,
     pub object_id: String,
+    pub source_account_id: String,
     pub new_chunk_size: u64,
+    pub apply_to_replicas: bool,
+    pub replica_targets: Vec<RechunkReplicaTarget>,
     pub state: String,
     pub chunks_total: u64,
     pub chunks_done: u64,
@@ -259,13 +268,25 @@ impl MetadataStore {
         bucket: &str,
         key: &str,
         new_chunk_size: u64,
+        apply_to_replicas: bool,
     ) -> Result<RechunkJob, MetadataError> {
         let now = crate::durable::now();
         self.with_connection(|connection| {
             let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let object_id: String = tx.query_row("SELECT object_id FROM active_objects WHERE bucket=?1 AND object_key=?2", params![bucket,key], |row| row.get(0)).optional()?.ok_or_else(|| MetadataError::ManifestNotFound(format!("{bucket}/{key}")))?;
+            let (object_id, mut source_account_id): (String, String) = tx.query_row("SELECT ao.object_id,COALESCE(m.connection_id,'legacy') FROM active_objects ao JOIN object_manifests m ON m.object_id=ao.object_id WHERE ao.bucket=?1 AND ao.object_key=?2", params![bucket,key], |row| Ok((row.get(0)?, row.get(1)?))).optional()?.ok_or_else(|| MetadataError::ManifestNotFound(format!("{bucket}/{key}")))?;
+            if source_account_id == "legacy" {
+                source_account_id = tx.query_row("SELECT value FROM app_settings WHERE key='telegram_active_connection_id'", [], |row| row.get(0)).optional()?.unwrap_or_else(|| "legacy".to_string());
+            }
+            let replica_targets = if apply_to_replicas {
+                let mut statement = tx.prepare("SELECT DISTINCT account_id,mode FROM replica_locations WHERE object_id=?1 AND state='ready' AND mode IN ('replica','access') ORDER BY account_id,mode")?;
+                let rows = statement.query_map([&object_id], |row| Ok(RechunkReplicaTarget { account_id: row.get(0)?, access_mode: row.get(1)? }))?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
+            let replica_targets_json = serde_json::to_string(&replica_targets)?;
             let id = Uuid::new_v4().to_string();
-            tx.execute("INSERT INTO rechunk_jobs(id,bucket,object_key,object_id,new_chunk_size,state,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',?6,?6)", params![id,bucket,key,object_id,new_chunk_size,now])?;
+            tx.execute("INSERT INTO rechunk_jobs(id,bucket,object_key,object_id,source_account_id,new_chunk_size,apply_to_replicas,replica_targets_json,state,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'queued',?9,?9)", params![id,bucket,key,object_id,source_account_id,new_chunk_size,apply_to_replicas,replica_targets_json,now])?;
             tx.execute("INSERT INTO rechunk_locks(object_id,job_id,reason,created_at) VALUES(?1,?2,'object is being re-chunked; try again later',?3)", params![object_id,id,now])?;
             tx.commit()?;
             self.rechunk_job(&id)?.ok_or_else(|| MetadataError::InvalidManifest("rechunk job missing".into()))
@@ -274,14 +295,14 @@ impl MetadataStore {
 
     pub fn list_rechunk_jobs(&self) -> Result<Vec<RechunkJob>, MetadataError> {
         self.with_connection(|connection| {
-            let mut stmt = connection.prepare("SELECT id,bucket,object_key,object_id,new_chunk_size,state,chunks_total,chunks_done,bytes_done,error,created_at,updated_at FROM rechunk_jobs ORDER BY updated_at DESC")?;
+            let mut stmt = connection.prepare("SELECT id,bucket,object_key,object_id,source_account_id,new_chunk_size,apply_to_replicas,replica_targets_json,state,chunks_total,chunks_done,bytes_done,error,created_at,updated_at FROM rechunk_jobs ORDER BY updated_at DESC")?;
             let rows = stmt.query_map([], row_rechunk_job)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(MetadataError::from)
         })
     }
 
     pub fn rechunk_job(&self, id: &str) -> Result<Option<RechunkJob>, MetadataError> {
-        self.with_connection(|connection| connection.query_row("SELECT id,bucket,object_key,object_id,new_chunk_size,state,chunks_total,chunks_done,bytes_done,error,created_at,updated_at FROM rechunk_jobs WHERE id=?1", [id], row_rechunk_job).optional().map_err(MetadataError::from))
+        self.with_connection(|connection| connection.query_row("SELECT id,bucket,object_key,object_id,source_account_id,new_chunk_size,apply_to_replicas,replica_targets_json,state,chunks_total,chunks_done,bytes_done,error,created_at,updated_at FROM rechunk_jobs WHERE id=?1", [id], row_rechunk_job).optional().map_err(MetadataError::from))
     }
 
     pub fn object_rechunk_locked(&self, object_id: Uuid) -> Result<bool, MetadataError> {
@@ -303,7 +324,7 @@ impl MetadataStore {
             let id: Option<String> = tx.query_row("SELECT id FROM rechunk_jobs WHERE state='queued' ORDER BY created_at ASC LIMIT 1", [], |row| row.get(0)).optional()?;
             let Some(id) = id else { tx.commit()?; return Ok(None); };
             tx.execute("UPDATE rechunk_jobs SET state='processing',updated_at=?2 WHERE id=?1 AND state='queued'", params![id, crate::durable::now()])?;
-            let job = tx.query_row("SELECT id,bucket,object_key,object_id,new_chunk_size,state,chunks_total,chunks_done,bytes_done,error,created_at,updated_at FROM rechunk_jobs WHERE id=?1", [&id], row_rechunk_job)?;
+            let job = tx.query_row("SELECT id,bucket,object_key,object_id,source_account_id,new_chunk_size,apply_to_replicas,replica_targets_json,state,chunks_total,chunks_done,bytes_done,error,created_at,updated_at FROM rechunk_jobs WHERE id=?1", [&id], row_rechunk_job)?;
             tx.commit()?;
             Ok(Some(job))
         })
@@ -437,13 +458,16 @@ fn row_rechunk_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<RechunkJob> {
         bucket: row.get(1)?,
         key: row.get(2)?,
         object_id: row.get(3)?,
-        new_chunk_size: row.get(4)?,
-        state: row.get(5)?,
-        chunks_total: row.get(6)?,
-        chunks_done: row.get(7)?,
-        bytes_done: row.get(8)?,
-        error: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        source_account_id: row.get(4)?,
+        new_chunk_size: row.get(5)?,
+        apply_to_replicas: row.get::<_, i64>(6)? != 0,
+        replica_targets: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
+        state: row.get(8)?,
+        chunks_total: row.get(9)?,
+        chunks_done: row.get(10)?,
+        bytes_done: row.get(11)?,
+        error: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }

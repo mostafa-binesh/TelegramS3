@@ -1,6 +1,6 @@
 # ADR-0019: Account pool, bucket replication, and re-chunking
 
-- Status: accepted for 0.7.6-rc.6
+- Status: accepted for 0.7.6-rc.10
 - Date: 2026-09-27
 
 ## Context
@@ -56,6 +56,21 @@ The bucket browser supports selecting multiple bucket rows. Its re-chunk action
 expands each selected bucket into its committed object keys and queues the same
 one-object-per-job workflow; the storage layer remains intentionally
 object-scoped so locks and progress are independently recoverable.
+
+## Follow-up: replica-aware re-chunk policy
+
+Re-chunking now presents an explicit operator choice. Schema v18 snapshots the
+source account and each ready replica/access target in the durable job. With
+“apply to replicas”, the replacement manifest commits first and then queues
+one-time follow-up replication jobs for those targets. With “primary account
+only”, no old location is attached to the replacement layout; the object is
+available through its primary account, but round-robin replica reads resume
+only after a new replication job completes.
+
+The additional-account UI uses the same four-step wizard as the primary
+connection, but passes the immutable account ID through the entire login flow
+so API credentials, session files, and Telegram code/password operations stay
+isolated from the primary account.
 
 The admin UI treats the primary and additional connections as one account
 workspace. Account cards share one add/edit form, and Overview derives one

@@ -11,6 +11,7 @@ async function mockConsole(page: import('@playwright/test').Page) {
   let savedAccount = false;
   let replicationBody: Record<string, unknown> | null = null;
   let rechunkBody: Record<string, unknown> | null = null;
+  let wizardBeginBody: Record<string, unknown> | null = null;
   await page.route('**/_admin/api/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace('/_admin/api', '');
@@ -19,7 +20,11 @@ async function mockConsole(page: import('@playwright/test').Page) {
     if (path === '/overview') return route.fulfill({ json: { telegram: { connection_state: 'connected', detail: 'mock', session_state: 'authorized' }, recovery: { issue_count: 0, unacknowledged_count: 0, issues: [] }, storage: {}, checks: [] } });
     if (path === '/telegram/settings') return route.fulfill({ json: { settings: { telegram_api_id: '123', telegram_api_hash: 'hash', telegram_storage_chat_id: '-1001', telegram_proxy_url: '', telegram_proxy_username: '', telegram_proxy_password: '', telegram_proxy_mode: 'auto' } } });
     if (path === '/accounts' && request.method() === 'GET') return route.fulfill({ json: { accounts } });
-    if (path === '/accounts' && request.method() === 'POST') { savedAccount = true; return route.fulfill({ json: { account: { ...accounts[1], label: 'New backup' } } }); }
+    if (path === '/accounts' && request.method() === 'POST') { savedAccount = true; return route.fulfill({ json: { account: { ...accounts[1], id: 'new-backup', label: 'New backup' } } }); }
+    if (path === '/telegram/wizard/begin' && request.method() === 'POST') { wizardBeginBody = request.postDataJSON(); return route.fulfill({ json: { phase: 'code', message: null } }); }
+    if (path === '/telegram/wizard/submit-code' && request.method() === 'POST') return route.fulfill({ json: { phase: 'two_fa', message: null } });
+    if (path === '/telegram/wizard/submit-password' && request.method() === 'POST') return route.fulfill({ json: { phase: 'authorized', connection_ready: true, message: null } });
+    if (path === '/telegram/wizard/cancel' && request.method() === 'POST') return route.fulfill({ json: { ok: true } });
     if (path === '/replication' && request.method() === 'GET') return route.fulfill({ json: { jobs: [] } });
     if (path === '/replication' && request.method() === 'POST') { replicationBody = request.postDataJSON(); return route.fulfill({ status: 202, json: { job: { id: 'replication-1', bucket: 'release-test', state: 'queued', mode: 'automatic', access_mode: 'access', chunks_done: 0, chunks_total: 0, objects_done: 0, objects_total: 0, bytes_done: 0 } } }); }
     if (path === '/rechunk' && request.method() === 'GET') return route.fulfill({ json: { jobs: [] } });
@@ -33,20 +38,30 @@ async function mockConsole(page: import('@playwright/test').Page) {
     if (path === '/objects/delete' && request.method() === 'POST') return route.fulfill({ json: { ok: true } });
     return route.fulfill({ json: {} });
   });
-  return { get savedAccount() { return savedAccount; }, get replicationBody() { return replicationBody; }, get rechunkBody() { return rechunkBody; } };
+  return { get savedAccount() { return savedAccount; }, get replicationBody() { return replicationBody; }, get rechunkBody() { return rechunkBody; }, get wizardBeginBody() { return wizardBeginBody; } };
 }
 
-test('accounts page saves connections and submits automatic access replication', async ({ page }) => {
+test('additional accounts use an isolated onboarding wizard', async ({ page }) => {
   const state = await mockConsole(page);
   await page.goto('/_admin/accounts');
   await expect(page.getByRole('heading', { name: 'Telegram account pool' })).toBeVisible();
   await page.getByRole('tab', { name: /Add account/ }).click();
+  await expect(page.getByRole('heading', { name: 'Add another Telegram account' })).toBeVisible();
   await page.getByLabel('Account label').fill('New backup');
   await page.getByLabel('Telegram API ID').fill('123');
   await page.getByLabel('Telegram API hash').fill('hash');
+  await page.getByRole('button', { name: 'Continue' }).click();
   await page.getByLabel('Storage chat ID').fill('-1002');
-  await page.getByRole('button', { name: 'Add account', exact: true }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Review & sign in' }).click();
+  await page.getByLabel('Phone number').fill('+2000');
+  await page.getByRole('button', { name: 'Save settings & send code' }).click();
+  await page.getByLabel('Confirmation code').fill('123456');
+  await page.getByRole('button', { name: 'Confirm code' }).click();
+  await page.getByLabel('Cloud password').fill('password');
+  await page.getByRole('button', { name: 'Authorize account' }).click();
   expect(state.savedAccount).toBe(true);
+  expect(state.wizardBeginBody).toMatchObject({ account_id: 'new-backup' });
   await page.getByRole('tab', { name: 'Replication' }).click();
   await page.getByLabel('Bucket').selectOption('release-test');
   await page.getByLabel('Schedule').selectOption('automatic');
@@ -91,9 +106,10 @@ test('bucket selection opens the re-chunk size dialog and queues selected keys',
   await page.getByRole('button', { name: 'Re-chunk' }).click();
   await expect(page.getByRole('heading', { name: 'Re-chunk selected files' })).toBeVisible();
   await page.getByLabel('New chunk size (MiB)').fill('4');
+  await page.getByRole('radio', { name: /Apply to replicas/ }).check();
   await Promise.all([
     page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/rechunk')),
     page.getByRole('button', { name: 'Queue re-chunking' }).click(),
   ]);
-  expect(state.rechunkBody).toMatchObject({ bucket: 'release-test', keys: ['sample.bin'], new_chunk_size: 4 * 1048576 });
+  expect(state.rechunkBody).toMatchObject({ bucket: 'release-test', keys: ['sample.bin'], new_chunk_size: 4 * 1048576, apply_to_replicas: true });
 });

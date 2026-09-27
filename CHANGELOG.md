@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.7.6-rc.10 - 2026-09-28
+
+### Isolated additional-account onboarding
+
+- Replaced the plain “Add account” editor path with the same four-step wizard
+  used by the primary Telegram connection: API access, storage chat, network
+  route, and Telegram authorization.
+- Added an explicit account label in the additional-account wizard and styled
+  the add tile as a deliberate onboarding card instead of a compressed inline
+  control.
+- Persist the newly created account before sending the Telegram login request,
+  then carry its immutable account ID through code and cloud-password steps.
+  The selected account retains its own session path, transport manager, and
+  health state; primary account fields are no longer overwritten or restored
+  when adding another account.
+- Added browser coverage for isolated wizard values, account-specific login
+  payloads, authorization completion, and subsequent download-policy editing.
+
+### Replica-aware re-chunking
+
+- Added schema v18 migration columns for the re-chunk source account, the
+  apply-to-replicas decision, and a durable snapshot of ready replica/access
+  targets. Existing databases migrate additively and existing jobs default to
+  primary-only behavior.
+- Added a confirmation choice to bulk/object re-chunking: apply the new chunk
+  layout to the old replica/access targets, or run the faster primary-only
+  replacement.
+- When replica application is selected, the worker snapshots those targets
+  before replacement and queues durable one-time follow-up replication jobs
+  after the primary manifest commits. Physical copies are rebuilt and
+  access-only locations are restored through the normal replication path.
+- When primary-only is selected, old replica locations stay tied to the old
+  manifest and are cleaned up with it. The replacement is readable through
+  the primary account but has no replica download paths until re-replicated;
+  the UI now states this consequence before confirmation.
+- Added migration coverage and browser request assertions for the persisted
+  replica policy.
+
 ## 0.7.6-rc.9 - 2026-09-28
 
 ### Multi-account connection workspace and read policy

@@ -565,6 +565,21 @@ impl ObjectFormatService {
                 .begin_transfer(new_id, &old_manifest.bucket, &old_manifest.key)?;
         let transfer = self.finalize_reception(&transfer_id, manifest_args, None)?;
         let _replacement = self.wait_transfer(&transfer.id).await?;
+        if job.apply_to_replicas {
+            for target in &job.replica_targets {
+                if target.account_id == job.source_account_id {
+                    continue;
+                }
+                self.metadata.queue_replication(
+                    &job.source_account_id,
+                    &target.account_id,
+                    &job.bucket,
+                    std::slice::from_ref(&job.key),
+                    "one_time",
+                    &target.access_mode,
+                )?;
+            }
+        }
         self.metadata
             .tombstone_manifest(old_id, "replaced by re-chunking")?;
         self.metadata.finish_rechunk(&job.id, "completed", None)?;
@@ -770,7 +785,7 @@ impl ObjectFormatService {
         Ok(())
     }
 
-    pub(super) async fn account_manager(
+    pub(crate) async fn account_manager(
         &self,
         account_id: &str,
     ) -> Result<Arc<TelegramTransportManager>, ObjectFormatError> {

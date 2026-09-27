@@ -341,7 +341,10 @@ export interface RechunkJob {
   bucket: string;
   key: string;
   object_id: string;
+  source_account_id: string;
   new_chunk_size: number;
+  apply_to_replicas: boolean;
+  replica_targets: {account_id: string; access_mode: string}[];
   state: string;
   chunks_total: number;
   chunks_done: number;

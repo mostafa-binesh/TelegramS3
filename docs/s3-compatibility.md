@@ -83,10 +83,15 @@ Selecting bucket rows expands to every committed object in those buckets before
 the jobs are queued; selecting object rows queues only those objects. Reads
 fail closed with a retry-later message until replacement chunks and the manifest
 are committed. The previous manifest remains recoverable until the normal
-evidence-first cleanup worker handles it. Existing physical replicas are
-attached to the previous manifest and are not automatically re-chunked; their
-old locations are cleaned up with that manifest, so operators must queue
-replication again after re-chunking when replica copies are required.
+evidence-first cleanup worker handles it. The operator chooses whether the job
+should apply to replicas. When enabled, the job snapshots the old physical and
+access-only account targets in schema v18 and queues durable follow-up jobs for
+the replacement manifest after the primary commit. When disabled, old replica
+locations remain attached only to the old manifest and are cleaned up with it;
+the replacement is therefore primary-only until it is replicated again.
+The additional-account wizard saves its account definition first, then sends
+`account_id` with every login flow so the code/password steps use that account's
+session and transport rather than the primary connection.
 
 - `/_admin` and `/_admin/api/*` are implemented as an authenticated operator
   surface served by the same Rust process.

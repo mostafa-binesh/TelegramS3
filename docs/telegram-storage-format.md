@@ -40,13 +40,15 @@ Each object is represented by:
 3. a local index row and journal entry
 4. optional multipart session and part rows while an upload is in progress
 
-Schema v17 additionally stores an account registry, durable replication jobs,
+Schema v18 additionally stores an account registry, durable replication jobs,
 selected-object replication scopes, replica/access locations, and re-chunk
 locks/jobs. Account rows include `download_enabled`, an additive read-selection
 policy that defaults to enabled for existing data. The `object_keys_json` migration is additive: an empty array keeps
 existing whole-bucket replication behavior, while a populated array limits a
 job to the selected keys. These rows are additive and do not rewrite existing
-object ownership. `ChunkRef.replicas` is optional so
+object ownership. Re-chunk jobs also persist their source account, the selected
+replica policy, and a snapshot of target account/mode pairs before the old
+manifest is replaced. `ChunkRef.replicas` is optional so
 schema-v2 manifests remain readable; each location identifies its account,
 mode (`replica` or `access`), peer, message, and document. The primary chunk
 location remains authoritative for legacy manifests.
@@ -62,6 +64,10 @@ worker. Replica locations belong to the old manifest;
 they are not silently treated as valid locations for the replacement chunk
 layout and are handled by the old manifest's evidence-first cleanup. Re-run
 replication after re-chunking when alternate physical copies are required.
+If the re-chunk policy is enabled, those follow-up replications are queued
+after the replacement manifest commits. If it is disabled, the replacement
+manifest intentionally has no old replica paths and round-robin resumes only
+after a new replication job completes.
 The shared reader filters primary and replica locations by the account download
 policy before its deterministic round-robin selection. If every location is
 disabled, the read fails closed with an unavailable-source error; no account

@@ -83,7 +83,9 @@ staging, and recovery artifacts, not committed payloads.
   revocable sessions, and a superadmin role for account management.
 - **Account pool and replication** — multiple isolated Telegram connections can
   be registered, including the same Telegram account with separate session
-  files. Buckets support one-time or automatic physical replication or
+  files. Each additional connection opens the same isolated four-step
+  onboarding wizard as the primary connection, without overwriting primary
+  draft values. Buckets support one-time or automatic physical replication or
   access-only sharing; replica/access badges and per-chunk account details are
   visible in Buckets, and ready replicas participate in round-robin reads. The
   Accounts workspace owns primary and additional connections together, with
@@ -98,7 +100,10 @@ staging, and recovery artifacts, not committed payloads.
   unavailability while their replacement manifest is published. The bucket
   browser also supports selecting visible buckets for guarded bulk deletion or
   re-chunking every committed object in those buckets. Re-chunking does not
-  automatically rebuild old physical replicas.
+  automatically rebuild old physical replicas. The confirmation dialog can
+  snapshot existing physical/access targets and queue durable follow-up jobs,
+  or explicitly choose the faster primary-only path; primary-only means the
+  replacement layout has no replica read paths until it is replicated again.
 - **Session recovery** — an expired admin session synchronizes with the
   guest-safe session endpoint and returns to the login screen instead of
   leaving a stale “not authenticated” error in the SPA.

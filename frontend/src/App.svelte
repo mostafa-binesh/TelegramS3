@@ -171,6 +171,7 @@
   let showRechunkModal = false;
   let rechunkScope: 'objects' | 'buckets' = 'objects';
   let newChunkSizeMiB = '8';
+  let applyRechunkToReplicas = true;
   let moveBucket = '';
   let movePrefix = '';
 
@@ -569,7 +570,7 @@
         for (const bucket of bucketsToRechunk) {
           const keys = await listAllBucketObjectKeys(bucket);
           if (!keys.length) continue;
-          await queueRechunk(session?.csrf_token, { bucket, keys, new_chunk_size: newChunkSize });
+          await queueRechunk(session?.csrf_token, { bucket, keys, new_chunk_size: newChunkSize, apply_to_replicas: applyRechunkToReplicas });
           objectCount += keys.length;
         }
         selectedBuckets = [];
@@ -580,7 +581,7 @@
         await refreshBuckets();
         return;
       }
-      await queueRechunk(session?.csrf_token, { bucket: selectedBucket, keys: [...selectedKeys], new_chunk_size: newChunkSize });
+      await queueRechunk(session?.csrf_token, { bucket: selectedBucket, keys: [...selectedKeys], new_chunk_size: newChunkSize, apply_to_replicas: applyRechunkToReplicas });
       selectedKeys = [];
       showRechunkModal = false;
       notifySuccess('Re-chunking queued. The selected objects stay unavailable until each job completes.');
@@ -1336,7 +1337,7 @@
     {/if}
   {/if}
 
-  {#if AdminModalsComponent}<svelte:component this={AdminModalsComponent} bind:showBucket={showBucketModal} bind:showFolder={showFolderModal} bind:showUpload={showUploadModal} bind:showOperator={showOperatorModal} bind:showMove={showMoveModal} bind:showShare={showShareModal} bind:showDelete={showDeleteModal} bind:showRechunk={showRechunkModal} bind:newBucket bind:newFolder bind:newUsername bind:newDisplay bind:newPassword bind:newRole bind:moveBucket bind:movePrefix bind:shareExpiry bind:shareDescription bind:shareUrl bind:newChunkSizeMiB rechunkScope={rechunkScope} selectedBucket={selectedBucket} currentPrefix={currentPrefix} shareTarget={shareTarget} shareError={shareError} shareBusy={shareBusy} deleteTarget={deleteTarget} {busy} uploadComponent={UploadBoxComponent} csrf={session?.csrf_token} onCreateBucket={makeBucket} onCreateFolder={makeFolder} onCreateOperator={makeUser} onCreateShare={createShareFromModal} onConfirmDelete={confirmDelete} onMove={moveSelected} onRechunk={queueSelectedRechunk} onUploaded={refreshObjects}/>{/if}
+  {#if AdminModalsComponent}<svelte:component this={AdminModalsComponent} bind:showBucket={showBucketModal} bind:showFolder={showFolderModal} bind:showUpload={showUploadModal} bind:showOperator={showOperatorModal} bind:showMove={showMoveModal} bind:showShare={showShareModal} bind:showDelete={showDeleteModal} bind:showRechunk={showRechunkModal} bind:newBucket bind:newFolder bind:newUsername bind:newDisplay bind:newPassword bind:newRole bind:moveBucket bind:movePrefix bind:shareExpiry bind:shareDescription bind:shareUrl bind:newChunkSizeMiB bind:applyRechunkToReplicas rechunkScope={rechunkScope} selectedBucket={selectedBucket} currentPrefix={currentPrefix} shareTarget={shareTarget} shareError={shareError} shareBusy={shareBusy} deleteTarget={deleteTarget} {busy} uploadComponent={UploadBoxComponent} csrf={session?.csrf_token} onCreateBucket={makeBucket} onCreateFolder={makeFolder} onCreateOperator={makeUser} onCreateShare={createShareFromModal} onConfirmDelete={confirmDelete} onMove={moveSelected} onRechunk={queueSelectedRechunk} onUploaded={refreshObjects}/>{/if}
   <SharedLinksModal open={showSharedLinksModal} target={sharedLinksTarget} links={sharedLinks} busy={sharedLinksBusy} error={sharedLinksError} onClose={closeSharedLinksModal} onUpdateExpiry={changeSharedLinkExpiry} onRevoke={revokeSharedLink}/>
 
   <ReplicaDetailsModal bind:open={showReplicaModal} title={replicaTitle} items={replicaItems} loading={replicaLoading} error={replicaError} csrf={session?.csrf_token} bucket={replicaBucket} scopeKeys={replicaScopeKeys} scopeLabel={replicaScopeLabel}/>

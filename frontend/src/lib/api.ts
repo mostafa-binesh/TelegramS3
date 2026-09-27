@@ -267,7 +267,7 @@ export function listRechunkJobs(csrf?: string | null) {
   return requestJson<{jobs: RechunkJob[]}>('/rechunk', csrf);
 }
 
-export function queueRechunk(csrf: string | null | undefined, body: {bucket: string; keys: string[]; new_chunk_size: number}) {
+export function queueRechunk(csrf: string | null | undefined, body: {bucket: string; keys: string[]; new_chunk_size: number; apply_to_replicas?: boolean}) {
   return requestJson<{jobs: RechunkJob[]}>('/rechunk', csrf, {method: 'POST', body});
 }
 
@@ -676,10 +676,10 @@ export function getWizardState(csrf?: string | null) {
   return requestJson<WizardState>('/telegram/wizard/state', csrf);
 }
 
-export function wizardBegin(phone: string | undefined, flowId: string, csrf?: string | null) {
+export function wizardBegin(phone: string | undefined, flowId: string, csrf?: string | null, accountId?: string | null) {
   return requestJson<WizardState>('/telegram/wizard/begin', csrf, {
     method: 'POST',
-    body: phone === undefined ? { flow_id: flowId, replace: true } : { phone, flow_id: flowId, replace: true }
+    body: {...(phone === undefined ? {} : {phone}), flow_id: flowId, replace: true, ...(accountId ? {account_id: accountId} : {})}
   });
 }
 

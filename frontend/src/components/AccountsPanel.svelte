@@ -56,6 +56,11 @@
   let phoneConfirmation = '';
   let removeBusy = false;
   let removeError = '';
+  let addWizard = false;
+  let addWizardBusy = false;
+  let addWizardError = '';
+  let addWizardMessage = '';
+  let addWizardAccountId: string | null = null;
 
   $: selectedAccount = accounts.find((account) => account.id === selectedAccountId) ?? null;
   $: isPrimary = Boolean(selectedAccount && accounts[0]?.id === selectedAccount.id);
@@ -72,7 +77,11 @@
     selectionTouched = true;
     selectedAccountId = account?.id ?? null;
     draftDirty = false;
-    onToggleWizard(false);
+    onToggleWizard(!account);
+    addWizard = !account;
+    addWizardError = '';
+    addWizardMessage = '';
+    addWizardAccountId = null;
     if (!account) draft = emptyDraft();
     else if (accounts[0]?.id === account.id) draft = primaryDraft();
     else draft = {label: account.label, phone: account.phone || '', apiId: '', apiHash: '', sessionPath: '', storageChatId: account.storage_chat_id || '', proxyUrl: '', proxyUsername: '', proxyPassword: '', proxyMode: 'auto', downloadEnabled: account.download_enabled};
@@ -111,6 +120,40 @@
       await refresh();
     } catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to save account'; }
     finally { busy = false; }
+  }
+
+  async function saveAddWizard(phone: string) {
+    if (!draft.label.trim()) throw new Error('Give this Telegram connection a label before continuing.');
+    addWizardBusy = true;
+    addWizardError = '';
+    addWizardMessage = '';
+    try {
+      const result = await saveAccount(csrf, {label: draft.label.trim(), phone: phone.trim() || undefined, telegram_api_id: draft.apiId.trim() || undefined, telegram_api_hash: draft.apiHash || undefined, telegram_session_path: draft.sessionPath.trim() || undefined, telegram_storage_chat_id: draft.storageChatId.trim() || undefined, telegram_proxy_url: draft.proxyUrl.trim() || undefined, telegram_proxy_username: draft.proxyUsername.trim() || undefined, telegram_proxy_password: draft.proxyPassword || undefined, telegram_proxy_mode: draft.proxyMode, download_enabled: draft.downloadEnabled});
+      addWizardAccountId = result.account.id;
+      addWizardMessage = 'Connection settings saved. Telegram sign-in is ready.';
+      return result.account.id;
+    } catch (cause) {
+      addWizardError = cause instanceof Error ? cause.message : 'Unable to save account';
+      throw cause;
+    } finally { addWizardBusy = false; }
+  }
+
+  async function finishAddWizard() {
+    const createdId = addWizardAccountId;
+    addWizard = false;
+    selectedAccountId = createdId;
+    selectionTouched = true;
+    draftDirty = false;
+    message = 'Telegram account authorized and added to the account pool.';
+    await refresh();
+  }
+
+  function closeAddWizard() {
+    addWizard = false;
+    addWizardError = '';
+    addWizardMessage = '';
+    addWizardAccountId = null;
+    selectAccount(accounts[0] ?? null);
   }
 
   async function removeAccount(account: AccountInfo) {
@@ -182,7 +225,9 @@
       </div>{/if}
     </section>
 
-    {#if showWizard && wizardComponent && isPrimary}
+    {#if addWizard && wizardComponent && isAdding}
+      <svelte:component this={wizardComponent} csrf={session?.csrf_token} bind:accountLabel={draft.label} showAccountLabel={true} wizardTitle="Add another Telegram account" wizardSubtitle="Create an isolated Telegram connection without changing your primary account." bind:telegramApiId={draft.apiId} bind:telegramApiHash={draft.apiHash} bind:telegramStorageChatId={draft.storageChatId} bind:telegramProxyUrl={draft.proxyUrl} bind:telegramProxyUsername={draft.proxyUsername} bind:telegramProxyPassword={draft.proxyPassword} bind:telegramProxyMode={draft.proxyMode} settingsBusy={addWizardBusy} settingsError={addWizardError} settingsMessage={addWizardMessage} onSave={saveAddWizard} onDone={finishAddWizard} onClose={closeAddWizard}/>
+    {:else if showWizard && wizardComponent && isPrimary}
       <svelte:component this={wizardComponent} csrf={session?.csrf_token} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode {settingsBusy} {settingsError} {settingsMessage} {onSave} onDone={onWizardDone} onClose={onWizardClose}/>
     {:else}
       <section class="card surface editor-card" aria-label={isAdding ? 'Add account' : `Edit ${selectedAccount?.label ?? 'account'}`}>
@@ -223,6 +268,8 @@
 {/snippet}
 
 <style>
-  .page-grid{display:grid;gap:18px}.hero{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}.hero h2,.card h2,.card h3{margin:.25rem 0;color:#203b57}.count-pill{display:inline-flex;align-items:center;padding:7px 11px;border-radius:999px;background:#e5f5f0;color:#17604a;font-size:.75rem;font-weight:800;white-space:nowrap}.account-tabs{display:flex;gap:10px;padding:6px;border:1px solid #d7e2ee;border-radius:18px;background:#f5f8fc;box-shadow:0 8px 24px rgba(23,43,77,.05)}.account-tabs button{display:flex;align-items:center;gap:11px;flex:1;padding:11px 14px;border:1px solid transparent;border-radius:13px;background:transparent;color:#5d718b;text-align:left}.account-tabs button.active{border-color:#cbdced;background:#fff;color:#17345a;box-shadow:0 5px 14px rgba(23,58,96,.08)}.account-tabs button:hover:not(:disabled){background:#fff;color:#17345a}.account-tabs strong,.account-tabs small{display:block}.account-tabs strong{font-size:.86rem}.account-tabs small{margin-top:2px;color:#8191a5;font-size:.72rem}.tab-icon{display:grid;place-items:center;width:32px;height:32px;border-radius:10px;background:#eaf3ff;color:#2874b7;font-size:1.1rem;font-weight:800}.tab-icon.green{background:#e8f7f1;color:#1f8b69}.tab-icon.amber{background:#fff3d6;color:#bd791e}.notice{padding:12px 16px;border:1px solid #bde4d2;border-radius:12px;background:#f1fcf6;color:#17604a}.section-head{align-items:flex-start}.account-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.account-card{position:relative;display:flex;align-items:flex-start;gap:12px;min-height:116px;padding:15px;border:1px solid #dce7f0;border-radius:16px;background:linear-gradient(145deg,#fff,#f8fbfe);color:inherit;text-align:left;cursor:pointer;transition:transform 140ms ease,box-shadow 140ms ease,border-color 140ms ease}.account-card:hover,.account-card.chosen{border-color:#8dc3dc;box-shadow:0 12px 26px rgba(29,91,132,.12);transform:translateY(-1px)}.account-card.chosen{background:#f2faff}.account-card-top{display:flex;flex-direction:column;align-items:center;gap:10px}.account-icon{display:grid;place-items:center;width:42px;height:42px;border-radius:14px;background:#dceefe;color:#216c9e;font-weight:850;font-size:1.1rem}.health-dot{width:9px;height:9px;border-radius:50%;background:#c64747;box-shadow:0 0 0 3px #fff}.health-dot.online{background:#168466}.account-card-copy{display:grid;gap:5px;min-width:0}.account-card-copy strong{color:#203b57;overflow-wrap:anywhere}.account-card-copy small{color:var(--muted);font-size:.72rem;overflow-wrap:anywhere}.primary-tag{color:#28679d!important;font-weight:800}.account-card-arrow{margin-left:auto;color:#3a8ab7;font-weight:850}.add-card{align-items:center;justify-content:center;border-style:dashed;background:#fbfdff}.add-mark{display:grid;place-items:center;width:42px;height:42px;border-radius:14px;background:#e8f7f1;color:#1f8b69;font-size:1.55rem}.editor-card{padding:22px}.editor-card>.section-head{margin-bottom:20px}.editor-card h2{max-width:760px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px;margin-bottom:15px}.form-grid label{display:grid;gap:6px;color:#426079;font-size:.75rem;font-weight:800}.form-grid input,.form-grid select{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:#fff;color:var(--ink);font:inherit;font-weight:500}.download-policy{display:flex;align-items:flex-start;gap:10px;padding:14px;border:1px solid #dce7f0;border-radius:12px;background:#f8fbfe;color:#203b57}.download-policy input{margin-top:3px;accent-color:#287abe}.download-policy strong,.download-policy small{display:block}.download-policy small{margin-top:4px;color:var(--muted);font-size:.72rem;font-weight:500}.editor-message{margin-top:13px;color:#17604a}.message-error{color:#a63333}.editor-actions{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-top:17px}.editor-actions>div{display:flex;gap:8px;align-items:center}.danger{color:#a63333}.account-confirmation{display:grid;gap:4px;padding:14px 16px;border:1px solid #f0cccc;border-radius:14px;background:#fff7f7}.account-confirmation strong{font-size:1.1rem;letter-spacing:.02em;color:#7d2020}.account-confirmation>span:last-child{font-size:.8rem;color:var(--muted)}.checkbox-row{display:flex;align-items:center;gap:10px;font-weight:700}.checkbox-row input{flex:0 0 auto;width:18px;height:18px;margin:0;accent-color:#b33838}.checkbox-row span{line-height:1.35}.job-list{display:grid;gap:9px}.job-row{display:flex;align-items:center;justify-content:space-between;gap:13px;padding:13px;border:1px solid #e0eaf1;border-radius:13px;background:#fbfdff}.job-row strong{color:#203b57}.job-row small{display:block;color:var(--muted);font-size:.72rem;overflow-wrap:anywhere}.job-progress{display:grid;gap:4px;min-width:180px}.job-progress progress{width:100%;accent-color:var(--accent)}.empty{padding:18px 0;color:var(--muted)}.maintenance-intro{padding:22px}
+  .add-card{align-items:flex-start;justify-content:center;gap:10px;border-style:dashed;background:linear-gradient(145deg,#fbfffe,#f5fbff)}.add-card>span:last-child{display:grid;gap:4px;align-content:center}.add-card>span:last-child strong{color:#17604a}.add-card>span:last-child small{max-width:18ch;color:#6e8295;line-height:1.35}
+  .account-card-grid{min-width:0}.account-card{box-sizing:border-box;min-width:0;max-width:100%;width:100%}.account-card-copy{min-width:0;overflow-wrap:anywhere}
+  .checkbox-row{display:flex;align-items:center;gap:10px;font-weight:700;line-height:1.35}.checkbox-row input{flex:0 0 auto;width:18px;height:18px;margin:0;align-self:center;accent-color:var(--danger)}.checkbox-row span{display:block;line-height:1.35}
   @media(max-width:700px){.hero,.job-row{align-items:stretch;flex-direction:column}.account-tabs{overflow:auto}.account-tabs button{min-width:170px}.form-grid{grid-template-columns:1fr}.editor-actions{align-items:stretch;flex-direction:column}.editor-actions>div{justify-content:flex-end}.job-progress{min-width:0}}
 </style>

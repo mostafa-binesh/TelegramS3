@@ -63,11 +63,20 @@ pub struct AdminUiState {
     config: AppConfig,
     object_format: Arc<ObjectFormatService>,
     transport_manager: Arc<TelegramTransportManager>,
-    /// Process-wide, single in-flight onboarding flow state.
-    wizard_driver: Arc<tokio::sync::Mutex<TelegramLoginDriver>>,
+    /// Process-wide, single in-flight onboarding flow state. The selected
+    /// manager is retained with the driver so an additional account never
+    /// falls back to the primary transport between wizard steps.
+    wizard_session: Arc<tokio::sync::Mutex<WizardSession>>,
     cookie_secret: String,
     ui_dist_dir: PathBuf,
     limiter: LoginLimiter,
+}
+
+#[derive(Default)]
+struct WizardSession {
+    driver: TelegramLoginDriver,
+    account_id: Option<String>,
+    manager: Option<Arc<TelegramTransportManager>>,
 }
 
 // ---- wire types -------------------------------------------------------------
@@ -212,6 +221,8 @@ struct RechunkRequest {
     #[serde(default)]
     keys: Vec<String>,
     new_chunk_size: u64,
+    #[serde(default)]
+    apply_to_replicas: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,7 +421,7 @@ impl AdminUiState {
             config,
             object_format,
             transport_manager,
-            wizard_driver: Arc::new(tokio::sync::Mutex::new(TelegramLoginDriver::new())),
+            wizard_session: Arc::new(tokio::sync::Mutex::new(WizardSession::default())),
             cookie_secret,
             ui_dist_dir,
             limiter: LoginLimiter::new(),
@@ -812,10 +823,12 @@ impl AdminUiState {
         }
         let mut jobs = Vec::with_capacity(keys.len());
         for key in keys {
-            match self
-                .store()
-                .queue_rechunk(&body.bucket, &key, body.new_chunk_size)
-            {
+            match self.store().queue_rechunk(
+                &body.bucket,
+                &key,
+                body.new_chunk_size,
+                body.apply_to_replicas,
+            ) {
                 Ok(job) => jobs.push(job),
                 Err(error) => return json_error(StatusCode::CONFLICT, &error.to_string()),
             }
@@ -1960,10 +1973,17 @@ impl AdminUiState {
     // ---- telegram wizard ----------------------------------------------------
 
     async fn wizard_state(&self, _principal: &ResolvedPrincipal) -> Response<Body> {
-        let driver = self.wizard_driver.lock().await;
-        let snapshot = driver.snapshot();
-        let health = self.telegram_health_snapshot().await;
-        let authorized = driver.is_authorized()
+        let session = self.wizard_session.lock().await;
+        let snapshot = session.driver.snapshot();
+        let manager = session.manager.clone();
+        let authorized_by_driver = session.driver.is_authorized();
+        drop(session);
+        let health = if let Some(manager) = manager {
+            manager.health().await
+        } else {
+            self.telegram_health_snapshot().await
+        };
+        let authorized = authorized_by_driver
             || matches!(health.status.session_state, SessionState::Authorized)
             || matches!(
                 health.state,
@@ -1994,6 +2014,7 @@ impl AdminUiState {
             phone,
             flow_id,
             replace,
+            account_id,
         }) = read_wizard_begin_request(request).await
         else {
             return json_error(StatusCode::BAD_REQUEST, "a login flow id is required");
@@ -2001,20 +2022,47 @@ impl AdminUiState {
         let Some(flow_id) = flow_id.filter(|value| !value.trim().is_empty()) else {
             return json_error(StatusCode::BAD_REQUEST, "a login flow id is required");
         };
-        let mut driver = self.wizard_driver.lock().await;
-        if driver.is_authorized() {
-            return json_response(
-                StatusCode::OK,
-                self.wizard_wire(
-                    LoginStage::Authorized,
-                    true,
-                    None,
-                    Some("already authorized"),
-                )
-                .await,
-            );
+        let account_id = account_id.filter(|value| !value.trim().is_empty());
+        let selected_manager = if let Some(account_id) = account_id.as_deref() {
+            if self
+                .store()
+                .telegram_account(account_id)
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                return json_error(StatusCode::NOT_FOUND, "account not found");
+            }
+            match self.object_format.account_manager(account_id).await {
+                Ok(manager) => Some(manager),
+                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error.to_string()),
+            }
+        } else {
+            None
+        };
+        let mut session = self.wizard_session.lock().await;
+        if session.driver.is_authorized() {
+            if replace {
+                session.driver.reset();
+            } else {
+                return json_response(
+                    StatusCode::OK,
+                    self.wizard_wire(
+                        LoginStage::Authorized,
+                        true,
+                        None,
+                        Some("already authorized"),
+                    )
+                    .await,
+                );
+            }
         }
-        let transport = match self.transport_manager.current().await {
+        session.account_id = account_id.clone();
+        session.manager = selected_manager.clone();
+        let transport_manager = selected_manager
+            .clone()
+            .unwrap_or_else(|| Arc::clone(&self.transport_manager));
+        let transport = match transport_manager.current().await {
             Ok(transport) => transport,
             Err(error) => {
                 return driver_error_response(&LoginDriverError::Unauthorized(error.to_string()));
@@ -2022,26 +2070,29 @@ impl AdminUiState {
         };
         let owner = &principal.user.username;
         let phone_for_confirmation = phone.clone();
-        match driver
+        match session
+            .driver
             .begin(&transport, phone, &flow_id, replace, owner)
             .await
         {
             Ok(step) => {
-                if let Some(phone) = phone_for_confirmation.as_deref()
+                if account_id.is_none()
+                    && let Some(phone) = phone_for_confirmation.as_deref()
                     && let Err(error) = self.store().set_telegram_account_phone(phone)
                 {
                     eprintln!("failed to store Telegram account phone: {error}");
                 }
-                if driver.is_authorized() {
-                    self.finalize_wizard_success().await;
+                if session.driver.is_authorized() {
+                    self.finalize_wizard_success(selected_manager.clone()).await;
                 }
                 json_response(
                     StatusCode::OK,
-                    self.wizard_wire(
+                    self.wizard_wire_for(
                         step.stage,
-                        driver.is_authorized(),
+                        session.driver.is_authorized(),
                         None,
                         Some(&step.message),
+                        selected_manager,
                     )
                     .await,
                 )
@@ -2062,8 +2113,12 @@ impl AdminUiState {
         let Some(flow_id) = flow_id.filter(|value| !value.trim().is_empty()) else {
             return driver_error_response(&LoginDriverError::FlowMismatch);
         };
-        let mut driver = self.wizard_driver.lock().await;
-        let transport = match self.transport_manager.current().await {
+        let mut session = self.wizard_session.lock().await;
+        let transport_manager = session
+            .manager
+            .clone()
+            .unwrap_or_else(|| Arc::clone(&self.transport_manager));
+        let transport = match transport_manager.current().await {
             Ok(transport) => transport,
             Err(error) => {
                 return driver_error_response(&LoginDriverError::Unauthorized(error.to_string()));
@@ -2072,21 +2127,27 @@ impl AdminUiState {
         let Some(code) = code else {
             return driver_error_response(&LoginDriverError::MissingCode);
         };
-        if driver.owner_name() != Some(principal.user.username.as_str()) {
+        if session.driver.owner_name() != Some(principal.user.username.as_str()) {
             return driver_error_response(&LoginDriverError::FlowMismatch);
         }
-        match driver.submit_code(&transport, &code, &flow_id).await {
+        match session
+            .driver
+            .submit_code(&transport, &code, &flow_id)
+            .await
+        {
             Ok(step) => {
-                if driver.is_authorized() {
-                    self.finalize_wizard_success().await;
+                let manager = session.manager.clone();
+                if session.driver.is_authorized() {
+                    self.finalize_wizard_success(manager.clone()).await;
                 }
                 json_response(
                     StatusCode::OK,
-                    self.wizard_wire(
+                    self.wizard_wire_for(
                         step.stage,
-                        driver.is_authorized(),
+                        session.driver.is_authorized(),
                         None,
                         Some(&step.message),
+                        manager,
                     )
                     .await,
                 )
@@ -2108,8 +2169,12 @@ impl AdminUiState {
         let Some(flow_id) = flow_id.filter(|value| !value.trim().is_empty()) else {
             return driver_error_response(&LoginDriverError::FlowMismatch);
         };
-        let mut driver = self.wizard_driver.lock().await;
-        let transport = match self.transport_manager.current().await {
+        let mut session = self.wizard_session.lock().await;
+        let transport_manager = session
+            .manager
+            .clone()
+            .unwrap_or_else(|| Arc::clone(&self.transport_manager));
+        let transport = match transport_manager.current().await {
             Ok(transport) => transport,
             Err(error) => {
                 return driver_error_response(&LoginDriverError::Unauthorized(error.to_string()));
@@ -2118,24 +2183,27 @@ impl AdminUiState {
         let Some(password) = password else {
             return driver_error_response(&LoginDriverError::MissingPassword);
         };
-        if driver.owner_name() != Some(principal.user.username.as_str()) {
+        if session.driver.owner_name() != Some(principal.user.username.as_str()) {
             return driver_error_response(&LoginDriverError::FlowMismatch);
         }
-        match driver
+        match session
+            .driver
             .submit_password(&transport, &password, &flow_id)
             .await
         {
             Ok(step) => {
-                if driver.is_authorized() {
-                    self.finalize_wizard_success().await;
+                let manager = session.manager.clone();
+                if session.driver.is_authorized() {
+                    self.finalize_wizard_success(manager.clone()).await;
                 }
                 json_response(
                     StatusCode::OK,
-                    self.wizard_wire(
+                    self.wizard_wire_for(
                         step.stage,
-                        driver.is_authorized(),
+                        session.driver.is_authorized(),
                         None,
                         Some(&step.message),
+                        manager,
                     )
                     .await,
                 )
@@ -2152,28 +2220,40 @@ impl AdminUiState {
         let flow_id = read_wizard_cancel_request(request)
             .await
             .and_then(|body| body.flow_id);
-        let mut driver = self.wizard_driver.lock().await;
-        match driver.cancel(flow_id.as_deref(), &principal.user.username) {
-            Ok(()) => json_response(StatusCode::OK, serde_json::json!({ "ok": true })),
+        let mut session = self.wizard_session.lock().await;
+        match session
+            .driver
+            .cancel(flow_id.as_deref(), &principal.user.username)
+        {
+            Ok(()) => {
+                session.account_id = None;
+                session.manager = None;
+                json_response(StatusCode::OK, serde_json::json!({ "ok": true }))
+            }
             Err(error) => driver_error_response(&error),
         }
     }
 
     /// After a successful phone/code/password login, reflect the now-authorised
-    /// session in the stored status and hot-swap the live transport so later
-    /// object operations use the refreshed Telegram session immediately.
-    async fn finalize_wizard_success(&self) {
-        let _ = self.transport_manager.refresh().await;
+    /// session in the selected account's transport manager.
+    async fn finalize_wizard_success(&self, manager: Option<Arc<TelegramTransportManager>>) {
+        let manager = manager.unwrap_or_else(|| Arc::clone(&self.transport_manager));
+        let _ = manager.refresh().await;
     }
 
-    async fn wizard_wire(
+    async fn wizard_wire_for(
         &self,
         stage: LoginStage,
         authorized: bool,
         owner: Option<&str>,
         message: Option<&str>,
+        manager: Option<Arc<TelegramTransportManager>>,
     ) -> serde_json::Value {
-        let health = self.telegram_health_snapshot().await;
+        let health = if let Some(manager) = manager {
+            manager.health().await
+        } else {
+            self.telegram_health_snapshot().await
+        };
         wizard_wire_value(
             stage,
             authorized,
@@ -2185,6 +2265,17 @@ impl AdminUiState {
             ),
             &health,
         )
+    }
+
+    async fn wizard_wire(
+        &self,
+        stage: LoginStage,
+        authorized: bool,
+        owner: Option<&str>,
+        message: Option<&str>,
+    ) -> serde_json::Value {
+        self.wizard_wire_for(stage, authorized, owner, message, None)
+            .await
     }
 
     async fn telegram_settings(&self, _principal: &ResolvedPrincipal) -> Response<Body> {
@@ -3039,6 +3130,7 @@ struct WizardBeginRequest {
     flow_id: Option<String>,
     #[serde(default)]
     replace: bool,
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

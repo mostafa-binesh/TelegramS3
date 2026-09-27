@@ -98,6 +98,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_multi_account_schema(connection)?;
         ensure_account_download_policy(connection)?;
         ensure_replication_scope_schema(connection)?;
+        ensure_rechunk_replica_schema(connection)?;
         return Ok(());
     }
 
@@ -364,6 +365,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_multi_account_schema(connection)?;
     ensure_account_download_policy(connection)?;
     ensure_replication_scope_schema(connection)?;
+    ensure_rechunk_replica_schema(connection)?;
     Ok(())
 }
 
@@ -436,7 +438,10 @@ fn ensure_multi_account_schema(connection: &mut Connection) -> Result<(), Metada
             bucket TEXT NOT NULL,
             object_key TEXT NOT NULL,
             object_id TEXT NOT NULL,
+            source_account_id TEXT NOT NULL DEFAULT 'legacy',
             new_chunk_size INTEGER NOT NULL,
+            apply_to_replicas INTEGER NOT NULL DEFAULT 0,
+            replica_targets_json TEXT NOT NULL DEFAULT '[]',
             state TEXT NOT NULL DEFAULT 'queued',
             chunks_total INTEGER NOT NULL DEFAULT 0,
             chunks_done INTEGER NOT NULL DEFAULT 0,
@@ -514,6 +519,30 @@ fn ensure_replication_scope_schema(connection: &mut Connection) -> Result<(), Me
     if !has_column {
         connection.execute(
             "ALTER TABLE replication_jobs ADD COLUMN object_keys_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Re-chunk replica policy is additive. Existing jobs remain primary-only;
+/// new jobs snapshot their replica targets before replacing the old manifest.
+fn ensure_rechunk_replica_schema(connection: &mut Connection) -> Result<(), MetadataError> {
+    if !table_has_column(connection, "rechunk_jobs", "source_account_id")? {
+        connection.execute(
+            "ALTER TABLE rechunk_jobs ADD COLUMN source_account_id TEXT NOT NULL DEFAULT 'legacy'",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "rechunk_jobs", "apply_to_replicas")? {
+        connection.execute(
+            "ALTER TABLE rechunk_jobs ADD COLUMN apply_to_replicas INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "rechunk_jobs", "replica_targets_json")? {
+        connection.execute(
+            "ALTER TABLE rechunk_jobs ADD COLUMN replica_targets_json TEXT NOT NULL DEFAULT '[]'",
             [],
         )?;
     }
@@ -1082,6 +1111,58 @@ mod tests {
                 .telegram_account_download_enabled("old-account")
                 .expect("policy")
         );
+    }
+
+    #[test]
+    fn migration_from_version_seventeen_adds_rechunk_replica_policy() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("metadata.sqlite");
+        {
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE schema_version (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        version INTEGER NOT NULL,
+                        applied_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_version (id, version, applied_at)
+                    VALUES (1, 17, '2026-09-28T00:00:00Z');
+                    CREATE TABLE rechunk_jobs (
+                        id TEXT PRIMARY KEY,
+                        bucket TEXT NOT NULL,
+                        object_key TEXT NOT NULL,
+                        object_id TEXT NOT NULL,
+                        new_chunk_size INTEGER NOT NULL,
+                        state TEXT NOT NULL DEFAULT 'queued',
+                        chunks_total INTEGER NOT NULL DEFAULT 0,
+                        chunks_done INTEGER NOT NULL DEFAULT 0,
+                        bytes_done INTEGER NOT NULL DEFAULT 0,
+                        error TEXT,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+                    "#,
+                )
+                .expect("seed");
+        }
+
+        let store = MetadataStore::open(&path).expect("migrate");
+        assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+        store
+            .with_connection(|connection| {
+                for column in ["source_account_id", "apply_to_replicas", "replica_targets_json"] {
+                    let found: bool = connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('rechunk_jobs') WHERE name=?1)",
+                        [column],
+                        |row| row.get(0),
+                    )?;
+                    assert!(found, "missing migrated column {column}");
+                }
+                Ok(())
+            })
+            .expect("columns");
     }
 
     #[test]

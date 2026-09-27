@@ -118,6 +118,12 @@ impl TelegramLoginDriver {
         self.stage == LoginStage::Authorized
     }
 
+    /// Start a fresh onboarding flow after a previous flow completed. The
+    /// wizard UI may be reused for primary and additional accounts.
+    pub fn reset(&mut self) {
+        self.cancel_internal();
+    }
+
     pub fn owner_name(&self) -> Option<&str> {
         self.owner.as_deref()
     }

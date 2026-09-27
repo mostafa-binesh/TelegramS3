@@ -2,11 +2,12 @@
 
 ## Local Metadata Lost
 
-Schema v17 account, scoped-replication, and maintenance rows are part of the
+Schema v18 account, scoped-replication, and maintenance rows are part of the
 recovery boundary.
 Back up `metadata.sqlite` before adding or scheduling replication. Restoring
 the database restores account definitions, replica/access maps, pending job
-progress, and re-chunk locks; queued workers resume after restart. Inspect
+progress, re-chunk replica policy/target snapshots, and re-chunk locks; queued
+workers resume after restart. Inspect
 failed replication or re-chunk jobs before retrying them. An access-only record
 is not a second copy: it is recoverable only while the target session can read
 the shared Telegram chat.
@@ -15,6 +16,15 @@ The admin bucket-level re-chunk action expands selected buckets into their
 committed objects and queues independent durable jobs. A restart can therefore
 resume or inspect each object job separately; it does not create a single
 all-or-nothing bucket transaction.
+
+For a re-chunk job with “apply to replicas” enabled, schema v18 records the
+source account and the old ready replica/access targets before replacement.
+After the new primary manifest commits, the worker queues one-time follow-up
+replication jobs for those targets. A crash before those jobs finish leaves the
+new object readable through its primary account and the durable replication
+queue visible for retry. A primary-only job deliberately does not carry old
+locations to the new chunk layout; replicate the object again if alternate
+download paths are needed.
 
 The v17 account migration adds `download_enabled` with a default of `1`, so
 existing accounts remain usable without rewriting manifests or replica rows.
