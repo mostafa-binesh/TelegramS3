@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-## 0.7.5-rc.3 - 2026-09-27
+## 0.7.5 - 2026-09-27
+
+Stable release promoted from `v0.7.5-rc.3`.
 
 ### Bounded parallel download prefetching
 

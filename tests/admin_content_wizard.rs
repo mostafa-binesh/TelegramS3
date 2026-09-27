@@ -234,7 +234,10 @@ async fn admin_content_roundtrip_and_login_wizard_phases() {
         br#"{"chunk_size":2097152,"download_prefetch_chunks":5}"#,
     )
     .await;
-    assert_eq!(invalid_storage_update.status_code, 400, "invalid prefetch rejected");
+    assert_eq!(
+        invalid_storage_update.status_code, 400,
+        "invalid prefetch rejected"
+    );
 
     // ---- content route, backed by a freshly created S3 bucket ----------------
     let bucket = format!("wiz-{}", uuid::Uuid::new_v4().simple());
