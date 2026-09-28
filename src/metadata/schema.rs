@@ -95,6 +95,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_account_download_policy(connection)?;
         ensure_replication_scope_schema(connection)?;
         ensure_rechunk_replica_schema(connection)?;
+        ensure_integrity_recovery_events_schema(connection)?;
         return Ok(());
     }
 
@@ -363,6 +364,28 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_account_download_policy(connection)?;
     ensure_replication_scope_schema(connection)?;
     ensure_rechunk_replica_schema(connection)?;
+    ensure_integrity_recovery_events_schema(connection)?;
+    Ok(())
+}
+
+fn ensure_integrity_recovery_events_schema(
+    connection: &mut Connection,
+) -> Result<(), MetadataError> {
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS integrity_recovery_events (
+            fingerprint TEXT PRIMARY KEY,
+            issue_json TEXT NOT NULL,
+            state TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_integrity_recovery_events_updated
+            ON integrity_recovery_events(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_integrity_recovery_events_state
+            ON integrity_recovery_events(state, updated_at DESC);
+        "#,
+    )?;
     Ok(())
 }
 
@@ -994,6 +1017,7 @@ mod tests {
                     "replication_jobs",
                     "rechunk_jobs",
                     "rechunk_locks",
+                    "integrity_recovery_events",
                 ] {
                     let found: Option<String> = connection
                         .query_row(
@@ -1216,6 +1240,42 @@ mod tests {
                 .expect("prefetch setting"),
             Some(2)
         );
+    }
+
+    #[test]
+    fn migration_from_version_nineteen_adds_integrity_recovery_events() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("metadata.sqlite");
+        {
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE schema_version (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        version INTEGER NOT NULL,
+                        applied_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_version (id, version, applied_at)
+                    VALUES (1, 19, '2026-09-28T00:00:00Z');
+                    "#,
+                )
+                .expect("seed");
+        }
+
+        let store = MetadataStore::open(&path).expect("migrate");
+        assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+        store
+            .with_connection(|connection| {
+                let found: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='integrity_recovery_events')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert!(found);
+                Ok(())
+            })
+            .expect("event table");
     }
 
     #[test]

@@ -176,6 +176,10 @@ export interface RecoveryIssue {
   kind: string;
   summary: string;
   details: string[];
+  account_id?: string | null;
+  account_label?: string | null;
+  chunk_order?: number | null;
+  repair_state?: string | null;
   acknowledged_at?: string | null;
   acknowledged_by?: string | null;
 }

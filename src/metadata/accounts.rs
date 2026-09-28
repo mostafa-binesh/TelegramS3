@@ -135,7 +135,7 @@ impl MetadataStore {
                        LEFT JOIN replica_locations r ON r.account_id=a.id AND r.state='ready'
                        WHERE a.id=?1 GROUP BY a.id"#,
                     [id],
-                    |row| Ok((account_from_row(row)?, row.get::<_, String>(11)?)),
+                    |row| Ok((account_from_row(row)?, row.get::<_, String>(10)?)),
                 )
                 .optional()?;
             row.map(|(record, json)| Ok((record, parse_bootstrap(json)?)))

@@ -3456,6 +3456,10 @@ struct RecoveryIssueWire {
     kind: String,
     summary: String,
     details: Vec<String>,
+    account_id: Option<String>,
+    account_label: Option<String>,
+    chunk_order: Option<u32>,
+    repair_state: Option<String>,
     acknowledged_at: Option<String>,
     acknowledged_by: Option<String>,
 }
@@ -3472,6 +3476,10 @@ impl From<RecoveryIssueModel> for RecoveryIssueWire {
             kind: value.kind,
             summary: value.summary,
             details: value.details,
+            account_id: value.account_id,
+            account_label: value.account_label,
+            chunk_order: value.chunk_order,
+            repair_state: value.repair_state,
             acknowledged_at: None,
             acknowledged_by: None,
         }
@@ -3578,7 +3586,12 @@ impl RecoveryWire {
             issue_count: issues.len() as u64,
             unacknowledged_count: issues
                 .iter()
-                .filter(|issue| issue.acknowledged_at.is_none())
+                .filter(|issue| {
+                    !matches!(
+                        issue.repair_state.as_deref(),
+                        Some("recovered" | "resolved")
+                    ) && issue.acknowledged_at.is_none()
+                })
                 .count() as u64,
             scan_ok: scan_error.is_none(),
             scan_error,

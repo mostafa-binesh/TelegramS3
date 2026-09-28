@@ -5,6 +5,15 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrityRecoveryEvent {
+    pub fingerprint: String,
+    pub issue_json: String,
+    pub state: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebuildReport {
     pub committed_rows: u64,
     pub active_rows: u64,
@@ -31,6 +40,68 @@ impl MetadataStore {
 
     pub fn startup_reconcile(&self) -> Result<RebuildReport, MetadataError> {
         self.rebuild_index()
+    }
+
+    /// Persist the latest state of one remote integrity finding. The JSON is
+    /// intentionally owned by the object-format layer so metadata migrations
+    /// do not need to understand verifier-specific fields.
+    pub fn upsert_integrity_recovery_event(
+        &self,
+        fingerprint: &str,
+        issue_json: &str,
+        state: &str,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|connection| {
+            let now = crate::durable::now();
+            connection.execute(
+                r#"
+                INSERT INTO integrity_recovery_events
+                    (fingerprint, issue_json, state, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?4)
+                ON CONFLICT(fingerprint) DO UPDATE SET
+                    issue_json = excluded.issue_json,
+                    state = excluded.state,
+                    updated_at = excluded.updated_at
+                "#,
+                params![fingerprint, issue_json, state, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn list_integrity_recovery_events(
+        &self,
+    ) -> Result<Vec<IntegrityRecoveryEvent>, MetadataError> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT fingerprint,issue_json,state,created_at,updated_at FROM integrity_recovery_events ORDER BY updated_at DESC, fingerprint ASC LIMIT 500",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(IntegrityRecoveryEvent {
+                    fingerprint: row.get(0)?,
+                    issue_json: row.get(1)?,
+                    state: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(MetadataError::from)
+        })
+    }
+
+    pub fn remove_replica_location(
+        &self,
+        object_id: uuid::Uuid,
+        chunk_order: u32,
+        account_id: &str,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "DELETE FROM replica_locations WHERE object_id=?1 AND chunk_order=?2 AND account_id=?3",
+                params![object_id.to_string(), chunk_order, account_id],
+            )?;
+            Ok(())
+        })
     }
 }
 
@@ -312,5 +383,30 @@ mod tests {
             .expect("fetch")
             .expect("visible");
         assert_eq!(active.object_id, manifest.object_id);
+    }
+
+    #[test]
+    fn integrity_recovery_events_round_trip_and_update() {
+        let store = MetadataStore::open_in_memory().expect("open");
+        store
+            .upsert_integrity_recovery_event(
+                "event-1",
+                r#"{"kind":"replica_integrity"}"#,
+                "retryable",
+            )
+            .expect("insert event");
+        store
+            .upsert_integrity_recovery_event(
+                "event-1",
+                r#"{"kind":"replica_integrity","repair_state":"recovered"}"#,
+                "recovered",
+            )
+            .expect("update event");
+
+        let events = store.list_integrity_recovery_events().expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].fingerprint, "event-1");
+        assert_eq!(events[0].state, "recovered");
+        assert!(events[0].issue_json.contains("recovered"));
     }
 }

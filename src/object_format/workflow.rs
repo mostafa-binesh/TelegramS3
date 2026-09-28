@@ -845,7 +845,7 @@ impl ObjectFormatService {
         Ok(manager)
     }
 
-    async fn upload_replica_bytes(
+    pub(crate) async fn upload_replica_bytes(
         &self,
         transport: &Arc<crate::telegram::TelegramTransport>,
         job_id: &str,
@@ -975,6 +975,12 @@ impl ObjectFormatService {
             self.metadata.clear_active_connection_id()?;
             self.set_storage_chat_id(String::new());
             self.transport_manager.disconnect().await;
+            // The removal job owns the connection generation. Once local
+            // visibility and any requested remote cleanup are complete, drop
+            // its account registry row as well so overview health cannot keep
+            // reporting a removed transport as connected.
+            let _ = self.metadata.delete_telegram_account(&job.connection_id)?;
+            self.invalidate_account_manager(&job.connection_id);
         }
         Ok(())
     }

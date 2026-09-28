@@ -2,12 +2,14 @@
 
 ## Local Metadata Lost
 
-Schema v19 account, scoped-replication, maintenance, and download-failover rows
+Schema v20 account, scoped-replication, maintenance, download-failover, and
+integrity-event rows
 are part of the
 recovery boundary.
 Back up `metadata.sqlite` before adding or scheduling replication. Restoring
 the database restores account definitions, replica/access maps, pending job
-progress, re-chunk replica policy/target snapshots, and re-chunk locks; queued
+progress, re-chunk replica policy/target snapshots, re-chunk locks, and durable
+per-account integrity findings; queued
 workers resume after restart. Inspect
 failed replication or re-chunk jobs before retrying them. An access-only record
 is not a second copy: it is recoverable only while the target session can read
@@ -272,13 +274,15 @@ next run, sample policy, distinct broken-file count, and the current verifier
 problem list.
 
 If a sampled message is confirmed missing, cannot be decrypted, or fails its
-checksum, the object is marked `recovery_required` and hidden from the active
-S3 namespace. This is intentional: the server has no trustworthy plaintext
-source from which to recreate that chunk. It preserves the manifest and all
-remaining Telegram evidence, and an operator must re-upload or restore the
-original source (or run repair if a later full verification proves the remote
-payload is intact). Temporary Telegram or network failures remain retryable and
-do not mark the file broken.
+checksum, the verifier records the account, chunk, failure, and repair state in
+the durable integrity-event log. A healthy physical replica is used as the
+source of the exact encrypted bytes for an automatic re-upload to the damaged
+location. If no alternate can be verified, an unrecoverable primary issue marks
+the object `recovery_required` and hides it from the active S3 namespace; a
+replica-only issue does not hide an otherwise healthy object. Access-only
+locations cannot be re-uploaded because they are shared-chat pointers and are
+left retryable or isolated according to the failure. Temporary Telegram or
+network failures remain retryable and do not mark the file broken.
 
 ## Interrupted Multipart Upload
 

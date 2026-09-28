@@ -99,6 +99,15 @@ The additional-account wizard saves its account definition first, then sends
 `account_id` with every login flow so the code/password steps use that account's
 session and transport rather than the primary connection.
 
+The sampled integrity verifier checks the primary and every recorded account
+location for each sampled chunk. A missing, corrupt, or checksum-bad physical
+replica is logged with its account and chunk, then repaired by uploading the
+verified encrypted bytes from another healthy location when possible. A
+replica-only failure does not hide an object whose primary or another replica
+is healthy; only an unrecoverable primary failure moves the object to
+`recovery_required`. Repaired findings remain visible in the Recovery history,
+while transient account/network failures remain retryable.
+
 - `/_admin` and `/_admin/api/*` are implemented as an authenticated operator
   surface served by the same Rust process.
 - Login is credential-based: accounts are argon2id-hashed records in

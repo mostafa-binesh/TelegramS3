@@ -359,6 +359,12 @@ Multi-user boundary for the next increment:
 - [x] Added schema v19 database-backed account failover retries (`0–8`, default
   `1`) with complete per-chunk retries before rotation to the next enabled
   replica account, plus settings and browser coverage.
+- [x] Added schema v20 durable integrity-recovery events. Sampled verifier
+  checks now cover every recorded account location, identify the affected
+  account/chunk, repair damaged physical locations from a verified alternate,
+  isolate unrecoverable replica-only locations from reads, and quarantine only
+  an unrecoverable primary. Added Rust and browser coverage for repaired replica
+  history and migration/persistence.
 
 Remaining Phase 10 work:
 

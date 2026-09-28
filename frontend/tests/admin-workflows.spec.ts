@@ -105,12 +105,13 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
 
     if (path === '/overview' && request.method() === 'GET') {
       const issue = recoveryIssue ? [recoveryIssue] : [];
+      const activeIssue = issue.filter((item) => !['recovered', 'resolved'].includes(String(item.repair_state ?? '')));
       return route.fulfill({
         json: {
           ...overview,
           storage: { ...overview.storage, buckets: buckets.length, committed_objects: 2 - deletedKeys.size, active_objects: 2 - deletedKeys.size, chunk_size: chunkSize },
           recovery: { ...overview.recovery, issue_count: issue.filter((item) => !item.acknowledged_at).length, unacknowledged_count: issue.filter((item) => !item.acknowledged_at).length, issues: issue },
-          verifier: { ...overview.verifier, enabled: recoveryVerifyEnabled, status: !recoveryVerifyEnabled ? 'disabled' : issue.length ? 'attention' : 'healthy', broken_files: issue.length ? 1 : 0, problems: issue },
+          verifier: { ...overview.verifier, enabled: recoveryVerifyEnabled, status: !recoveryVerifyEnabled ? 'disabled' : activeIssue.length ? 'attention' : 'healthy', broken_files: activeIssue.length ? 1 : 0, problems: issue },
           telegram: connectionRemoved ? { ...overview.telegram, connection_state: 'needs_reauth', detail: 'Telegram storage is not connected' } : overview.telegram
         }
       });
@@ -711,11 +712,33 @@ test('recovery issue can be acknowledged and restored from the UI', async ({ pag
   await expect(page.getByRole('heading', { name: '1 file needs attention' })).toBeVisible();
   await page.getByText('release-test/readme.txt').click();
   await page.getByRole('button', { name: 'Acknowledge' }).click();
-  await expect(page.getByText('Every detected issue has been acknowledged.')).toBeVisible();
+  await expect(page.getByText('No active integrity issues need attention.')).toBeVisible();
   await page.getByText('Acknowledged (1)').click();
   await page.locator('details.is-acknowledged summary').click();
   await page.getByRole('button', { name: 'Restore to list' }).click();
   await expect(page.getByRole('heading', { name: '1 file needs attention' })).toBeVisible();
+});
+
+test('recovery page separates an automatically repaired replica finding', async ({ page }) => {
+  await mockAdminApi(page, {
+    recoveryIssue: {
+      id: 'replica-1',
+      kind: 'replica_integrity',
+      path: 'release-test/readme.txt',
+      account_label: 'Replica account',
+      chunk_order: 2,
+      repair_state: 'recovered',
+      summary: 'corrupted chunk 2 on Replica account repaired from a healthy replica',
+      details: ['the verifier copied the verified encrypted chunk bytes to the damaged account and updated the manifest']
+    }
+  });
+  await signIn(page);
+  await page.getByRole('button', { name: 'Recovery', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '0 files need attention' })).toBeVisible();
+  await expect(page.getByText('Automatically repaired (1)')).toBeVisible();
+  await page.getByText('Automatically repaired (1)').click();
+  await expect(page.locator('.is-repaired')).toContainText('Replica account');
+  await expect(page.locator('.is-repaired')).toContainText('chunk 2');
 });
 
 test('operator deletion also uses the confirmation modal', async ({ page }) => {

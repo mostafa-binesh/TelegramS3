@@ -40,7 +40,7 @@ Each object is represented by:
 3. a local index row and journal entry
 4. optional multipart session and part rows while an upload is in progress
 
-Schema v19 additionally stores an account registry, durable replication jobs,
+Schema v20 additionally stores an account registry, durable replication jobs,
 selected-object replication scopes, replica/access locations, and re-chunk
 locks/jobs. Account rows include `download_enabled`, an additive read-selection
 policy that defaults to enabled for existing data. The `object_keys_json` migration is additive: an empty array keeps
@@ -58,6 +58,10 @@ from its canonical `ChunkRef.size` is exposed by the admin API as a replica
 layout mismatch and rendered as a yellow account badge. Older replica rows
 without this field remain readable and are treated as unknown rather than
 incorrect.
+The verifier also stores a durable integrity event for each sampled account and
+chunk. Events retain the account label, failure details, and repair state across
+restarts without changing the manifest's committed state when only an alternate
+replica is affected.
 
 Replication copies encrypted chunk bytes, preserving the object checksum and
 encryption identity. Access-only replication records the source location and
@@ -103,7 +107,8 @@ transfer cannot change shape halfway through.
 The background verifier checks committed objects without downloading every
 chunk on every pass. For each healthy committed manifest it selects up to the
 configured number of distinct chunk indexes uniformly at random, downloads and
-decrypts those Telegram documents, and verifies their plaintext checksums. The
+decrypts the primary document and every recorded replica for each sampled
+chunk, and verifies their plaintext checksums. The
 interval, sample count, and enabled state are stored in `app_settings` and can
 be changed from the authenticated Storage policy page. Disabling the verifier
 stops its automatic worker scans while preserving the other policy values and
@@ -111,14 +116,16 @@ existing recovery findings. Environment variables only seed missing database
 settings.
 
 A confirmed missing Telegram message, decryption failure, or checksum mismatch
-transitions the manifest to `recovery_required` and removes it from
-`active_objects`, so S3 reads, listings, and shares fail closed. The surviving
-Telegram chunks and the manifest are retained for evidence. The server does
-not invent or silently re-upload a missing chunk: repair requires a successful
-full verification of the existing remote payload or a new upload/restore from
-the original source. A transient Telegram/network read failure is reported as
-`verification_unavailable` and retried on a later scan without quarantining the
-object.
+on a physical replica is logged as a per-account integrity event. If another
+location verifies successfully, the server uploads the exact verified encrypted
+bytes to the damaged account and updates that replica location. A failed
+physical primary is repaired from the same alternate source when possible. An
+access-only location is not re-uploaded because it is only a pointer into a
+shared chat. A transient Telegram/network failure is retained as retryable and
+rechecked later. Only an unrecoverable primary failure transitions the manifest
+to `recovery_required` and removes it from `active_objects`; a healthy alternate
+replica keeps the object downloadable while its repair event remains visible to
+the operator.
 
 ## Manifest Document
 

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 19;
+const SCHEMA_VERSION: u32 = 20;
 
 #[derive(Debug, Error)]
 pub enum MetadataError {
@@ -163,7 +163,7 @@ pub use self::auth::{DbSession, DbUser};
 pub use self::buckets::BucketRecord;
 pub use self::connection_removal::ConnectionRemovalJob;
 pub use self::manifests::{JournalEntry, TombstonedManifestRecord};
-pub use self::recovery::{RebuildReport, VerifyReport};
+pub use self::recovery::{IntegrityRecoveryEvent, RebuildReport, VerifyReport};
 pub use self::settings::{RecoveryAck, RecoveryAcknowledgements, TelegramBootstrapSettings};
 pub use self::shares::ShareLinkRecord;
 

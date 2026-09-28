@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.7.6-rc.13 - 2026-09-28
+
+### Replica-aware integrity verification and automatic repair
+
+- Added schema v20 with a durable `integrity_recovery_events` table. Every
+  sampled account/chunk finding records its stable identity, account label,
+  failure details, and repair state so verifier history survives restart.
+- Expanded the background verifier from primary-only checks to the primary and
+  every recorded replica for each randomly sampled chunk. Each location is
+  downloaded through its owning account transport, decrypted, and checksum
+  verified independently.
+- Added automatic physical recovery: when a primary or physical replica is
+  missing/corrupt but another location verifies successfully, the server copies
+  the exact encrypted bytes to the damaged account and updates the manifest
+  location. It does not re-encrypt or buffer the whole object.
+- Kept healthy objects available when only a replica is damaged. Confirmed
+  dead replica-only locations are removed from read failover when no repair
+  source exists, while transient account/network failures remain retryable.
+  An unrecoverable primary still transitions the object to
+  `recovery_required` and fails closed.
+- Added account/chunk/repair-state fields to recovery API payloads and a
+  Recovery UI section for automatically repaired findings, without counting
+  those historical events as active broken files.
+- Fixed the additional-account metadata lookup column used when opening a
+  replica transport, which previously could reject configured accounts.
+- Completed connection removal by deleting and invalidating the removed account
+  generation after cleanup, preventing stale connected status in Overview.
+- Added Rust coverage for schema/event persistence and physical replica repair,
+  plus Playwright coverage for the repaired-finding Recovery presentation.
+- Updated README, roadmap, S3 compatibility, storage-format, disaster-recovery,
+  and ADR documentation with the recovery boundary and access-only limitation.
+
 ## 0.7.6-rc.12 - 2026-09-28
 
 ### Resilient metadata connection pool and Accounts layout

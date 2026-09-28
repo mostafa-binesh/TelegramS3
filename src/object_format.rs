@@ -164,6 +164,16 @@ pub struct RecoveryIssue {
     pub kind: String,
     pub summary: String,
     pub details: Vec<String>,
+    /// Set for remote integrity findings so the operator can identify the
+    /// account and sampled chunk without exposing credentials or sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_order: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_state: Option<String>,
 }
 
 impl RecoveryIssue {
@@ -192,12 +202,34 @@ impl RecoveryIssue {
         if let Some(object_id) = self.object_id {
             hasher.update(object_id.as_bytes());
         }
+        if let Some(value) = self.account_id.as_deref() {
+            hasher.update(b"account");
+            hasher.update(value.len().to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+        if let Some(value) = self.chunk_order {
+            hasher.update(b"chunk");
+            hasher.update(value.to_le_bytes());
+        }
         let digest = hasher.finalize();
         digest[..8]
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect()
     }
+}
+
+struct IntegrityLocation {
+    account_id: String,
+    account_label: String,
+    mode: Option<ReplicaMode>,
+    primary: bool,
+    message_id: i64,
+}
+
+struct IntegrityFailure {
+    kind: &'static str,
+    message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1867,7 +1899,13 @@ impl ObjectFormatService {
                             issue.commit_state = Some(CommitState::RecoveryRequired);
                         }
                     }
-                    issues.extend(sampled_issues);
+                    // Replica findings are durable events and are appended
+                    // once below, after every manifest has been scanned.
+                    issues.extend(
+                        sampled_issues
+                            .into_iter()
+                            .filter(|issue| issue.kind != "replica_integrity"),
+                    );
                 }
                 CommitState::RecoveryRequired => {
                     if let Some(details_json) =
@@ -1900,6 +1938,10 @@ impl ObjectFormatService {
                             "object metadata is marked orphaned and needs reconciliation"
                                 .to_string(),
                         ],
+                        account_id: None,
+                        account_label: None,
+                        chunk_order: None,
+                        repair_state: None,
                     });
                 }
                 CommitState::Tombstoned => {}
@@ -1925,6 +1967,10 @@ impl ObjectFormatService {
                     kind: "orphaned_staging_dir".to_string(),
                     summary: "orphaned staging directory".to_string(),
                     details: vec!["directory is not tied to an active upload".to_string()],
+                    account_id: None,
+                    account_label: None,
+                    chunk_order: None,
+                    repair_state: None,
                 });
             }
         }
@@ -1949,6 +1995,10 @@ impl ObjectFormatService {
                     kind: "orphaned_manifest_file".to_string(),
                     summary: "orphaned manifest file".to_string(),
                     details: vec!["manifest file does not match a tracked object".to_string()],
+                    account_id: None,
+                    account_label: None,
+                    chunk_order: None,
+                    repair_state: None,
                 });
             }
         }
@@ -1972,7 +2022,22 @@ impl ObjectFormatService {
                     kind: "orphaned_chunk_dir".to_string(),
                     summary: "orphaned chunk directory".to_string(),
                     details: vec!["chunk directory is not tied to a tracked object".to_string()],
+                    account_id: None,
+                    account_label: None,
+                    chunk_order: None,
+                    repair_state: None,
                 });
+            }
+        }
+
+        // Remote replica findings are intentionally kept separate from the
+        // object recovery marker. A repaired or isolated replica must remain
+        // visible to operators without hiding an object whose other location
+        // is still healthy.
+        for event in self.metadata.list_integrity_recovery_events()? {
+            if let Ok(mut issue) = serde_json::from_str::<RecoveryIssue>(&event.issue_json) {
+                issue.repair_state = Some(event.state);
+                issues.push(issue);
             }
         }
 
@@ -2867,6 +2932,160 @@ impl ObjectFormatService {
         Ok(issues)
     }
 
+    async fn transport_for_account(
+        &self,
+        account_id: &str,
+        active_account_id: &str,
+    ) -> Result<Arc<crate::telegram::TelegramTransport>, ObjectFormatError> {
+        if account_id == active_account_id
+            || (account_id == "legacy" && active_account_id == "legacy")
+        {
+            return self
+                .transport_manager
+                .current()
+                .await
+                .map_err(ObjectFormatError::Telegram);
+        }
+        self.account_manager(account_id)
+            .await?
+            .current()
+            .await
+            .map_err(ObjectFormatError::Telegram)
+    }
+
+    async fn verify_integrity_location(
+        &self,
+        manifest: &ObjectManifest,
+        chunk: &ChunkRef,
+        location: &IntegrityLocation,
+        transport: Arc<crate::telegram::TelegramTransport>,
+    ) -> Result<Vec<u8>, IntegrityFailure> {
+        let message_id = i32::try_from(location.message_id).map_err(|_| IntegrityFailure {
+            kind: "invalid",
+            message: format!(
+                "Telegram message id is out of range: {}",
+                location.message_id
+            ),
+        })?;
+        let ciphertext = self
+            .download_message_bytes_from_transport(transport, message_id)
+            .await
+            .map_err(|error| {
+                let message = error.to_string();
+                IntegrityFailure {
+                    kind: if message.contains("not found") {
+                        "missing"
+                    } else {
+                        "unavailable"
+                    },
+                    message,
+                }
+            })?;
+        let plaintext = if manifest.encryption.enabled {
+            let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
+            self.decrypt_chunk(source_object_id, source_order, &ciphertext)
+                .map_err(|error| IntegrityFailure {
+                    kind: "corrupted",
+                    message: format!("decryption failed: {error}"),
+                })?
+        } else {
+            ciphertext.clone()
+        };
+        let actual_checksum = sha256_hex(&plaintext);
+        if actual_checksum != chunk.checksum {
+            return Err(IntegrityFailure {
+                kind: "corrupted",
+                message: format!(
+                    "checksum mismatch: expected {}, got {}",
+                    chunk.checksum, actual_checksum
+                ),
+            });
+        }
+        Ok(ciphertext)
+    }
+
+    fn build_integrity_issue(
+        &self,
+        manifest: &ObjectManifest,
+        location: &IntegrityLocation,
+        chunk_order: u32,
+        failure_kind: &str,
+        message: String,
+    ) -> RecoveryIssue {
+        RecoveryIssue {
+            object_id: Some(manifest.object_id),
+            bucket: Some(manifest.bucket.clone()),
+            key: Some(manifest.key.clone()),
+            path: Some(format!("{}/{}", manifest.bucket, manifest.key)),
+            commit_state: Some(manifest.commit_state),
+            kind: "replica_integrity".to_string(),
+            summary: format!(
+                "{} chunk {} on {}",
+                match failure_kind {
+                    "missing" => "missing",
+                    "corrupted" | "invalid" => "corrupted",
+                    _ => "unavailable",
+                },
+                chunk_order,
+                location.account_label
+            ),
+            details: vec![format!(
+                "Telegram message {} on account {}: {}",
+                location.message_id, location.account_id, message
+            )],
+            account_id: Some(location.account_id.clone()),
+            account_label: Some(location.account_label.clone()),
+            chunk_order: Some(chunk_order),
+            repair_state: Some("detected".to_string()),
+        }
+    }
+
+    fn persist_integrity_event(
+        &self,
+        issue: &RecoveryIssue,
+        state: &str,
+    ) -> Result<(), ObjectFormatError> {
+        self.metadata.upsert_integrity_recovery_event(
+            &issue.fingerprint(),
+            &serde_json::to_string(issue)?,
+            state,
+        )?;
+        Ok(())
+    }
+
+    async fn repair_integrity_location(
+        &self,
+        manifest: &ObjectManifest,
+        chunk: &ChunkRef,
+        location: &IntegrityLocation,
+        ciphertext: &[u8],
+        active_account_id: &str,
+    ) -> Result<Option<TelegramLocation>, ObjectFormatError> {
+        if location.primary || matches!(location.mode, Some(ReplicaMode::Replica)) {
+            let transport = self
+                .transport_for_account(&location.account_id, active_account_id)
+                .await?;
+            let job_id = format!(
+                "integrity-{}-{}-{}",
+                manifest.object_id, chunk.order, location.account_id
+            );
+            return self
+                .upload_replica_bytes(
+                    &transport,
+                    &job_id,
+                    chunk.order,
+                    ciphertext,
+                    &location.account_id,
+                )
+                .await
+                .map(Some);
+        }
+        // An access location is a pointer into a shared Telegram chat, not a
+        // second document owned by that account. It cannot be repaired by
+        // uploading into the target account; leave the event retryable.
+        Ok(None)
+    }
+
     async fn inspect_committed_manifest(
         &self,
         manifest: &ObjectManifest,
@@ -2876,6 +3095,17 @@ impl ObjectFormatService {
         let mut corrupted_details = Vec::new();
         let mut unavailable_details = Vec::new();
         let mut invalid_details = Vec::new();
+        let mut repaired_manifest = manifest.clone();
+        let active_account_id = self
+            .metadata
+            .active_connection_id()?
+            .unwrap_or_else(|| "legacy".to_string());
+        let account_labels = self
+            .metadata
+            .list_telegram_accounts()?
+            .into_iter()
+            .map(|account| (account.id, account.label))
+            .collect::<HashMap<_, _>>();
 
         if let Err(error) = manifest.validate() {
             invalid_details.push(format!("manifest validation failed: {error}"));
@@ -2891,60 +3121,162 @@ impl ObjectFormatService {
         let chunk_indices =
             random_chunk_sample(manifest.chunks.len(), self.recovery_verify_chunks());
         for index in chunk_indices {
-            let chunk = &manifest.chunks[index];
-            let message_id = match i32::try_from(chunk.telegram_message_id) {
-                Ok(message_id) => message_id,
-                Err(_) => {
-                    invalid_details.push(format!(
-                        "chunk {} has telegram message id out of range: {}",
-                        chunk.order, chunk.telegram_message_id
-                    ));
-                    continue;
+            let chunk = repaired_manifest.chunks[index].clone();
+            let mut locations = vec![IntegrityLocation {
+                account_id: active_account_id.clone(),
+                account_label: account_labels
+                    .get(&active_account_id)
+                    .cloned()
+                    .unwrap_or_else(|| "Primary account".to_string()),
+                mode: None,
+                primary: true,
+                message_id: chunk.telegram_message_id,
+            }];
+            locations.extend(chunk.replicas.iter().map(|replica| {
+                IntegrityLocation {
+                    account_id: replica.account_id.clone(),
+                    account_label: account_labels
+                        .get(&replica.account_id)
+                        .cloned()
+                        .unwrap_or_else(|| replica.account_id.clone()),
+                    mode: Some(replica.mode),
+                    primary: false,
+                    message_id: replica.telegram_message_id,
                 }
-            };
+            }));
 
-            let ciphertext = match self.download_message_bytes(message_id).await {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    let message = error.to_string();
-                    if message.contains("not found") {
-                        missing_details.push(format!(
-                            "chunk {} missing from Telegram message {}",
-                            chunk.order, message_id
-                        ));
-                    } else {
-                        unavailable_details.push(format!(
-                            "chunk {} could not be verified from Telegram message {}: {}",
-                            chunk.order, message_id, message
-                        ));
+            let mut healthy_source: Option<(IntegrityLocation, Vec<u8>)> = None;
+            let mut failures = Vec::new();
+            for location in locations {
+                let result = match self
+                    .transport_for_account(&location.account_id, &active_account_id)
+                    .await
+                {
+                    Ok(transport) => {
+                        self.verify_integrity_location(manifest, &chunk, &location, transport)
+                            .await
                     }
-                    continue;
-                }
-            };
-
-            let plaintext = if manifest.encryption.enabled {
-                let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
-                match self.decrypt_chunk(source_object_id, source_order, &ciphertext) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        corrupted_details.push(format!(
-                            "chunk {} could not be decrypted from Telegram message {}: {}",
-                            chunk.order, message_id, error
-                        ));
-                        continue;
+                    Err(error) => Err(IntegrityFailure {
+                        kind: "unavailable",
+                        message: error.to_string(),
+                    }),
+                };
+                match result {
+                    Ok(ciphertext) => {
+                        if healthy_source.is_none() {
+                            healthy_source = Some((location, ciphertext));
+                        }
                     }
+                    Err(failure) => failures.push((location, failure)),
                 }
-            } else {
-                ciphertext
-            };
-
-            let actual_checksum = sha256_hex(&plaintext);
-            if actual_checksum != chunk.checksum {
-                corrupted_details.push(format!(
-                    "chunk {} checksum mismatch from Telegram message {}: expected {}, got {}",
-                    chunk.order, message_id, chunk.checksum, actual_checksum
-                ));
             }
+
+            for (location, failure) in failures {
+                let mut issue = self.build_integrity_issue(
+                    manifest,
+                    &location,
+                    chunk.order,
+                    failure.kind,
+                    failure.message.clone(),
+                );
+                let mut repaired = false;
+                if let Some((_, source_ciphertext)) = &healthy_source
+                    && matches!(failure.kind, "missing" | "corrupted" | "invalid")
+                    && !matches!(location.mode, Some(ReplicaMode::Access))
+                {
+                    match self
+                        .repair_integrity_location(
+                            manifest,
+                            &chunk,
+                            &location,
+                            source_ciphertext,
+                            &active_account_id,
+                        )
+                        .await
+                    {
+                        Ok(Some(replacement)) => {
+                            let target_chunk = &mut repaired_manifest.chunks[index];
+                            if location.primary {
+                                target_chunk.telegram_peer_id = replacement.peer_id;
+                                target_chunk.telegram_message_id = replacement.message_id;
+                                target_chunk.telegram_document_id = replacement.document_id;
+                            } else if let Some(replica) = target_chunk
+                                .replicas
+                                .iter_mut()
+                                .find(|replica| replica.account_id == location.account_id)
+                            {
+                                replica.telegram_peer_id = replacement.peer_id;
+                                replica.telegram_message_id = replacement.message_id;
+                                replica.telegram_document_id = replacement.document_id;
+                                self.metadata.insert_replica_location(
+                                    manifest.object_id,
+                                    chunk.order,
+                                    &location.account_id,
+                                    "replica",
+                                    &replica.telegram_peer_id,
+                                    replica.telegram_message_id,
+                                    replica.telegram_document_id.as_deref(),
+                                )?;
+                            }
+                            repaired = true;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            issue.details.push(format!(
+                                "automatic repair could not be uploaded yet: {error}"
+                            ));
+                        }
+                    }
+                }
+
+                if repaired {
+                    issue.summary = format!("{} repaired from a healthy replica", issue.summary);
+                    issue.details.push(
+                        "the verifier copied the verified encrypted chunk bytes to the damaged account and updated the manifest".to_string(),
+                    );
+                    issue.repair_state = Some("recovered".to_string());
+                    self.persist_integrity_event(&issue, "recovered")?;
+                    continue;
+                }
+
+                let has_alternate = healthy_source.is_some();
+                let repair_state = if has_alternate || failure.kind == "unavailable" {
+                    "retryable"
+                } else {
+                    "unrecoverable"
+                };
+                issue.repair_state = Some(repair_state.to_string());
+                self.persist_integrity_event(&issue, repair_state)?;
+
+                if location.primary {
+                    let detail = format!(
+                        "chunk {} on {} (Telegram message {}) failed integrity verification: {}",
+                        chunk.order, location.account_label, location.message_id, failure.message
+                    );
+                    match failure.kind {
+                        "missing" => missing_details.push(detail),
+                        "corrupted" | "invalid" => corrupted_details.push(detail),
+                        _ => unavailable_details.push(detail),
+                    }
+                } else if matches!(failure.kind, "missing" | "corrupted" | "invalid")
+                    && !has_alternate
+                {
+                    // Do not keep a known-dead location in the read failover
+                    // set. The durable event above remains as the audit trail.
+                    repaired_manifest.chunks[index]
+                        .replicas
+                        .retain(|replica| replica.account_id != location.account_id);
+                    self.metadata.remove_replica_location(
+                        manifest.object_id,
+                        chunk.order,
+                        &location.account_id,
+                    )?;
+                }
+            }
+        }
+
+        if repaired_manifest != *manifest {
+            self.metadata.update_manifest(repaired_manifest)?;
         }
 
         if !invalid_details.is_empty() {
@@ -2999,6 +3331,10 @@ impl ObjectFormatService {
             kind: kind.to_string(),
             summary,
             details,
+            account_id: None,
+            account_label: None,
+            chunk_order: None,
+            repair_state: None,
         }
     }
 
@@ -3274,11 +3610,22 @@ impl ObjectFormatService {
 
     async fn download_message_bytes(&self, message_id: i32) -> Result<Vec<u8>, ObjectFormatError> {
         let transport = self.transport_manager.current().await?;
+        self.download_message_bytes_from_transport(transport, message_id)
+            .await
+    }
+
+    async fn download_message_bytes_from_transport(
+        &self,
+        transport: Arc<crate::telegram::TelegramTransport>,
+        message_id: i32,
+    ) -> Result<Vec<u8>, ObjectFormatError> {
         if transport.is_mock() {
-            return self.download_message_bytes_once(message_id).await;
+            return self
+                .download_message_bytes_once_with_transport(transport, message_id)
+                .await;
         }
         retry_telegram_read(transport.retry_policy(), message_id, || {
-            self.download_message_bytes_once(message_id)
+            self.download_message_bytes_once_with_transport(Arc::clone(&transport), message_id)
         })
         .await
     }
@@ -3323,15 +3670,6 @@ impl ObjectFormatService {
             retries: result.retries,
             retry_wait_us: result.retry_wait_us,
         })
-    }
-
-    async fn download_message_bytes_once(
-        &self,
-        message_id: i32,
-    ) -> Result<Vec<u8>, ObjectFormatError> {
-        let transport = self.transport_manager.current().await?;
-        self.download_message_bytes_once_with_transport(transport, message_id)
-            .await
     }
 
     async fn download_message_bytes_once_with_transport(
@@ -4811,6 +5149,124 @@ mod tests {
                 .1
                 .iter()
                 .any(|issue| issue.kind == "corrupted_chunk")
+        );
+    }
+
+    #[tokio::test]
+    async fn verifier_repairs_a_corrupted_physical_replica_from_primary() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        service.set_chunk_size(1024 * 1024).expect("chunk size");
+        service
+            .set_recovery_verification_settings(60, 10)
+            .expect("verifier settings");
+
+        let replica_id = "replica-account";
+        let account_settings = TelegramBootstrapSettings {
+            telegram_api_id: Some("123456".to_string()),
+            telegram_api_hash: Some("test-api-hash".to_string()),
+            telegram_storage_chat_id: Some("-1001234567890".to_string()),
+            telegram_proxy_mode: Some("auto".to_string()),
+            ..TelegramBootstrapSettings::default()
+        };
+        service
+            .metadata
+            .upsert_telegram_account(
+                Some(replica_id),
+                "Replica account",
+                &account_settings,
+                None,
+                Some(true),
+            )
+            .expect("replica account");
+        let manifest = service
+            .put_bytes(
+                "bucket",
+                "replica-repair.bin",
+                "application/octet-stream",
+                &vec![9_u8; 2_500_000],
+            )
+            .await
+            .expect("put object");
+        let mut replica_manifest = manifest.clone();
+        let account_manager = service.account_manager(replica_id).await.expect("manager");
+        let transport = account_manager.current().await.expect("transport");
+        for chunk in &mut replica_manifest.chunks {
+            let primary_bytes = fs::read(tempdir.path().join(format!(
+                "data/mock-telegram/{}.bin",
+                chunk.telegram_message_id
+            )))
+            .expect("primary ciphertext");
+            let location = service
+                .upload_replica_bytes(
+                    &transport,
+                    "test-replica",
+                    chunk.order,
+                    &primary_bytes,
+                    replica_id,
+                )
+                .await
+                .expect("replica upload");
+            chunk.replicas.push(ChunkReplica {
+                account_id: replica_id.to_string(),
+                mode: ReplicaMode::Replica,
+                chunk_size: chunk.size,
+                telegram_peer_id: location.peer_id.clone(),
+                telegram_message_id: location.message_id,
+                telegram_document_id: location.document_id.clone(),
+            });
+            service
+                .metadata
+                .insert_replica_location(
+                    manifest.object_id,
+                    chunk.order,
+                    replica_id,
+                    "replica",
+                    &location.peer_id,
+                    location.message_id,
+                    location.document_id.as_deref(),
+                )
+                .expect("replica metadata");
+        }
+        let corrupted_message = replica_manifest.chunks[0].replicas[0].telegram_message_id;
+        fs::write(
+            tempdir
+                .path()
+                .join(format!("data/mock-telegram/{corrupted_message}.bin")),
+            b"corrupted replica bytes",
+        )
+        .expect("corrupt replica");
+        service
+            .metadata
+            .update_manifest(replica_manifest)
+            .expect("manifest with replica");
+
+        service
+            .refresh_recovery_snapshot()
+            .await
+            .expect("verifier refresh");
+
+        let repaired = service
+            .metadata
+            .get_manifest(manifest.object_id)
+            .expect("manifest")
+            .expect("stored manifest");
+        assert_eq!(repaired.commit_state, CommitState::Committed);
+        assert_ne!(
+            repaired.chunks[0].replicas[0].telegram_message_id,
+            corrupted_message
+        );
+        let snapshot = service.cached_recovery_snapshot().expect("snapshot");
+        assert!(snapshot.1.iter().any(|issue| {
+            issue.kind == "replica_integrity"
+                && issue.account_id.as_deref() == Some(replica_id)
+                && issue.repair_state.as_deref() == Some("recovered")
+        }));
+        assert!(
+            service
+                .get_active_manifest("bucket", "replica-repair.bin")
+                .expect("active")
+                .is_some()
         );
     }
 

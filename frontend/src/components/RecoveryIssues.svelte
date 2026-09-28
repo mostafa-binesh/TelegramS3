@@ -58,8 +58,10 @@
   }
 
   $: issues = recovery?.issues ?? [];
-  $: open = issues.filter((issue) => acknowledgedState(issue) === null);
-  $: acknowledged = issues.filter((issue) => acknowledgedState(issue) !== null);
+  $: activeIssues = issues.filter((issue) => !['recovered', 'resolved'].includes(issue.repair_state ?? ''));
+  $: repaired = issues.filter((issue) => ['recovered', 'resolved'].includes(issue.repair_state ?? ''));
+  $: open = activeIssues.filter((issue) => acknowledgedState(issue) === null);
+  $: acknowledged = activeIssues.filter((issue) => acknowledgedState(issue) !== null);
 </script>
 
 <section class="card surface">
@@ -102,7 +104,7 @@
     {#if open.length === 0}
       <p class="empty-state">
         <span class="empty-mark" aria-hidden="true">✓</span>
-        Every detected issue has been acknowledged.
+        No active integrity issues need attention.
       </p>
     {/if}
     <div class="recovery-list">
@@ -116,6 +118,9 @@
             <span>{issue.kind}</span>
             {#if issue.commit_state}<span>{issue.commit_state}</span>{/if}
             {#if issue.object_id}<span>{issue.object_id}</span>{/if}
+            {#if issue.account_label}<span>{issue.account_label}</span>{/if}
+            {#if issue.chunk_order !== null && issue.chunk_order !== undefined}<span>chunk {issue.chunk_order}</span>{/if}
+            {#if issue.repair_state}<span>{issue.repair_state}</span>{/if}
           </div>
           <ul>
             {#each issue.details as detail}
@@ -155,6 +160,8 @@
                 <span>{issue.kind}</span>
                 {#if issue.commit_state}<span>{issue.commit_state}</span>{/if}
                 {#if issue.object_id}<span>{issue.object_id}</span>{/if}
+                {#if issue.account_label}<span>{issue.account_label}</span>{/if}
+                {#if issue.chunk_order !== null && issue.chunk_order !== undefined}<span>chunk {issue.chunk_order}</span>{/if}
               </div>
               <ul>
                 {#each issue.details as detail}
@@ -171,6 +178,32 @@
                   Restore to list
                 </button>
               </div>
+            </details>
+          {/each}
+        </div>
+      </details>
+    {/if}
+    {#if repaired.length > 0}
+      <details class="acknowledged-group repaired-group">
+        <summary>Automatically repaired ({formatCount(repaired.length)})</summary>
+        <div class="recovery-list">
+          {#each repaired as issue (issue.id)}
+            <details class="recovery-item is-repaired">
+              <summary>
+                <span>{label(issue)}</span>
+                <small>{issue.summary}</small>
+              </summary>
+              <div class="recovery-meta">
+                <span>{issue.kind}</span>
+                {#if issue.account_label}<span>{issue.account_label}</span>{/if}
+                {#if issue.chunk_order !== null && issue.chunk_order !== undefined}<span>chunk {issue.chunk_order}</span>{/if}
+                <span>{issue.repair_state}</span>
+              </div>
+              <ul>
+                {#each issue.details as detail}
+                  <li>{detail}</li>
+                {/each}
+              </ul>
             </details>
           {/each}
         </div>
@@ -196,6 +229,10 @@
   }
   .recovery-item.is-acknowledged {
     opacity: 0.72;
+  }
+  .recovery-item.is-repaired {
+    border-color: color-mix(in srgb, #2b9b72 30%, var(--border));
+    background: color-mix(in srgb, #2b9b72 4%, var(--surface));
   }
   .recovery-item summary {
     display: flex;
