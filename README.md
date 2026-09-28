@@ -105,7 +105,9 @@ staging, and recovery artifacts, not committed payloads.
   chunks through every recorded account, records durable per-account findings,
   and automatically re-uploads a damaged physical primary or replica from a
   verified alternate when one exists; recovered replica events remain visible
-  in Recovery without hiding an otherwise healthy object.
+  in Recovery without hiding an otherwise healthy object. The Connections tab
+  loads its account state once when opened and provides an explicit refresh
+  action instead of polling the account list in the background.
 - **Maintenance queues** — selected bucket objects can be re-chunked through a
   bounded durable worker. Objects are locked and report temporary
   unavailability while their replacement manifest is published. The bucket

@@ -365,6 +365,9 @@ Multi-user boundary for the next increment:
   isolate unrecoverable replica-only locations from reads, and quarantine only
   an unrecoverable primary. Added Rust and browser coverage for repaired replica
   history and migration/persistence.
+- [x] Removed background polling from the Accounts/Connections panel and added
+  an explicit manual refresh action with browser coverage for the no-poll and
+  on-demand request paths.
 
 Remaining Phase 10 work:
 

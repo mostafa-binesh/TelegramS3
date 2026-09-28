@@ -79,6 +79,9 @@ The Overview aggregates account health as connected when all configured
 accounts are connected, partial when only some are connected, and disconnected
 when none are connected; individual account indicators expose the account
 label on hover.
+The Accounts/Connections panel performs one initial account state load and
+refreshes account data only when the operator clicks its explicit refresh
+button; it does not poll the account list in the background.
 
 An expired admin session is treated as an authentication state transition: the
 SPA refreshes `/session` after a `401` and returns the operator to login. It

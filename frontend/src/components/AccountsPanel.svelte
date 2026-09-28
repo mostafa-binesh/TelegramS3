@@ -196,10 +196,6 @@
 
   onMount(() => {
     void refresh();
-    let timer: ReturnType<typeof setTimeout>; let stopped = false;
-    const poll = async () => { if (!document.hidden) await refresh(); if (!stopped) timer = setTimeout(poll, 5000); };
-    timer = setTimeout(poll, 5000);
-    return () => { stopped = true; clearTimeout(timer); };
   });
 </script>
 
@@ -215,7 +211,7 @@
 
   {#if accountsTab === 'connections'}
     <section class="card surface connections-workspace">
-      <div class="section-head"><div><p class="card-label">Account switcher</p><h3>Select a connection</h3></div><span class="fine-print">{accounts.length ? 'Each card opens the same editor' : 'Start with your first account'}</span></div>
+      <div class="section-head"><div><p class="card-label">Account switcher</p><h3>Select a connection</h3></div><div class="section-head-actions"><span class="fine-print">{accounts.length ? 'Each card opens the same editor' : 'Start with your first account'}</span><button class="ghost refresh-connections" type="button" on:click={refresh} disabled={loading} aria-busy={loading}>{loading ? 'Refreshing…' : 'Refresh connections'}</button></div></div>
       {#if loading}<div class="skeleton-stack"><div class="skeleton" style="height:86px"></div><div class="skeleton" style="height:86px"></div></div>{:else}<div class="account-card-grid" role="tablist" aria-label="Telegram accounts">
         {#each accounts as account, index (account.id)}
           {@const health = overview?.telegram?.accounts?.find((item: any) => item.id === account.id)}
@@ -407,6 +403,24 @@
     display: grid;
     gap: 18px;
     padding: 22px;
+  }
+
+  .section-head-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .section-head-actions .fine-print {
+    margin: 0;
+    text-align: right;
+  }
+
+  .refresh-connections {
+    white-space: nowrap;
   }
 
   .account-card-grid {
@@ -701,9 +715,14 @@
 
   @media (max-width: 700px) {
     .hero,
-    .editor-actions {
+    .editor-actions,
+    .section-head-actions {
       align-items: stretch;
       flex-direction: column;
+    }
+
+    .section-head-actions .fine-print {
+      text-align: left;
     }
 
     .hero .count-pill {

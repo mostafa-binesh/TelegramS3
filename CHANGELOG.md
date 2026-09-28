@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.6-rc.14 - 2026-09-28
+
+### Manual Connections refresh
+
+- Removed the Accounts/Connections panel's automatic five-second polling loop,
+  which repeatedly reloaded accounts, replication jobs, re-chunk jobs, and
+  bucket choices while the operator was only viewing the connection cards.
+- Added a visible `Refresh connections` button with a disabled/loading state so
+  account data reloads happen only on initial entry or when the operator asks
+  for them explicitly.
+- Kept existing save, add, remove, replication, re-chunk, and recovery actions
+  unchanged; those operations still refresh their affected account state after
+  completion.
+- Added Playwright coverage that waits beyond the former polling interval,
+  asserts no background account request occurs, then verifies the manual
+  refresh sends exactly one request.
+- Updated the operator-console documentation to describe the new refresh
+  boundary. This is a frontend-only change and requires no database migration.
+
 ## 0.7.6-rc.13 - 2026-09-28
 
 ### Replica-aware integrity verification and automatic repair

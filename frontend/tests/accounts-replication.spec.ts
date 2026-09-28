@@ -9,6 +9,7 @@ const accounts = [
 
 async function mockConsole(page: import('@playwright/test').Page) {
   let savedAccount = false;
+  let accountsGetCount = 0;
   let replicationBody: Record<string, unknown> | null = null;
   let rechunkBody: Record<string, unknown> | null = null;
   let wizardBeginBody: Record<string, unknown> | null = null;
@@ -19,7 +20,7 @@ async function mockConsole(page: import('@playwright/test').Page) {
     if (path === '/setup') return route.fulfill({ json: { setup_required: false } });
     if (path === '/overview') return route.fulfill({ json: { telegram: { connection_state: 'connected', detail: 'mock', session_state: 'authorized' }, recovery: { issue_count: 0, unacknowledged_count: 0, issues: [] }, storage: {}, checks: [] } });
     if (path === '/telegram/settings') return route.fulfill({ json: { settings: { telegram_api_id: '123', telegram_api_hash: 'hash', telegram_storage_chat_id: '-1001', telegram_proxy_url: '', telegram_proxy_username: '', telegram_proxy_password: '', telegram_proxy_mode: 'auto' } } });
-    if (path === '/accounts' && request.method() === 'GET') return route.fulfill({ json: { accounts } });
+    if (path === '/accounts' && request.method() === 'GET') { accountsGetCount += 1; return route.fulfill({ json: { accounts } }); }
     if (path === '/accounts' && request.method() === 'POST') { savedAccount = true; return route.fulfill({ json: { account: { ...accounts[1], id: 'new-backup', label: 'New backup' } } }); }
     if (path === '/telegram/wizard/begin' && request.method() === 'POST') { wizardBeginBody = request.postDataJSON(); return route.fulfill({ json: { phase: 'code', message: null } }); }
     if (path === '/telegram/wizard/submit-code' && request.method() === 'POST') return route.fulfill({ json: { phase: 'two_fa', message: null } });
@@ -38,7 +39,7 @@ async function mockConsole(page: import('@playwright/test').Page) {
     if (path === '/objects/delete' && request.method() === 'POST') return route.fulfill({ json: { ok: true } });
     return route.fulfill({ json: {} });
   });
-  return { get savedAccount() { return savedAccount; }, get replicationBody() { return replicationBody; }, get rechunkBody() { return rechunkBody; }, get wizardBeginBody() { return wizardBeginBody; } };
+  return { get savedAccount() { return savedAccount; }, get accountsGetCount() { return accountsGetCount; }, get replicationBody() { return replicationBody; }, get rechunkBody() { return rechunkBody; }, get wizardBeginBody() { return wizardBeginBody; } };
 }
 
 test('additional accounts use an isolated onboarding wizard', async ({ page }) => {
@@ -93,6 +94,23 @@ test('accounts workspace keeps tabs and account details separated', async ({ pag
   expect(titleBox).not.toBeNull();
   expect(phoneBox).not.toBeNull();
   expect(phoneBox!.y).toBeGreaterThan(titleBox!.y);
+});
+
+test('connections do not poll and refresh only when requested', async ({ page }) => {
+  const state = await mockConsole(page);
+  await page.goto('/_admin/accounts');
+  await expect(page.getByRole('heading', { name: 'Select a connection' })).toBeVisible();
+
+  const initialAccountLoads = state.accountsGetCount;
+  expect(initialAccountLoads).toBeGreaterThan(0);
+  await page.waitForTimeout(5500);
+  expect(state.accountsGetCount).toBe(initialAccountLoads);
+
+  await Promise.all([
+    page.waitForRequest((request) => request.method() === 'GET' && new URL(request.url()).pathname.endsWith('/accounts')),
+    page.getByRole('button', { name: 'Refresh connections' }).click(),
+  ]);
+  expect(state.accountsGetCount).toBe(initialAccountLoads + 1);
 });
 
 test('replica badge shows account details and bulk replication keeps the selected keys', async ({ page }) => {

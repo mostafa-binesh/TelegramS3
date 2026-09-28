@@ -21,6 +21,9 @@ pool. Each handle uses WAL, foreign keys, `FULL` synchronous durability, and a
 this does not make a corrupt or inaccessible database recoverable. After a
 restore, run the normal `db status`, `index verify`, and application health
 checks rather than relying only on the pool being able to open a connection.
+The Accounts/Connections view loads this restored account state on entry and
+has an explicit refresh action; it does not continuously poll account metadata
+while the page is open.
 
 The admin bucket-level re-chunk action expands selected buckets into their
 committed objects and queues independent durable jobs. A restart can therefore

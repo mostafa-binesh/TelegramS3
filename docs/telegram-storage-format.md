@@ -25,6 +25,9 @@ layout or relax the recovery rules described here. Its inline Telegram account
 wizard saves bootstrap settings through the existing admin API; this is
 operational UI only. If its hashed asset is unavailable, the console exposes a
 retry state and does not change Telegram or local metadata.
+The Accounts/Connections view likewise does not change the storage layout: it
+loads account state on entry and uses an explicit operator refresh instead of
+periodically polling account metadata.
 
 Every send attempt is durable before the remote call. A restart that finds a
 `recovery_required` job with no lease normalizes any stale `sending` attempt to
