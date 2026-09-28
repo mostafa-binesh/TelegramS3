@@ -81,6 +81,9 @@ staging, and recovery artifacts, not committed payloads.
 - **Multi-user control plane** — argon2id-hashed operator accounts in SQLite,
   HTTP-only session cookies, per-account login rate limiting and lockout,
   revocable sessions, and a superadmin role for account management.
+- **Bounded metadata connection pool** — the local SQLite store uses eight
+  independently configured handles with WAL and a 30-second busy timeout;
+  low-level handle failures are isolated and replaced without a schema change.
 - **Account pool and replication** — multiple isolated Telegram connections can
   be registered, including the same Telegram account with separate session
   files. Each additional connection opens the same isolated four-step

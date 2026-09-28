@@ -95,6 +95,10 @@ The local index must track:
 - reconciliation status
 
 The local database is an optimization and recovery journal, not the only source of truth.
+It is opened through a bounded eight-handle SQLite pool. File-backed handles
+use WAL, `FULL` synchronous durability, foreign keys, and a 30-second busy
+timeout; low-level handle failures are isolated and replaced without changing
+the manifest or migration model.
 
 ## Crash Recovery
 
@@ -152,4 +156,3 @@ All caches must be bounded and observable.
 - A 2 GiB Telegram file limit constrains object chunking and manifest design.
 - Strong S3 versioning and object-lock semantics need compatibility layers.
 - Presigned URL and server-side copy behavior must be explicitly tested.
-

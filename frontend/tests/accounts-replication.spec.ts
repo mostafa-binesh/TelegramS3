@@ -71,6 +71,30 @@ test('additional accounts use an isolated onboarding wizard', async ({ page }) =
   expect(state.replicationBody).toMatchObject({ bucket: 'release-test', mode: 'automatic', access_mode: 'access' });
 });
 
+test('accounts workspace keeps tabs and account details separated', async ({ page }) => {
+  await mockConsole(page);
+  await page.goto('/_admin/accounts');
+
+  const firstSectionTab = page.locator('.account-tabs button').first();
+  await expect(firstSectionTab).toHaveCSS('display', 'flex');
+  await expect(firstSectionTab.locator('strong')).toHaveText('Connections');
+  await expect(firstSectionTab.locator('small')).toHaveText('Accounts and health');
+  await expect(firstSectionTab.locator('> span:last-child')).toHaveCSS('display', 'grid');
+
+  const firstAccountCard = page.locator('.account-card-grid .account-card').first();
+  await expect(firstAccountCard).toHaveCSS('display', 'grid');
+  await expect(firstAccountCard.locator('.account-card-copy')).toHaveCSS('display', 'grid');
+  await expect(firstAccountCard.locator('.account-card-copy strong')).toHaveText('Primary');
+
+  const accountTitle = firstAccountCard.locator('.account-card-copy strong');
+  const accountPhone = firstAccountCard.locator('.account-card-copy small').nth(1);
+  const titleBox = await accountTitle.boundingBox();
+  const phoneBox = await accountPhone.boundingBox();
+  expect(titleBox).not.toBeNull();
+  expect(phoneBox).not.toBeNull();
+  expect(phoneBox!.y).toBeGreaterThan(titleBox!.y);
+});
+
 test('replica badge shows account details and bulk replication keeps the selected keys', async ({ page }) => {
   const state = await mockConsole(page);
   await page.goto('/_admin/buckets');

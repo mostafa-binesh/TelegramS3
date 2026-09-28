@@ -3,7 +3,8 @@
 Phase 3 has implemented the manifest/chunk object-format backend, and Phase 4
 now wires the RustFS-backed S3 server through that layer for the CRUD slice.
 Committed payloads are stored as Telegram documents/messages while SQLite
-keeps the control-plane metadata and journal. The rows below track externally
+keeps the control-plane metadata and journal through a bounded eight-handle
+connection pool. The rows below track externally
 visible S3 API wiring; implemented entries are available through `server`, and
 the standard S3 CRUD smoke test now passes. The authenticated operator frontend
 and `/_admin` JSON API are operational surfaces, not S3 compatibility

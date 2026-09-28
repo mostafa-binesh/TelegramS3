@@ -289,6 +289,13 @@ The local SQLite database tracks the live object index and journal. In this
 repo, that behavior is implemented by the versioned metadata store described in
 `docs/metadata-store.md`.
 
+The metadata store uses a bounded pool of eight SQLite handles. File-backed
+handles use WAL, `FULL` synchronous durability, foreign-key enforcement, and a
+30-second busy timeout. A low-level handle failure is isolated and replaced;
+this improves process resilience and concurrent read throughput but does not
+repair a corrupt metadata file. The pool does not change the manifest format or
+require a schema migration.
+
 The database tracks:
 
 - bucket rows (created through the S3 API or the authenticated `/_admin` UI)

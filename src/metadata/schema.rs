@@ -1,3 +1,4 @@
+use super::pool::DEFAULT_CONNECTION_POOL_SIZE;
 use super::rows::{count_rows, parse_rfc3339_timestamp, timestamp_now};
 use super::{MetadataError, MetadataStatus, MetadataStore, SCHEMA_VERSION};
 use crate::config::{DEFAULT_DOWNLOAD_FAILOVER_RETRIES, DEFAULT_DOWNLOAD_PREFETCH_CHUNKS};
@@ -11,15 +12,10 @@ impl MetadataStore {
         }
         create_private_metadata_file(&path)?;
 
-        let connection = Connection::open(&path)?;
-        connection.busy_timeout(std::time::Duration::from_secs(30))?;
-        connection.pragma_update(None, "foreign_keys", true)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "synchronous", "FULL")?;
-
+        let pool = super::pool::ConnectionPool::open_file(&path, DEFAULT_CONNECTION_POOL_SIZE)?;
         let store = Self {
             path: Some(path),
-            connection: std::sync::Mutex::new(connection),
+            pool,
         };
         store.with_connection(|connection| {
             apply_migrations(connection)?;
@@ -31,15 +27,14 @@ impl MetadataStore {
     }
 
     pub fn open_in_memory() -> Result<Self, MetadataError> {
-        let connection = Connection::open_in_memory()?;
-        connection.busy_timeout(std::time::Duration::from_secs(30))?;
-        connection.pragma_update(None, "foreign_keys", true)?;
-        connection.pragma_update(None, "synchronous", "FULL")?;
-
-        let store = Self {
-            path: None,
-            connection: std::sync::Mutex::new(connection),
-        };
+        let pool = super::pool::ConnectionPool::open_shared_memory(
+            format!(
+                "file:telegram_s3_metadata_{}?mode=memory&cache=shared",
+                uuid::Uuid::new_v4()
+            ),
+            DEFAULT_CONNECTION_POOL_SIZE,
+        )?;
+        let store = Self { path: None, pool };
         store.with_connection(|connection| {
             apply_migrations(connection)?;
             backfill_cleanup_outbox(connection)?;

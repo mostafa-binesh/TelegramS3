@@ -52,6 +52,9 @@ Completed work:
 - committed object payloads now live in Telegram documents/messages while SQLite keeps the control-plane index and journal
 - `doctor` and `server` now fail fast if object-format bootstrap finds unresolved recovery state
 - server listeners bind before the first Telegram-backed recovery snapshot; the background worker publishes recovery visibility after startup instead of blocking the container on remote chunk reads
+- local metadata uses a bounded eight-handle SQLite pool with WAL, busy-timeout
+  protection, and replacement of isolated low-level connection failures; this
+  is runtime-only and does not require a schema migration
 
 ## Phase 4 - RustFS integration
 

@@ -7,13 +7,25 @@ object visibility, recovery, and index rebuilding. Telegram remains the remote
 durable envelope for manifests and chunks, but the service never relies on
 Telegram alone to answer read/write consistency questions.
 
+## Connection Pool
+
+The metadata store opens a bounded pool of eight SQLite connections. File-backed
+stores configure every handle with WAL mode, foreign keys, `FULL` synchronous
+durability, and the existing 30-second busy timeout. Separate handles allow
+metadata reads to proceed concurrently while SQLite still serializes writes.
+
+If a handle reports a low-level I/O, corruption, open, or read-only failure, the
+pool discards only that handle and opens a replacement. This protects the
+process from one bad connection; it cannot repair a damaged database file.
+The pool is an in-process runtime change and requires no schema migration.
+
 ## Schema Version
 
-- Current schema version: `13`
+- Current schema version: `19`
 - Version contract: migrations are applied on startup and are also available
   through the `telegram-s3 db migrate` command.
-- Startup behavior: the store opens the configured SQLite file, creates the
-  schema if needed, rebuilds the active index, and records recovery markers for
+- Startup behavior: the store opens the configured SQLite file and connection
+  pool, creates the schema if needed, rebuilds the active index, and records recovery markers for
   staged operations. The object-format bootstrap layer now uses the same store
   to reconcile staged uploads, recovery-required objects, quarantined orphans,
   tombstoned rows, and bucket state before `doctor` or `server` report

@@ -13,6 +13,13 @@ failed replication or re-chunk jobs before retrying them. An access-only record
 is not a second copy: it is recoverable only while the target session can read
 the shared Telegram chat.
 
+The runtime opens the restored file through a bounded eight-connection SQLite
+pool. Each handle uses WAL, foreign keys, `FULL` synchronous durability, and a
+30-second busy timeout. A low-level failure discards and replaces one handle;
+this does not make a corrupt or inaccessible database recoverable. After a
+restore, run the normal `db status`, `index verify`, and application health
+checks rather than relying only on the pool being able to open a connection.
+
 The admin bucket-level re-chunk action expands selected buckets into their
 committed objects and queues independent durable jobs. A restart can therefore
 resume or inspect each object job separately; it does not create a single

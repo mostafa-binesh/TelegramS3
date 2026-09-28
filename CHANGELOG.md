@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.7.6-rc.12 - 2026-09-28
+
+### Resilient metadata connection pool and Accounts layout
+
+- Replaced the single process-wide SQLite connection mutex with a bounded pool
+  of eight independently configured metadata connections. File-backed handles
+  use WAL, foreign-key enforcement, `FULL` synchronous durability, and the
+  existing 30-second busy timeout, allowing concurrent metadata reads while
+  keeping SQLite write ordering intact.
+- Isolated low-level SQLite I/O, corruption, open, and read-only failures to
+  the affected handle. The pool discards that handle and immediately attempts
+  to replace it, so one connection failure does not take down the metadata
+  service. This is runtime-only and does not require a database migration.
+- Added Rust coverage for pool replacement and parallel reads, and documented
+  the operational and recovery boundaries in the metadata, storage-format,
+  S3-compatibility, disaster-recovery, README, roadmap, and ADR documents.
+- Restored the Accounts page layout styling so connection tabs, account cards,
+  labels, status details, and the add-account tile remain separated and
+  responsive. Added a Playwright regression test for the visible layout.
+
 ## 0.7.6-rc.11 - 2026-09-28
 
 ### Replica layout mismatch visibility and download failover

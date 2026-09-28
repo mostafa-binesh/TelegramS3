@@ -1,8 +1,7 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, ErrorCode};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Mutex;
 use thiserror::Error;
 
 const SCHEMA_VERSION: u32 = 19;
@@ -122,7 +121,7 @@ pub(crate) struct TrafficTotals {
 
 pub struct MetadataStore {
     path: Option<PathBuf>,
-    connection: Mutex<Connection>,
+    pool: ConnectionPool,
 }
 
 impl MetadataStore {
@@ -134,11 +133,15 @@ impl MetadataStore {
         &self,
         f: impl FnOnce(&mut Connection) -> Result<T, MetadataError>,
     ) -> Result<T, MetadataError> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| MetadataError::Poisoned)?;
-        f(&mut connection)
+        let mut connection = self.pool.checkout()?;
+        let result = f(connection.as_mut());
+        if result
+            .as_ref()
+            .is_err_and(|error| error.should_discard_connection())
+        {
+            connection.discard();
+        }
+        result
     }
 }
 
@@ -148,6 +151,7 @@ mod buckets;
 mod connection_removal;
 mod manifests;
 mod multipart;
+mod pool;
 mod recovery;
 mod rows;
 mod schema;
@@ -162,3 +166,22 @@ pub use self::manifests::{JournalEntry, TombstonedManifestRecord};
 pub use self::recovery::{RebuildReport, VerifyReport};
 pub use self::settings::{RecoveryAck, RecoveryAcknowledgements, TelegramBootstrapSettings};
 pub use self::shares::ShareLinkRecord;
+
+use self::pool::ConnectionPool;
+
+impl MetadataError {
+    fn should_discard_connection(&self) -> bool {
+        matches!(
+            self,
+            Self::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
+                if matches!(
+                    failure.code,
+                    ErrorCode::SystemIoFailure
+                        | ErrorCode::DatabaseCorrupt
+                        | ErrorCode::NotADatabase
+                        | ErrorCode::CannotOpen
+                        | ErrorCode::ReadOnly
+                )
+        )
+    }
+}
