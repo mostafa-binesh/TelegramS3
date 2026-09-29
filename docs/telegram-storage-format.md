@@ -135,6 +135,12 @@ The same page can queue a manual verifier run; it uses the worker's normal
 sampling and recovery path, and the configured interval begins again when that
 run completes. No manifest or migration data is needed for the trigger.
 
+The Storage policy page can also wake the cleanup worker with **Run eligible
+cleanup now**. The worker still uses each target's persisted `due_at`, records
+deletion evidence before removing Telegram messages, preserves shared-message
+references and active-read pins, and leaves `recovery_required` targets for
+operator recovery. This wake action requires no manifest or schema migration.
+
 A confirmed missing Telegram message, decryption failure, or checksum mismatch
 on a physical replica is logged as a per-account integrity event. If another
 location verifies successfully, the server uploads the exact verified encrypted

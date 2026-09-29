@@ -137,6 +137,8 @@ while transient account/network failures remain retryable.
   for recent public/admin/S3 streams,
   and a Storage policy action that manually queues the integrity verifier and
   resets its next scheduled interval after the run completes,
+  plus a safe **Run eligible cleanup now** action that wakes the durable worker
+  without bypassing retention windows or recovery-required quarantine,
   operator accounts (superadmin-only add/remove), in-app bucket
   creation, and a bucket/object browser (prefix folders + directory markers +
   delete + per-file **upload/download**). Binary content is streamed through

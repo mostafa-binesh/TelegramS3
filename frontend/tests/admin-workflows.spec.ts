@@ -154,6 +154,10 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
       if (options.storageFailure) return route.fulfill({ status: 409, json: { error: 'automatic recovery verification is disabled' } });
       return route.fulfill({ status: 202, json: { ok: true, message: 'Integrity scan queued. Its automatic interval restarts after the scan finishes.' } });
     }
+    if (path === '/cleanup/eligible-now' && request.method() === 'POST') {
+      if (options.storageFailure) return route.fulfill({ status: 500, json: { error: 'eligible cleanup could not be queued' } });
+      return route.fulfill({ status: 202, json: { ok: true, message: 'Eligible cleanup queued. Retention windows and recovery-required targets are not bypassed.' } });
+    }
     if (path === '/telegram/disconnect' && request.method() === 'POST') {
       connectionRemoved = true;
       return route.fulfill({ status: 202, json: { ok: true, job: { id: 'removal-1', state: 'pending', delete_uploaded_files: false }, message: 'Connection removed.' } });
@@ -745,6 +749,27 @@ test('manual integrity verification reports a disabled-verifier error', async ({
   await page.getByRole('button', { name: 'Storage settings' }).click();
   await page.getByRole('button', { name: 'Run integrity check now' }).click();
   await expect(page.locator('p.storage-message[role="alert"]')).toContainText('automatic recovery verification is disabled');
+});
+
+test('storage policy can run only eligible cleanup and keeps retention protected', async ({ page }) => {
+  await mockAdminApi(page);
+  await signIn(page);
+  await page.getByRole('button', { name: 'Storage settings' }).click();
+  const [cleanupRequest] = await Promise.all([
+    page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/cleanup/eligible-now') && candidate.method() === 'POST'),
+    page.getByRole('button', { name: 'Run eligible cleanup now' }).click()
+  ]);
+  expect(cleanupRequest.postDataJSON()).toBeNull();
+  await expect(page.locator('p.storage-message[role="status"]')).toContainText('Retention windows');
+  await expect(page.getByRole('button', { name: 'Run eligible cleanup now' })).toBeEnabled();
+});
+
+test('eligible cleanup reports a worker wake failure', async ({ page }) => {
+  await mockAdminApi(page, { storageFailure: true });
+  await signIn(page);
+  await page.getByRole('button', { name: 'Storage settings' }).click();
+  await page.getByRole('button', { name: 'Run eligible cleanup now' }).click();
+  await expect(page.locator('p.storage-message[role="alert"]')).toContainText('eligible cleanup could not be queued');
 });
 
 test('storage policy success is reflected after leaving and returning to the tab', async ({ page }) => {

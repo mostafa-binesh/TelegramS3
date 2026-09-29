@@ -50,6 +50,7 @@
   export let storageSettingsMessage = '';
   export let onSaveStorageSettings: () => Promise<void> = async () => {};
   export let onRunRecoveryVerification: () => Promise<void> = async () => {};
+  export let onRunEligibleCleanup: () => Promise<void> = async () => {};
   export let hideTabs = false;
 
   let showRemoveConnection = false;
@@ -58,6 +59,7 @@
   let removeBusy = false;
   let removeError = '';
   let recoveryRunBusy = false;
+  let cleanupRunBusy = false;
 
   $: connectionState = overview?.telegram?.connection_state ?? 'needs_reauth';
   $: connected = connectionState === 'connected';
@@ -136,6 +138,18 @@
       recoveryRunBusy = false;
     }
   }
+
+  async function runEligibleCleanup() {
+    if (cleanupRunBusy) return;
+    cleanupRunBusy = true;
+    try {
+      await onRunEligibleCleanup();
+    } catch {
+      // The parent owns the shared storage-policy error message.
+    } finally {
+      cleanupRunBusy = false;
+    }
+  }
 </script>
 
 {#if !hideTabs}<div class="settings-tabs" role="tablist" aria-label="Telegram settings sections">
@@ -202,6 +216,7 @@
           {#each [{label: '1 hour', value: 3600}, {label: '12 hours', value: 43200}, {label: '24 hours', value: 86400}, {label: '7 days', value: 604800}] as preset}<button class:chosen={Number(cleanupRetentionSecs) === preset.value} type="button" on:click={() => cleanupRetentionSecs = preset.value}>{preset.label}</button>{/each}
         </div>
         <p id="cleanup-retention-help" class="range-help">Allowed range: {cleanupRetentionMin}–{cleanupRetentionMax} seconds. The default is 12 hours.</p>
+        <div class="manual-verifier-row"><div><strong>Eligible cleanup</strong><small>Wake the cleanup worker now. Only expired retention windows are processed; scheduled and recovery-required targets stay protected.</small></div><button class="secondary" type="button" disabled={cleanupRunBusy} on:click={() => void runEligibleCleanup()}>{cleanupRunBusy ? 'Starting…' : 'Run eligible cleanup now'}</button></div>
         <div class="verification-heading"><div><span class="eyebrow">Recovery verifier</span><h3>Random health checks</h3></div><span class:disabled={!recoveryVerifyEnabled} class="policy-badge">{recoveryVerifyEnabled ? `${recoveryVerifyChunks} chunk${Number(recoveryVerifyChunks) === 1 ? '' : 's'} / file` : 'Disabled'}</span></div>
         <label class="verification-toggle"><input bind:checked={recoveryVerifyEnabled} type="checkbox" aria-describedby="recovery-verify-help" /><span><strong>Enable automatic recovery verification</strong><small>When disabled, the server will not schedule remote chunk checks or quarantine objects from verifier scans.</small></span></label>
         <p class="policy-description">When enabled, the server downloads a fresh random sample from every healthy committed object at each interval and verifies its checksum. It never re-uploads a failed chunk automatically.</p>

@@ -75,7 +75,9 @@ staging, and recovery artifacts, not committed payloads.
   Storage policy also controls whether the first remote scan runs immediately
   when the server starts or waits for the configured interval, and provides a
   **Run integrity check now** action that resets the interval after the manual
-  scan completes.
+  scan completes. It also provides **Run eligible cleanup now**, which wakes
+  the durable cleanup worker without bypassing retention or recovery-required
+  safeguards.
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
   operator account management, in-app bucket creation, bucket/object browser
   with per-file upload, ranged download, guarded folder deletion, and resilient
@@ -393,7 +395,9 @@ behavior.
 Cleanup retention is persisted in `app_settings` and can be changed from the
 same page. It defaults to 12 hours, accepts one hour through 30 days, and
 controls future delayed/orphan cleanup targets; existing scheduled and
-recovery-required rows keep their current state.
+recovery-required rows keep their current state. **Run eligible cleanup now**
+only wakes the worker to process targets whose retention window has already
+expired; it does not change any target's due time.
 The complete reference lives in [docs/configuration.md](docs/configuration.md);
 the most important variables:
 

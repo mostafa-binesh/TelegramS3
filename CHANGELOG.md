@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.6-rc.20 - 2026-09-30
+
+### Eligible cleanup trigger
+
+- Added **Run eligible cleanup now** to Telegram settings → Storage policy.
+  It wakes the existing durable cleanup worker without bypassing per-target
+  retention windows.
+- Scheduled/not-yet-due targets, `recovery_required` targets, active-read pins,
+  shared-message references, and evidence-first ordering remain enforced by the
+  same database claim and cleanup path.
+- Added an authenticated CSRF-protected admin endpoint with accepted/error UI
+  feedback, plus Rust and Playwright coverage for the manual wake behavior.
+- Documented that this is a worker wake action, not a retention override, and
+  does not require a database migration.
+
 ## 0.7.6-rc.19 - 2026-09-30
 
 ### Manual integrity verification

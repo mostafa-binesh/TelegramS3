@@ -559,6 +559,9 @@ impl AdminUiState {
         if method == Method::POST && rest == "recovery/verify-now" {
             return self.handle_recovery_verify_now().await;
         }
+        if method == Method::POST && rest == "cleanup/eligible-now" {
+            return self.handle_cleanup_eligible_now().await;
+        }
         if method == Method::POST && rest == "recovery/acknowledge" {
             return self
                 .handle_recovery_acknowledge(request, &principal, true)
@@ -3114,6 +3117,17 @@ impl AdminUiState {
             }
             Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         }
+    }
+
+    async fn handle_cleanup_eligible_now(&self) -> Response<Body> {
+        self.object_format.trigger_eligible_cleanup();
+        json_response(
+            StatusCode::ACCEPTED,
+            serde_json::json!({
+                "ok": true,
+                "message": "Eligible cleanup queued. Retention windows and recovery-required targets are not bypassed."
+            }),
+        )
     }
 
     /// Add or remove operator acknowledgements for recovery issues.

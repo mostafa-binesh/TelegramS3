@@ -241,6 +241,9 @@ recovery boundary.
    Telegram settings for future delayed cleanup targets. Run
    `telegram-s3 gc --dry-run` when reviewing older tombstones or a manual
    cleanup scope; Telegram message removal remains evidence-first and retryable.
+   The Storage policy page also offers **Run eligible cleanup now**; it wakes
+   the same worker but processes only already-due targets and never bypasses
+   retention or `recovery_required` quarantine.
 4. Run `telegram-s3 gc` only when the dry-run output matches the intended
    cleanup scope.
 

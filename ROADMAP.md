@@ -393,6 +393,9 @@ Multi-user boundary for the next increment:
 - [x] Added a manual Storage policy verifier action. It queues the same worker
   scan immediately, resets the next interval after completion, rejects runs
   while verification is disabled, and has Rust and Playwright coverage.
+- [x] Added a manual eligible-cleanup action. It wakes the durable cleanup
+  worker without bypassing retention windows, evidence-first ordering, or
+  `recovery_required` quarantine, with Rust and Playwright coverage.
 
 Remaining Phase 10 work:
 

@@ -174,6 +174,13 @@ same verifier worker path immediately; after that scan finishes, the normal
 interval starts over, so a manual run does not cause an additional near-term
 scheduled scan. The action is disabled when automatic verification is disabled.
 
+The same page has **Run eligible cleanup now**. It wakes the existing durable
+cleanup worker immediately, but the worker still claims only targets whose
+retention window has expired. It does not rewrite `due_at`, bypass
+`recovery_required`, skip evidence-first ordering, or delete messages that are
+still referenced or being read. This is a worker wake action and requires no
+database migration.
+
 The authenticated Overview also shows `Telegram files`, the logical byte total
 of unique committed Telegram chunk payloads. Reused chunk references are
 counted once; Telegram protocol, message, and encryption-envelope overhead are

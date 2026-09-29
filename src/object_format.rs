@@ -1182,6 +1182,14 @@ impl ObjectFormatService {
         Ok(())
     }
 
+    /// Wake the cleanup worker to process targets that are already eligible.
+    /// Retention timestamps remain authoritative, so this never makes scheduled
+    /// or recovery-required targets eligible early.
+    pub fn trigger_eligible_cleanup(&self) {
+        self.ensure_workers();
+        self.notify_cleanup_worker();
+    }
+
     pub fn recovery_verify_startup(&self) -> bool {
         *self
             .recovery_verify_startup
@@ -5536,6 +5544,41 @@ mod tests {
         })
         .await
         .expect("manual verifier scan should start");
+        service.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn manual_cleanup_trigger_wakes_worker_for_due_targets() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        let manifest = service
+            .put_bytes("bucket", "cleanup-now.txt", "text/plain", b"cleanup now")
+            .await
+            .expect("put object");
+        service
+            .tombstone_manifest(manifest.object_id, "manual cleanup test")
+            .expect("tombstone");
+        service.shutdown_workers().await;
+        service
+            .metadata
+            .make_cleanup_due(&manifest.object_id.to_string())
+            .expect("make cleanup due");
+
+        service.trigger_eligible_cleanup();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if service
+                    .metadata
+                    .cleanup_complete_for_object(&manifest.object_id.to_string())
+                    .expect("cleanup state")
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("eligible cleanup should be processed");
         service.shutdown_workers().await;
     }
 

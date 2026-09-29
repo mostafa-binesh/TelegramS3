@@ -204,6 +204,12 @@ export function runRecoveryVerificationNow(csrf?: string | null) {
   });
 }
 
+export function runEligibleCleanupNow(csrf?: string | null) {
+  return requestJson<{ ok: boolean; message: string }>('/cleanup/eligible-now', csrf, {
+    method: 'POST'
+  });
+}
+
 export function listUsers(csrf?: string | null) {
   return requestJson<UsersState>('/users', csrf);
 }
