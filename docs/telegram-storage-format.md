@@ -131,6 +131,9 @@ be changed from the authenticated Storage policy page. Disabling the verifier
 stops its automatic worker scans while preserving the other policy values and
 existing recovery findings. Environment variables only seed missing database
 settings.
+The same page can queue a manual verifier run; it uses the worker's normal
+sampling and recovery path, and the configured interval begins again when that
+run completes. No manifest or migration data is needed for the trigger.
 
 A confirmed missing Telegram message, decryption failure, or checksum mismatch
 on a physical replica is logged as a per-account integrity event. If another

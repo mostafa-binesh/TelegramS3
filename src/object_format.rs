@@ -715,6 +715,7 @@ struct WorkerRuntime {
     shutdown: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     cleanup_wake: Arc<tokio::sync::Notify>,
+    recovery_wake: Arc<tokio::sync::Notify>,
 }
 
 impl Default for WorkerRuntime {
@@ -724,6 +725,7 @@ impl Default for WorkerRuntime {
             shutdown: Mutex::new(None),
             handles: Mutex::new(Vec::new()),
             cleanup_wake: Arc::new(tokio::sync::Notify::new()),
+            recovery_wake: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
@@ -1164,6 +1166,20 @@ impl ObjectFormatService {
             .recovery_verify_enabled
             .write()
             .expect("recovery verification enabled lock") = enabled;
+    }
+
+    /// Queue one verifier scan immediately. The recovery worker owns the
+    /// actual scan so a manual run cannot race a scheduled run, and the
+    /// worker starts a fresh interval after the scan completes.
+    pub fn trigger_recovery_verification(&self) -> Result<(), ObjectFormatError> {
+        if !self.recovery_verifier_enabled() {
+            return Err(ObjectFormatError::InvalidPlan(
+                "automatic recovery verification is disabled".to_string(),
+            ));
+        }
+        self.ensure_workers();
+        self.worker_runtime.recovery_wake.notify_one();
+        Ok(())
     }
 
     pub fn recovery_verify_startup(&self) -> bool {
@@ -5490,6 +5506,37 @@ mod tests {
         assert!(snapshot.0.is_none());
         assert_eq!(snapshot.1.len(), 0);
         assert_eq!(snapshot.2.as_deref(), Some("Recovery scan pending"));
+    }
+
+    #[tokio::test]
+    async fn manual_verifier_trigger_wakes_worker_and_disabled_policy_rejects_it() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        service.shutdown_workers().await;
+        service.set_recovery_verify_startup(false);
+        service.set_recovery_verifier_enabled(false);
+        assert!(matches!(
+            service.trigger_recovery_verification(),
+            Err(ObjectFormatError::InvalidPlan(message))
+                if message == "automatic recovery verification is disabled"
+        ));
+
+        service.set_recovery_verifier_enabled(true);
+        let before = service.recovery_verifier_metrics().scan_runs;
+        service
+            .trigger_recovery_verification()
+            .expect("manual verifier trigger");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if service.recovery_verifier_metrics().scan_runs > before {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("manual verifier scan should start");
+        service.shutdown_workers().await;
     }
 
     #[tokio::test]

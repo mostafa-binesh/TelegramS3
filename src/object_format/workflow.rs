@@ -493,6 +493,7 @@ impl ObjectFormatService {
         });
         let service = self.clone();
         let mut recovery_shutdown = shutdown_rx.clone();
+        let recovery_wake = Arc::clone(&self.worker_runtime.recovery_wake);
         let recovery_handle = tokio::spawn(async move {
             if service.recovery_verifier_enabled() && service.recovery_verify_startup() {
                 let _ = service.refresh_recovery_snapshot().await;
@@ -504,12 +505,18 @@ impl ObjectFormatService {
                 if !service.recovery_verifier_enabled() {
                     tokio::select! {
                         _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                        _ = recovery_wake.notified() => {},
                         _ = recovery_shutdown.changed() => {}
                     }
                     continue;
                 }
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(service.recovery_verify_interval_secs())) => {
+                        if service.recovery_verifier_enabled() {
+                            let _ = service.refresh_recovery_snapshot().await;
+                        }
+                    }
+                    _ = recovery_wake.notified() => {
                         if service.recovery_verifier_enabled() {
                             let _ = service.refresh_recovery_snapshot().await;
                         }

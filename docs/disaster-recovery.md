@@ -302,6 +302,11 @@ duration. The Overview also reports total scans, failed scans, last start/end
 timestamps, and the last scan duration. These are runtime diagnostics and are
 not required to rebuild object state.
 
+Operators can use **Run integrity check now** in Telegram settings → Storage
+policy to wake the verifier worker immediately. The worker owns the run and
+restarts the configured interval after it completes; if the verifier is
+disabled, the action is rejected and no scan is started.
+
 If a sampled message is confirmed missing, cannot be decrypted, or fails its
 checksum, the verifier records the account, chunk, failure, and repair state in
 the durable integrity-event log. A healthy physical replica is used as the

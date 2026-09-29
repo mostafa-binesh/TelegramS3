@@ -390,6 +390,9 @@ Multi-user boundary for the next increment:
 - [x] Added schema v22 for the persisted first-remote-scan-on-startup policy.
   The Storage policy UI can defer that first scan without disabling recurring
   verifier scans, with migration and browser coverage.
+- [x] Added a manual Storage policy verifier action. It queues the same worker
+  scan immediately, resets the next interval after completion, rejects runs
+  while verification is disabled, and has Rust and Playwright coverage.
 
 Remaining Phase 10 work:
 

@@ -150,6 +150,10 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
       cleanupRetentionSecs = body.cleanup_retention_secs;
       return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_failover_retries: downloadFailoverRetries, min_download_failover_retries: 0, max_download_failover_retries: 8, recovery_verify_enabled: recoveryVerifyEnabled, recovery_verify_startup: recoveryVerifyStartup, recovery_verify_interval_secs: recoveryVerifyIntervalSecs, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: recoveryVerifyChunks, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: cleanupRetentionSecs, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
     }
+    if (path === '/recovery/verify-now' && request.method() === 'POST') {
+      if (options.storageFailure) return route.fulfill({ status: 409, json: { error: 'automatic recovery verification is disabled' } });
+      return route.fulfill({ status: 202, json: { ok: true, message: 'Integrity scan queued. Its automatic interval restarts after the scan finishes.' } });
+    }
     if (path === '/telegram/disconnect' && request.method() === 'POST') {
       connectionRemoved = true;
       return route.fulfill({ status: 202, json: { ok: true, job: { id: 'removal-1', state: 'pending', delete_uploaded_files: false }, message: 'Connection removed.' } });
@@ -720,6 +724,27 @@ test('storage policy can defer the first remote verifier scan until its interval
   expect(saveRequest.postDataJSON()).toMatchObject({ recovery_verify_enabled: true, recovery_verify_startup: false });
   await expect(page.locator('p.storage-message[role="status"]')).toContainText('Storage policy updated.');
   await expect(page.getByText('The first remote scan waits for the configured verification interval.')).toBeVisible();
+});
+
+test('storage policy can run the integrity verifier manually and reset its interval', async ({ page }) => {
+  await mockAdminApi(page);
+  await signIn(page);
+  await page.getByRole('button', { name: 'Storage settings' }).click();
+  const [verifyRequest] = await Promise.all([
+    page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/recovery/verify-now') && candidate.method() === 'POST'),
+    page.getByRole('button', { name: 'Run integrity check now' }).click()
+  ]);
+  expect(verifyRequest.postDataJSON()).toBeNull();
+  await expect(page.locator('p.storage-message[role="status"]')).toContainText('Integrity scan queued.');
+  await expect(page.getByRole('button', { name: 'Run integrity check now' })).toBeEnabled();
+});
+
+test('manual integrity verification reports a disabled-verifier error', async ({ page }) => {
+  await mockAdminApi(page, { storageFailure: true });
+  await signIn(page);
+  await page.getByRole('button', { name: 'Storage settings' }).click();
+  await page.getByRole('button', { name: 'Run integrity check now' }).click();
+  await expect(page.locator('p.storage-message[role="alert"]')).toContainText('automatic recovery verification is disabled');
 });
 
 test('storage policy success is reflected after leaving and returning to the tab', async ({ page }) => {

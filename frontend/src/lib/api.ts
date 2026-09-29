@@ -198,6 +198,12 @@ export function unacknowledgeRecovery(csrf: string | null | undefined, ids: stri
   });
 }
 
+export function runRecoveryVerificationNow(csrf?: string | null) {
+  return requestJson<{ ok: boolean; message: string }>('/recovery/verify-now', csrf, {
+    method: 'POST'
+  });
+}
+
 export function listUsers(csrf?: string | null) {
   return requestJson<UsersState>('/users', csrf);
 }

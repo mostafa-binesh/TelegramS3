@@ -37,6 +37,7 @@
     queueRechunk,
     listReplicas,
     runStageMetricsTest,
+    runRecoveryVerificationNow,
   } from './lib/api';
   import {normalizeError} from './lib/format';
   import type {
@@ -517,6 +518,18 @@
       throw cause;
     } finally {
       storageSettingsBusy = false;
+    }
+  }
+
+  async function runRecoveryVerificationNowFromSettings() {
+    storageSettingsError = '';
+    storageSettingsMessage = '';
+    try {
+      const result = await runRecoveryVerificationNow(session?.csrf_token);
+      storageSettingsMessage = result.message;
+    } catch (cause) {
+      storageSettingsError = normalizeError(cause);
+      throw cause;
     }
   }
 
@@ -1373,7 +1386,7 @@
         {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else if routeLoadError}<LoadError title="Could not load interrupted transfers" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {/if}
     {:else if view === 'telegram'}
-      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab="storage" hideTabs {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} bind:downloadPrefetchChunks {downloadPrefetchChunksMin} {downloadPrefetchChunksMax} bind:downloadFailoverRetries {downloadFailoverRetriesMin} {downloadFailoverRetriesMax} bind:recoveryVerifyEnabled bind:recoveryVerifyStartup bind:recoveryVerifyIntervalSecs {recoveryVerifyIntervalMin} {recoveryVerifyIntervalMax} bind:recoveryVerifyChunks {recoveryVerifyChunksMin} {recoveryVerifyChunksMax} bind:cleanupRetentionSecs {cleanupRetentionMin} {cleanupRetentionMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Storage settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
+      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab="storage" hideTabs {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} bind:downloadPrefetchChunks {downloadPrefetchChunksMin} {downloadPrefetchChunksMax} bind:downloadFailoverRetries {downloadFailoverRetriesMin} {downloadFailoverRetriesMax} bind:recoveryVerifyEnabled bind:recoveryVerifyStartup bind:recoveryVerifyIntervalSecs {recoveryVerifyIntervalMin} {recoveryVerifyIntervalMax} bind:recoveryVerifyChunks {recoveryVerifyChunksMin} {recoveryVerifyChunksMax} bind:cleanupRetentionSecs {cleanupRetentionMin} {cleanupRetentionMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm} onRunRecoveryVerification={runRecoveryVerificationNowFromSettings}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Storage settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')} onStageMetricsTest={runStageMetricsDiagnostic} stageTestBusy={stageTestBusy}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}

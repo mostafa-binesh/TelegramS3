@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.6-rc.19 - 2026-09-30
+
+### Manual integrity verification
+
+- Added **Run integrity check now** to Telegram settings → Storage policy.
+  It queues the existing verifier worker immediately, uses the same random
+  sampling and recovery path as scheduled scans, and resets the next automatic
+  interval after the manual run completes.
+- Prevented manual runs while the verifier is disabled and added clear
+  accepted/error responses for the action.
+- Added a worker wake signal instead of a second scan implementation, plus
+  Rust coverage for the disabled guard and worker wake-up behavior.
+- Added Playwright coverage for the request payload, success feedback, and
+  disabled-verifier error path.
+- Documented the manual trigger and its no-migration boundary across the
+  configuration, recovery, compatibility, storage-format, roadmap, README,
+  and ADR documentation.
+
 ## 0.7.6-rc.18 - 2026-09-30
 
 ### Metadata-only moves and shared-chat replication

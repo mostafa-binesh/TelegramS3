@@ -23,7 +23,8 @@ use crate::metadata::{
     MetadataStore, RecoveryAck, RecoveryAcknowledgements, TelegramBootstrapSettings,
 };
 use crate::object_format::{
-    ObjectFormatService, RecoveryIssue as RecoveryIssueModel, TelegramAccountHealthSnapshot,
+    ObjectFormatError, ObjectFormatService, RecoveryIssue as RecoveryIssueModel,
+    TelegramAccountHealthSnapshot,
 };
 use crate::redact::redact_path;
 use crate::telegram::{
@@ -554,6 +555,9 @@ impl AdminUiState {
         if method == Method::POST && rest == "recovery/repair" {
             self.object_format.ensure_workers();
             return self.handle_recovery_repair().await;
+        }
+        if method == Method::POST && rest == "recovery/verify-now" {
+            return self.handle_recovery_verify_now().await;
         }
         if method == Method::POST && rest == "recovery/acknowledge" {
             return self
@@ -3090,6 +3094,24 @@ impl AdminUiState {
                     "report": report,
                 }),
             ),
+            Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        }
+    }
+
+    async fn handle_recovery_verify_now(&self) -> Response<Body> {
+        match self.object_format.trigger_recovery_verification() {
+            Ok(()) => json_response(
+                StatusCode::ACCEPTED,
+                serde_json::json!({
+                    "ok": true,
+                    "message": "Integrity scan queued. Its automatic interval restarts after the scan finishes."
+                }),
+            ),
+            Err(ObjectFormatError::InvalidPlan(message))
+                if message == "automatic recovery verification is disabled" =>
+            {
+                json_error(StatusCode::CONFLICT, &message)
+            }
             Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         }
     }

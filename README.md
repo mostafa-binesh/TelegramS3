@@ -73,7 +73,9 @@ staging, and recovery artifacts, not committed payloads.
   last duration in the authenticated Overview. Cleanup telemetry separates
   due work, scheduled/not-yet-claimable work, and recovery-required targets.
   Storage policy also controls whether the first remote scan runs immediately
-  when the server starts or waits for the configured interval.
+  when the server starts or waits for the configured interval, and provides a
+  **Run integrity check now** action that resets the interval after the manual
+  scan completes.
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
   operator account management, in-app bucket creation, bucket/object browser
   with per-file upload, ranged download, guarded folder deletion, and resilient

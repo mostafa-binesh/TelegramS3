@@ -135,6 +135,8 @@ while transient account/network failures remain retryable.
   and a bounded Download stage metrics testing section that separates first
   chunk, Telegram, retry-wait, decrypt, checksum-verify, and total read time
   for recent public/admin/S3 streams,
+  and a Storage policy action that manually queues the integrity verifier and
+  resets its next scheduled interval after the run completes,
   operator accounts (superadmin-only add/remove), in-app bucket
   creation, and a bucket/object browser (prefix folders + directory markers +
   delete + per-file **upload/download**). Binary content is streamed through

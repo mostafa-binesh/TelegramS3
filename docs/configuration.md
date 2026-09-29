@@ -169,6 +169,10 @@ that have no stored policy; the database values are authoritative afterward.
 The overview shows the enabled/disabled state, next scheduled scan, sample
 size, distinct confirmed broken-file count, and the current verifier problem
 list.
+The Storage policy page also has **Run integrity check now**. It queues the
+same verifier worker path immediately; after that scan finishes, the normal
+interval starts over, so a manual run does not cause an additional near-term
+scheduled scan. The action is disabled when automatic verification is disabled.
 
 The authenticated Overview also shows `Telegram files`, the logical byte total
 of unique committed Telegram chunk payloads. Reused chunk references are
