@@ -5,6 +5,7 @@ import type {
   ObjectsState,
   SearchState,
   OverviewState,
+  OverviewLiveState,
   SessionState,
   StorageSettingsState,
   SharedLinksState,
@@ -155,6 +156,10 @@ export function refreshSession(csrf?: string | null) {
 
 export function getOverview() {
   return requestJson<OverviewState>('/overview');
+}
+
+export function getOverviewLive() {
+  return requestJson<OverviewLiveState>('/overview/live');
 }
 
 export function getTelegramSettings() {

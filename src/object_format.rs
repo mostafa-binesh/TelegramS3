@@ -36,10 +36,19 @@ use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tokio::fs as async_fs;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 pub(crate) type RecoverySnapshot = (Option<i64>, Vec<RecoveryIssue>, Option<String>);
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RecoveryVerifierMetrics {
+    pub scan_runs: u64,
+    pub scan_failures: u64,
+    pub last_scan_started_at: Option<i64>,
+    pub last_scan_finished_at: Option<i64>,
+    pub last_scan_duration_ms: Option<u64>,
+}
 
 const CHECKSUM_ALGORITHM: &str = "sha256";
 const MULTIPART_CHECKSUM_ALGORITHM: &str = "sha256-parts-v1";
@@ -55,6 +64,7 @@ const QUARANTINE_ROOT: &str = "quarantine";
 const MULTIPART_ROOT: &str = "multipart";
 const MOCK_TELEGRAM_ROOT: &str = "mock-telegram";
 const CLEANUP_EVIDENCE_ROOT: &str = "cleanup-evidence";
+const OVERVIEW_STATUS_CACHE_TTL: StdDuration = StdDuration::from_secs(5);
 pub const TELEGRAM_STREAM_RECOVERY_WINDOW_SECS: u64 = 120;
 const TELEGRAM_STREAM_RECOVERY_WINDOW: StdDuration =
     StdDuration::from_secs(TELEGRAM_STREAM_RECOVERY_WINDOW_SECS);
@@ -457,6 +467,8 @@ pub struct ObjectFormatService {
     read_pins: Arc<Mutex<HashMap<Uuid, u64>>>,
     receptions: Arc<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<reception::ReceptionState>>>>>,
     recovery_snapshot: Arc<RwLock<RecoverySnapshot>>,
+    recovery_verifier_metrics: Arc<RwLock<RecoveryVerifierMetrics>>,
+    overview_status_cache: Arc<RwLock<Option<(StdInstant, ObjectFormatStatus)>>>,
     staging_budget: u64,
     encryption: ObjectEncryption,
     traffic: Arc<TrafficCounters>,
@@ -888,6 +900,8 @@ impl ObjectFormatService {
                 Vec::new(),
                 Some("Recovery scan pending".into()),
             ))),
+            recovery_verifier_metrics: Arc::new(RwLock::new(RecoveryVerifierMetrics::default())),
+            overview_status_cache: Arc::new(RwLock::new(None)),
             staging_budget: 10 * 1024 * 1024 * 1024,
             encryption,
             traffic: Arc::new(TrafficCounters::from_totals(traffic_totals)),
@@ -898,6 +912,27 @@ impl ObjectFormatService {
 
     pub fn metadata_status(&self) -> Result<MetadataStatus, ObjectFormatError> {
         Ok(self.metadata.status()?)
+    }
+
+    /// Return the manifest-derived status used by the admin Overview.
+    ///
+    /// Parsing every manifest is intentionally kept out of the live polling
+    /// path. The short TTL keeps the operator dashboard responsive while
+    /// allowing explicit/full refreshes to converge without making the
+    /// metadata database the hottest part of an otherwise idle server.
+    pub fn cached_status_for_overview(&self) -> Result<ObjectFormatStatus, ObjectFormatError> {
+        if let Ok(cache) = self.overview_status_cache.read()
+            && let Some((created_at, status)) = cache.as_ref()
+            && created_at.elapsed() < OVERVIEW_STATUS_CACHE_TTL
+        {
+            return Ok(status.clone());
+        }
+
+        let status = self.status()?;
+        if let Ok(mut cache) = self.overview_status_cache.write() {
+            *cache = Some((StdInstant::now(), status.clone()));
+        }
+        Ok(status)
     }
 
     pub fn durable_metrics(&self) -> Result<crate::durable::DurableMetrics, ObjectFormatError> {
@@ -913,6 +948,13 @@ impl ObjectFormatService {
 
     pub fn download_stage_metrics(&self) -> DownloadStageMetrics {
         self.download_stage_metrics.snapshot()
+    }
+
+    pub fn recovery_verifier_metrics(&self) -> RecoveryVerifierMetrics {
+        self.recovery_verifier_metrics
+            .read()
+            .map(|metrics| metrics.clone())
+            .unwrap_or_default()
     }
 
     /// Run a bounded, one-chunk diagnostic read against the first committed
@@ -2052,9 +2094,34 @@ impl ObjectFormatService {
     }
 
     pub async fn refresh_recovery_snapshot(&self) -> Result<(), ObjectFormatError> {
-        let checked_at = OffsetDateTime::now_utc().unix_timestamp();
-        match self.recovery_issues().await {
+        let started_at = OffsetDateTime::now_utc();
+        let started_at_unix = started_at.unix_timestamp();
+        let timer = StdInstant::now();
+        info!(
+            started_at = started_at_unix,
+            "recovery verifier scan started"
+        );
+        let result = self.recovery_issues().await;
+        let finished_at_unix = OffsetDateTime::now_utc().unix_timestamp();
+        let duration_ms = timer.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        if let Ok(mut metrics) = self.recovery_verifier_metrics.write() {
+            metrics.scan_runs = metrics.scan_runs.saturating_add(1);
+            metrics.last_scan_started_at = Some(started_at_unix);
+            metrics.last_scan_finished_at = Some(finished_at_unix);
+            metrics.last_scan_duration_ms = Some(duration_ms);
+            if result.is_err() {
+                metrics.scan_failures = metrics.scan_failures.saturating_add(1);
+            }
+        }
+        match result {
             Ok(issues) => {
+                info!(
+                    duration_ms,
+                    issue_count = issues.len(),
+                    finished_at = finished_at_unix,
+                    "recovery verifier scan finished"
+                );
+                let checked_at = finished_at_unix;
                 if let Ok(mut snapshot) = self.recovery_snapshot.write() {
                     *snapshot = (Some(checked_at), issues, None);
                 }
@@ -2062,6 +2129,12 @@ impl ObjectFormatService {
             }
             Err(error) => {
                 let message = error.to_string();
+                warn!(
+                    duration_ms,
+                    finished_at = finished_at_unix,
+                    error = %message,
+                    "recovery verifier scan failed"
+                );
                 let previous_issues = self
                     .recovery_snapshot
                     .read()
@@ -2069,7 +2142,11 @@ impl ObjectFormatService {
                     .map(|snapshot| snapshot.1.clone())
                     .unwrap_or_default();
                 if let Ok(mut snapshot) = self.recovery_snapshot.write() {
-                    *snapshot = (Some(checked_at), previous_issues, Some(message.clone()));
+                    *snapshot = (
+                        Some(finished_at_unix),
+                        previous_issues,
+                        Some(message.clone()),
+                    );
                 }
                 Err(error)
             }

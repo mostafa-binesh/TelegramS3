@@ -63,6 +63,15 @@ staging, and recovery artifacts, not committed payloads.
   process-local sample of recent public/admin/S3 reads, separating first-chunk,
   Telegram, retry-wait, decrypt, checksum-verify, and total timings for live
   performance testing. It is diagnostic telemetry, not durable accounting.
+- **Low-cost Overview polling** — storage counts and the logical committed
+  Telegram payload size use a short-lived cached snapshot, while the
+  five-second dashboard refresh uses a separate `/overview/live` payload for
+  transfers, traffic, stage timings, and connection health. This prevents
+  routine live telemetry from reparsing every manifest.
+- **Verifier observability** — recovery scans emit start/end or failure logs
+  with run duration and expose scan count, failure count, timestamps, and the
+  last duration in the authenticated Overview. Cleanup telemetry separates
+  due work, scheduled/not-yet-claimable work, and recovery-required targets.
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
   operator account management, in-app bucket creation, bucket/object browser
   with per-file upload, ranged download, guarded folder deletion, and resilient

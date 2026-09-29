@@ -19,6 +19,14 @@ pool discards only that handle and opens a replacement. This protects the
 process from one bad connection; it cannot repair a damaged database file.
 The pool is an in-process runtime change and requires no schema migration.
 
+## Overview Performance
+
+The manifest-derived object counts and unique committed Telegram payload size
+shown in the authenticated Overview are cached for up to five seconds. The
+background dashboard refresh uses `/overview/live` for transfer, traffic,
+download-stage, and connection telemetry, leaving full manifest scans for an
+initial or explicit/full Overview refresh.
+
 ## Schema Version
 
 - Current schema version: `19`

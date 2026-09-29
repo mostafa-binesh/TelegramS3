@@ -18,6 +18,7 @@ async function mockConsole(page: import('@playwright/test').Page) {
     const path = new URL(request.url()).pathname.replace('/_admin/api', '');
     if (path === '/session' && request.method() === 'GET') return route.fulfill({ json: session });
     if (path === '/setup') return route.fulfill({ json: { setup_required: false } });
+    if (path === '/overview/live') return route.fulfill({ json: { telegram: { connection_state: 'connected', detail: 'mock', session_state: 'authorized' }, transfers: {}, traffic: {}, stage_metrics: {}, checks: [] } });
     if (path === '/overview') return route.fulfill({ json: { telegram: { connection_state: 'connected', detail: 'mock', session_state: 'authorized' }, recovery: { issue_count: 0, unacknowledged_count: 0, issues: [] }, storage: {}, checks: [] } });
     if (path === '/telegram/settings') return route.fulfill({ json: { settings: { telegram_api_id: '123', telegram_api_hash: 'hash', telegram_storage_chat_id: '-1001', telegram_proxy_url: '', telegram_proxy_username: '', telegram_proxy_password: '', telegram_proxy_mode: 'auto' } } });
     if (path === '/accounts' && request.method() === 'GET') { accountsGetCount += 1; return route.fulfill({ json: { accounts } }); }

@@ -276,6 +276,11 @@ the configured number of distinct chunk indexes. The admin overview shows the
 next run, sample policy, distinct broken-file count, and the current verifier
 problem list.
 
+Each verifier run logs its start and completion (or failure) with elapsed
+duration. The Overview also reports total scans, failed scans, last start/end
+timestamps, and the last scan duration. These are runtime diagnostics and are
+not required to rebuild object state.
+
 If a sampled message is confirmed missing, cannot be decrypted, or fails its
 checksum, the verifier records the account, chunk, failure, and repair state in
 the durable integrity-event log. A healthy physical replica is used as the
@@ -339,7 +344,11 @@ object actions until the final manifest is published.
    payload accounting, not durable object-recovery evidence.
    The Overview's Telegram-files size is manifest-derived and remains
    meaningful after restart, but it represents logical committed chunk bytes,
-   not Telegram protocol overhead or a remote account quota.
+  not Telegram protocol overhead or a remote account quota.
+   Storage counts and this manifest-derived size are served from a short-lived
+   five-second cache. Routine Overview polling uses `/overview/live` for
+   transfer, traffic, stage, and connection telemetry; a full Overview
+   refresh repopulates the storage snapshot.
 7. If a console view remains on a loading skeleton, inspect the response for
    its hashed file under `/_admin/assets/`. Rebuild/redeploy the image with the
    complete UI `assets/` directory, then use the view's Retry action; this is a

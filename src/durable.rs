@@ -97,6 +97,8 @@ pub struct DurableMetrics {
     pub failed_jobs: u64,
     pub staging_bytes: u64,
     pub cleanup_backlog: u64,
+    pub cleanup_due: u64,
+    pub cleanup_scheduled: u64,
     pub cleanup_recovery_required: u64,
 }
 
@@ -213,6 +215,7 @@ pub(crate) fn enqueue_manifest_cleanup_at(
 impl MetadataStore {
     pub fn durable_metrics(&self) -> Result<DurableMetrics, MetadataError> {
         self.with_connection(|c| {
+            let current = now();
             let pending_jobs: u64 = c.query_row(
                 "SELECT COUNT(*) FROM transfer_jobs WHERE state IN ('receiving','queued','uploading','committing','retry_wait')",
                 [],
@@ -223,10 +226,25 @@ impl MetadataStore {
                 [],
                 |r| r.get(0),
             )?;
+            let cleanup_backlog: u64 = c.query_row(
+                "SELECT COUNT(*) FROM cleanup_targets WHERE completed=0",
+                [],
+                |r| r.get(0),
+            )?;
+            let cleanup_recovery_required: u64 = c.query_row(
+                "SELECT COUNT(*) FROM cleanup_targets WHERE state='recovery_required'",
+                [],
+                |r| r.get(0),
+            )?;
+            let cleanup_due: u64 = c.query_row(
+                "SELECT COUNT(*) FROM cleanup_targets t WHERE t.completed=0 AND t.state!='recovery_required' AND ((t.state IN ('pending','retry_wait') AND t.due_at<=?1 AND t.next_retry<=?1) OR (t.state='running' AND t.lease_until<?1)) AND (t.target_kind='evidence' OR EXISTS(SELECT 1 FROM cleanup_targets e WHERE e.object_id=t.object_id AND e.target_kind='evidence' AND e.completed=1))",
+                [current],
+                |r| r.get(0),
+            )?;
             Ok(DurableMetrics {
                 pending_jobs,
                 oldest_pending_age_seconds: oldest
-                    .map(|value| now().saturating_sub(value).max(0) as u64)
+                    .map(|value| current.saturating_sub(value).max(0) as u64)
                     .unwrap_or(0),
                 retries: c.query_row(
                     "SELECT COALESCE(SUM(CASE WHEN attempts>1 THEN attempts-1 ELSE 0 END),0) FROM transfer_jobs",
@@ -243,16 +261,12 @@ impl MetadataStore {
                     [],
                     |r| r.get(0),
                 )?,
-                cleanup_backlog: c.query_row(
-                    "SELECT COUNT(*) FROM cleanup_targets WHERE completed=0",
-                    [],
-                    |r| r.get(0),
-                )?,
-                cleanup_recovery_required: c.query_row(
-                    "SELECT COUNT(*) FROM cleanup_targets WHERE state='recovery_required'",
-                    [],
-                    |r| r.get(0),
-                )?,
+                cleanup_backlog,
+                cleanup_due,
+                cleanup_scheduled: cleanup_backlog
+                    .saturating_sub(cleanup_due)
+                    .saturating_sub(cleanup_recovery_required),
+                cleanup_recovery_required,
             })
         })
     }
@@ -1359,6 +1373,8 @@ mod tests {
         assert_eq!(metrics.pending_jobs, 1);
         assert_eq!(metrics.staging_bytes, 8);
         assert!(metrics.cleanup_backlog > 0);
+        assert_eq!(metrics.cleanup_due, 1);
+        assert_eq!(metrics.cleanup_scheduled, 0);
         assert_eq!(metrics.cleanup_recovery_required, 0);
         assert_eq!(metrics.failed_jobs, 0);
     }

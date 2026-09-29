@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.6-rc.15 - 2026-09-29
+
+### Overview performance and verifier observability
+
+- Cached manifest-derived object counts and unique committed Telegram payload
+  size for up to five seconds on full Overview snapshots.
+- Added the lightweight `/overview/live` payload for five-second transfer,
+  traffic, download-stage, connection, and health refreshes without reparsing
+  all manifests.
+- Added verifier start/end or failure logs plus scan duration, run count,
+  failure count, and timestamps to the Overview.
+- Split cleanup telemetry into due, scheduled, and recovery-required targets
+  instead of presenting one undifferentiated backlog.
+
 ## 0.7.6-rc.14 - 2026-09-28
 
 ### Manual Connections refresh

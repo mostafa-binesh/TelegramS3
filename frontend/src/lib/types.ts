@@ -123,6 +123,8 @@ export interface DurableMetrics {
   failed_jobs: number;
   staging_bytes: number;
   cleanup_backlog: number;
+  cleanup_due: number;
+  cleanup_scheduled: number;
   cleanup_recovery_required: number;
 }
 
@@ -203,11 +205,17 @@ export interface VerifierState {
   broken_files: number;
   last_run_at?: string | null;
   next_run_at?: string | null;
+  scan_runs?: number;
+  scan_failures?: number;
+  last_scan_started_at?: string | null;
+  last_scan_finished_at?: string | null;
+  last_scan_duration_ms?: number | null;
   problems: RecoveryIssue[];
 }
 
 export interface OverviewState {
   checked_at?: string;
+  telegram_last_success_at?: string | null;
   session?: { authenticated: boolean; user?: UserInfo };
   storage?: StorageCard;
   transfers?: DurableMetrics;
@@ -242,6 +250,11 @@ export interface OverviewState {
     error?: string | null;
   } | null;
 }
+
+export type OverviewLiveState = Pick<
+  OverviewState,
+  'checked_at' | 'telegram_last_success_at' | 'transfers' | 'traffic' | 'stage_metrics' | 'telegram' | 'connection_removal' | 'checks'
+>;
 
 export interface TelegramSettings {
   telegram_api_id: string;

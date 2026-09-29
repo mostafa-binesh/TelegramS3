@@ -21,6 +21,8 @@
     failed_jobs: 0,
     staging_bytes: 0,
     cleanup_backlog: 0,
+    cleanup_due: 0,
+    cleanup_scheduled: 0,
     cleanup_recovery_required: 0
   };
 
@@ -57,7 +59,7 @@
     return `${hours}h ${remainder}m oldest`;
   }
 
-  $: transferMetrics = overview?.transfers ?? emptyTransferMetrics;
+  $: transferMetrics = { ...emptyTransferMetrics, ...(overview?.transfers ?? {}) };
   $: trafficMetrics = overview?.traffic ?? emptyTrafficMetrics;
   $: stageMetrics = overview?.stage_metrics ?? emptyStageMetrics;
   let trafficTab: 'session' | 'total' = 'session';
@@ -140,11 +142,12 @@
   </section>
   <section class="layout insight-grid">
     <article class="card surface analytics-card">
-      <div class="analytics-heading"><div><p class="card-label">Live queue snapshot</p><h2>Transfer pipeline</h2></div><span class:clear={transferMetrics.pending_jobs === 0 && transferMetrics.failed_jobs === 0} class="score-chip">{transferMetrics.failed_jobs ? 'Needs attention' : transferMetrics.pending_jobs ? 'In progress' : 'Clear'}</span></div>
+      <div class="analytics-heading"><div><p class="card-label">Live queue snapshot</p><h2>Transfer pipeline</h2></div><span class:clear={transferMetrics.pending_jobs === 0 && transferMetrics.failed_jobs === 0 && transferMetrics.cleanup_due === 0 && transferMetrics.cleanup_recovery_required === 0} class="score-chip">{transferMetrics.failed_jobs || transferMetrics.cleanup_recovery_required ? 'Needs attention' : transferMetrics.pending_jobs || transferMetrics.cleanup_due ? 'In progress' : 'Clear'}</span></div>
       {#if loading || !overview}<div class="skeleton" style="height:132px"></div>{:else}
-        {@const pipelineTotal = Math.max(transferMetrics.pending_jobs + transferMetrics.failed_jobs + transferMetrics.cleanup_backlog, 1)}
-        <div class="pipeline-chart" role="img" aria-label="Transfer pipeline chart"><span class="pipeline-segment pending" style={`width:${(transferMetrics.pending_jobs / pipelineTotal) * 100}%`}></span><span class="pipeline-segment failed" style={`width:${(transferMetrics.failed_jobs / pipelineTotal) * 100}%`}></span><span class="pipeline-segment cleanup" style={`width:${(transferMetrics.cleanup_backlog / pipelineTotal) * 100}%`}></span></div>
-        <div class="legend pipeline-legend"><span><i class="pending"></i>Pending {formatCount(transferMetrics.pending_jobs)}</span><span><i class="failed"></i>Failed {formatCount(transferMetrics.failed_jobs)}</span><span><i class="cleanup"></i>Cleanup {formatCount(transferMetrics.cleanup_backlog)}</span></div>
+        {@const cleanupTotal = transferMetrics.cleanup_due + transferMetrics.cleanup_scheduled + transferMetrics.cleanup_recovery_required}
+        {@const pipelineTotal = Math.max(transferMetrics.pending_jobs + transferMetrics.failed_jobs + cleanupTotal, 1)}
+        <div class="pipeline-chart" role="img" aria-label="Transfer pipeline chart"><span class="pipeline-segment pending" style={`width:${(transferMetrics.pending_jobs / pipelineTotal) * 100}%`}></span><span class="pipeline-segment failed" style={`width:${(transferMetrics.failed_jobs / pipelineTotal) * 100}%`}></span><span class="pipeline-segment cleanup-due" style={`width:${(transferMetrics.cleanup_due / pipelineTotal) * 100}%`}></span><span class="pipeline-segment cleanup-scheduled" style={`width:${(transferMetrics.cleanup_scheduled / pipelineTotal) * 100}%`}></span><span class="pipeline-segment cleanup-recovery" style={`width:${(transferMetrics.cleanup_recovery_required / pipelineTotal) * 100}%`}></span></div>
+        <div class="legend pipeline-legend"><span><i class="pending"></i>Pending {formatCount(transferMetrics.pending_jobs)}</span><span><i class="failed"></i>Failed {formatCount(transferMetrics.failed_jobs)}</span><span><i class="cleanup-due"></i>Cleanup due {formatCount(transferMetrics.cleanup_due)}</span><span><i class="cleanup-scheduled"></i>Scheduled {formatCount(transferMetrics.cleanup_scheduled)}</span><span><i class="cleanup-recovery"></i>Recovery required {formatCount(transferMetrics.cleanup_recovery_required)}</span></div>
         <div class="metric-strip"><div><strong>{formatCount(transferMetrics.retries)}</strong><small>retry attempts</small></div><div><strong>{formatBytes(transferMetrics.staging_bytes)}</strong><small>staged locally</small></div><div><strong>{formatAge(transferMetrics.oldest_pending_age_seconds)}</strong><small>oldest pending</small></div></div>
       {/if}
     </article>
@@ -225,6 +228,7 @@
           <div><span>Next verifier</span><strong>{formatCountdown(overview.verifier?.next_run_at, overview.verifier?.enabled ?? true)}</strong><small>{overview.verifier?.enabled === false ? 'not scheduled' : `${overview.verifier?.interval_secs ?? 0}s interval`}</small></div>
           <div><span>Random sample</span><strong>{overview.verifier?.chunks_per_object ?? 0} / file</strong><small>fresh chunks per scan</small></div>
           <div><span>Broken files</span><strong class:bad={(overview.verifier?.broken_files ?? 0) > 0}>{formatCount(overview.verifier?.broken_files ?? 0)}</strong><small>confirmed recovery findings</small></div>
+          <div><span>Last scan</span><strong>{overview.verifier?.last_scan_duration_ms == null ? '—' : `${overview.verifier.last_scan_duration_ms}ms`}</strong><small>{formatCount(overview.verifier?.scan_runs ?? 0)} run{(overview.verifier?.scan_runs ?? 0) === 1 ? '' : 's'} · {formatCount(overview.verifier?.scan_failures ?? 0)} failed</small></div>
         </div>
         {#if overview.verifier?.problems?.length}
           <div class="verifier-problems" aria-label="Verifier problems">
@@ -269,7 +273,9 @@
   .pipeline-segment { min-width: 0; }
   .pipeline-segment.pending, .pipeline-legend .pending { background: #3d8ac5; }
   .pipeline-segment.failed, .pipeline-legend .failed { background: #c35a5a; }
-  .pipeline-segment.cleanup, .pipeline-legend .cleanup { background: #d59a47; }
+  .pipeline-segment.cleanup-due, .pipeline-legend .cleanup-due { background: #d59a47; }
+  .pipeline-segment.cleanup-scheduled, .pipeline-legend .cleanup-scheduled { background: #8fa8bd; }
+  .pipeline-segment.cleanup-recovery, .pipeline-legend .cleanup-recovery { background: #c35a5a; }
   .pipeline-legend { margin-top: -4px; }
   .metric-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding-top: 15px; border-top: 1px solid var(--border); }
   .metric-strip div { min-width: 0; }
@@ -330,7 +336,7 @@
   .posture-card { grid-column: 1 / -1; }
   .verifier-card { grid-column: 1 / -1; }
   .score-chip.attention { border-color: #efc88b; background: #fff8e9; color: #9a630f; }
-  .verifier-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .verifier-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
   .verifier-summary > div { padding: 13px 14px; border: 1px solid #e1e9f0; border-radius: 12px; background: #fbfcfe; }
   .verifier-summary span, .verifier-summary strong, .verifier-summary small { display: block; }
   .verifier-summary span { color: var(--muted); font-size: .7rem; }

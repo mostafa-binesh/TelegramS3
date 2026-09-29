@@ -103,6 +103,18 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
     }
     if (!loggedIn) return route.fulfill({ status: 401, json: { error: 'unauthorized' } });
 
+    if (path === '/overview/live' && request.method() === 'GET') {
+      return route.fulfill({
+        json: {
+          checked_at: overview.checked_at,
+          transfers: overview.transfers,
+          traffic: overview.traffic,
+          stage_metrics: overview.stage_metrics,
+          telegram: connectionRemoved ? { ...overview.telegram, connection_state: 'needs_reauth', detail: 'Telegram storage is not connected' } : overview.telegram,
+          checks: overview.checks
+        }
+      });
+    }
     if (path === '/overview' && request.method() === 'GET') {
       const issue = recoveryIssue ? [recoveryIssue] : [];
       const activeIssue = issue.filter((item) => !['recovered', 'resolved'].includes(String(item.repair_state ?? '')));

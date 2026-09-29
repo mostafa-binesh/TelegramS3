@@ -66,6 +66,11 @@ chunk. Events retain the account label, failure details, and repair state across
 restarts without changing the manifest's committed state when only an alternate
 replica is affected.
 
+Verifier scans emit start/end or failure log records and maintain process-local
+run, failure, timestamp, and duration metrics for the operator Overview. These
+metrics describe the scan work; integrity findings remain represented by the
+durable recovery-event and manifest state described above.
+
 Replication copies encrypted chunk bytes, preserving the object checksum and
 encryption identity. Access-only replication records the source location and
 requires the target Telegram session to have access to that group/chat.
@@ -255,6 +260,13 @@ for recent reads: surface, chunk and payload counts, first-chunk latency,
 Telegram and retry-wait time, decrypt time, checksum-verification time, and
 total duration. The snapshot retains only the latest 20 samples and is not
 part of the manifest, metadata journal, recovery state, or traffic totals.
+
+The Overview keeps manifest-derived object counts and unique committed Telegram
+payload size in a five-second cache. Its five-second background refresh reads
+the separate `/overview/live` surface for transfer, traffic, stage, and
+connection telemetry, so routine dashboard polling does not reparse every
+manifest. A manual/full Overview refresh can still update the cached storage
+snapshot.
 
 Public share and authenticated admin responses advertise `Accept-Ranges: bytes`
 and support a single `Range` request with `Content-Range`. During a streamed

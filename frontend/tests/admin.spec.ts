@@ -158,6 +158,10 @@ async function mockAdminApi(
       };
       return route.fulfill({ json: { ok: true, sample: stageTestSample } });
     }
+    if (path === '/overview/live') {
+      const overviewTelegram = options.telegramAccounts ? { ...overview.telegram, connection_state: options.telegramAccounts.every((account) => account.connected) ? 'connected' : options.telegramAccounts.some((account) => account.connected) ? 'partial' : 'disconnected', accounts: options.telegramAccounts } : overview.telegram;
+      return route.fulfill({ json: connectionRemoved ? { checked_at: overview.checked_at, telegram: { ...overviewTelegram, connection_state: 'needs_reauth', detail: 'Telegram storage is not connected' }, transfers: overview.transfers, traffic: overview.traffic, stage_metrics: { ...overview.stage_metrics, last_test: stageTestSample }, checks: overview.checks } : { checked_at: overview.checked_at, telegram: overviewTelegram, transfers: overview.transfers, traffic: overview.traffic, stage_metrics: { ...overview.stage_metrics, last_test: stageTestSample }, checks: overview.checks } });
+    }
     if (path === '/overview') {
       const recoveryIssues = options.recoveryIssues ?? [];
       const clearedOverview = {
@@ -449,10 +453,13 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
   await expect(page.getByRole('heading', { name: 'Sign in to manage storage' })).toBeVisible();
 });
 
-test('overview refreshes traffic telemetry every five seconds', async ({ page }) => {
-  let overviewRequests = 0;
+test('overview polls lightweight live telemetry without rescanning the full snapshot', async ({ page }) => {
+  let fullOverviewRequests = 0;
+  let liveOverviewRequests = 0;
   page.on('request', (request) => {
-    if (new URL(request.url()).pathname.endsWith('/_admin/api/overview')) overviewRequests += 1;
+    const path = new URL(request.url()).pathname;
+    if (path.endsWith('/_admin/api/overview')) fullOverviewRequests += 1;
+    if (path.endsWith('/_admin/api/overview/live')) liveOverviewRequests += 1;
   });
   await mockAdminApi(page);
   await page.goto('/');
@@ -461,8 +468,9 @@ test('overview refreshes traffic telemetry every five seconds', async ({ page })
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('heading', { name: 'Traffic since process start' })).toBeVisible();
 
-  const requestsAfterInitialLoad = overviewRequests;
-  await expect.poll(() => overviewRequests, { timeout: 6_500 }).toBeGreaterThan(requestsAfterInitialLoad);
+  const fullRequestsAfterInitialLoad = fullOverviewRequests;
+  await expect.poll(() => liveOverviewRequests, { timeout: 6_500 }).toBeGreaterThan(0);
+  await expect.poll(() => fullOverviewRequests, { timeout: 1_000 }).toBe(fullRequestsAfterInitialLoad);
 });
 
 test('expired authentication returns the operator to login instead of an API error page', async ({ page }) => {

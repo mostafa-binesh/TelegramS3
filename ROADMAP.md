@@ -252,6 +252,13 @@ Completed in this increment:
   recent public/admin/S3 reads, exposing first-chunk, Telegram, retry-wait,
   decrypt, checksum-verify, and total timings without adding per-read SQLite
   writes
+- the Overview caches manifest-derived object counts and unique Telegram
+  payload size for five seconds; its five-second refresh uses the cheap
+  `/overview/live` endpoint for transfer, traffic, stage, and connection
+  telemetry instead of rescanning manifests
+- verifier scans now log start/end or failure, record duration and run/failure
+  counters, and expose those metrics in the Overview; cleanup counts are
+  separated into due, scheduled, and recovery-required work
 - public audio/video links now advertise inline media disposition while
   non-media links remain attachments, preserving range-based player probing
   without changing stored objects

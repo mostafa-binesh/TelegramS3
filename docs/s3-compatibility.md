@@ -44,7 +44,7 @@ features, so they are documented separately.
 | Event notifications | compatibility gap | none yet | Eventing is an upper layer concern | Telegram is not the notifier | 6 |
 | Encryption | implemented | cargo test | Adapter-bound envelope encryption is keyed from `TELEGRAM_S3_MASTER_KEY` and recorded in manifests | Range semantics are bounded by chunk decrypt/read | 6 |
 | Quotas | compatibility gap | none yet | Can be tracked locally | Telegram storage quotas are external | 6 |
-| Metrics/health | implemented | cargo test | Loopback-only `/healthz` and `/metrics` endpoints report bootstrap and recovery state; the first remote recovery snapshot runs after listeners bind | Admin traffic stays off the S3 listener | 6 |
+| Metrics/health | implemented | cargo test / Playwright | Loopback-only `/healthz` and `/metrics` endpoints report bootstrap and recovery state; the authenticated Overview caches manifest-derived counts and uses a cheap `/overview/live` payload for five-second transfer, traffic, stage, and connection refreshes; verifier duration and cleanup-state metrics are visible to operators | Admin traffic stays off the S3 listener; Overview storage values may be up to five seconds old | 6 |
 
 ## Operator UI
 

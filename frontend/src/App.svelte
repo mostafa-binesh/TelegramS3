@@ -13,6 +13,7 @@
     deleteBucket,
     deleteUser,
     getOverview,
+    getOverviewLive,
     getTelegramSettings,
     getStorageSettings,
     getSession,
@@ -310,10 +311,15 @@
   }
 
   /** `silent` keeps the background poll from lighting up the loading UI. */
-  async function refreshOverview(options: {silent?: boolean} = {}) {
+  async function refreshOverview(options: {silent?: boolean; full?: boolean} = {}) {
     if (!options.silent) overviewLoading = true;
     try {
-      overview = await getOverview();
+      if (!options.full && options.silent && overview) {
+        const live = await getOverviewLive();
+        overview = { ...overview, ...live };
+      } else {
+        overview = await getOverview();
+      }
       overviewError = '';
     } catch (cause) {
       overviewError = normalizeError(cause);
@@ -515,7 +521,7 @@
       telegramProxyUsername = '';
       telegramProxyPassword = '';
       telegramProxyMode = 'auto';
-      await refreshOverview({ silent: true });
+      await refreshOverview({ silent: true, full: true });
       notifySuccess(result.message);
     } finally {
       telegramSettingsBusy = false;
@@ -1226,7 +1232,7 @@
 
   async function refreshRecovery() {
     recoveryLoading = true;
-    try { await refreshOverview({silent: true}); }
+    try { await refreshOverview({silent: true, full: true}); }
     finally { recoveryLoading = false; }
   }
 
@@ -1330,7 +1336,7 @@
         <button class:active={recoveryTab === 'transfers'} role="tab" aria-selected={recoveryTab === 'transfers'} on:click={() => selectRecoveryTab('transfers')}>Interrupted transfers</button>
       </div>
       {#if recoveryTab === 'issues'}
-        {#if RecoveryIssuesComponent}<svelte:component this={RecoveryIssuesComponent} recovery={overview?.recovery} csrf={session?.csrf_token} loading={recoveryLoading} error={overviewError} onChanged={() => refreshOverview({silent: true})} onRefresh={refreshRecovery}/>{:else if routeLoadError}<LoadError title="Could not load recovery issues" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
+        {#if RecoveryIssuesComponent}<svelte:component this={RecoveryIssuesComponent} recovery={overview?.recovery} csrf={session?.csrf_token} loading={recoveryLoading} error={overviewError} onChanged={() => refreshOverview({silent: true, full: true})} onRefresh={refreshRecovery}/>{:else if routeLoadError}<LoadError title="Could not load recovery issues" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {:else}
         {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else if routeLoadError}<LoadError title="Could not load interrupted transfers" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {/if}

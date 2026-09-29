@@ -550,6 +550,7 @@ impl AdminUiState {
         match (method, rest) {
             (Method::POST, "session/logout") => self.handle_logout(&principal).await,
             (Method::POST, "session/refresh") => self.handle_refresh(&principal).await,
+            (Method::GET, "overview/live") => self.handle_overview_live().await,
             (Method::GET, "overview") => self.handle_overview(&principal).await,
             (Method::POST, "stage-metrics/test") => self.handle_stage_metrics_test().await,
             (Method::GET, "accounts") => self.handle_list_accounts(),
@@ -2698,6 +2699,66 @@ impl AdminUiState {
         )
     }
 
+    async fn overview_live_payload(&self) -> serde_json::Value {
+        let durable = self.object_format.durable_metrics().unwrap_or_default();
+        let traffic = self.object_format.traffic_metrics();
+        let stage_metrics = self.object_format.download_stage_metrics();
+        let connection_removal = self
+            .object_format
+            .metadata_store()
+            .connection_removal_job()
+            .ok()
+            .flatten();
+        let health = self.telegram_health_snapshot().await;
+        let account_health = self
+            .object_format
+            .telegram_account_health_snapshots()
+            .await
+            .unwrap_or_default();
+        let session_state = health.status.session_state.clone();
+        let (connection_state, connection_detail) =
+            aggregate_telegram_health(&account_health, &health);
+        let session_usable = connection_state == "connected"
+            || (account_health.is_empty() && telegram_session_usable(session_state.clone()));
+        let telegram = TelegramStateWire {
+            session_state: format!("{session_state:?}"),
+            connection_state: connection_state.to_string(),
+            detail: connection_detail,
+            storage_chat_id: Some(health.status.storage_chat_id.clone()),
+            accounts: account_health,
+        };
+        let checks = vec![
+            check("Telegram storage", session_usable, &health.detail),
+            check(
+                "Storage chat",
+                !health.status.storage_chat_id.is_empty(),
+                "resolved from Telegram bootstrap settings",
+            ),
+            check(
+                "UI assets",
+                self.ui_dist_dir.join("index.html").exists(),
+                "Svelte build output present",
+            ),
+        ];
+        serde_json::json!({
+            "checked_at": OffsetDateTime::from_unix_timestamp(health.checked_at)
+                .map(rfc3339)
+                .unwrap_or_else(|_| rfc3339(OffsetDateTime::now_utc())),
+            "telegram_last_success_at": health.last_success_at.and_then(|value|
+                OffsetDateTime::from_unix_timestamp(value).ok().map(rfc3339)),
+            "transfers": durable,
+            "traffic": traffic,
+            "stage_metrics": stage_metrics,
+            "telegram": telegram,
+            "connection_removal": connection_removal,
+            "checks": checks,
+        })
+    }
+
+    async fn handle_overview_live(&self) -> Response<Body> {
+        json_response(StatusCode::OK, self.overview_live_payload().await)
+    }
+
     async fn handle_overview(&self, principal: &ResolvedPrincipal) -> Response<Body> {
         let metadata_status = self
             .object_format
@@ -2705,11 +2766,8 @@ impl AdminUiState {
             .unwrap_or_else(|_| empty_meta());
         let object_status = self
             .object_format
-            .status()
+            .cached_status_for_overview()
             .unwrap_or_else(|_| empty_object());
-        let durable = self.object_format.durable_metrics().unwrap_or_default();
-        let traffic = self.object_format.traffic_metrics();
-        let stage_metrics = self.object_format.download_stage_metrics();
         let acknowledgements = self
             .object_format
             .metadata_store()
@@ -2725,32 +2783,8 @@ impl AdminUiState {
             self.object_format.recovery_verifier_enabled(),
             self.object_format.recovery_verify_interval_secs(),
             self.object_format.recovery_verify_chunks(),
+            self.object_format.recovery_verifier_metrics(),
         );
-        let connection_removal = self
-            .object_format
-            .metadata_store()
-            .connection_removal_job()
-            .ok()
-            .flatten();
-        let health = self.telegram_health_snapshot().await;
-        let account_health = self
-            .object_format
-            .telegram_account_health_snapshots()
-            .await
-            .unwrap_or_default();
-        let session_state = health.status.session_state.clone();
-        let session_state_debug = format!("{session_state:?}");
-        let (connection_state, connection_detail) =
-            aggregate_telegram_health(&account_health, &health);
-        let session_usable = connection_state == "connected"
-            || (account_health.is_empty() && telegram_session_usable(session_state.clone()));
-        let telegram = TelegramStateWire {
-            session_state: session_state_debug.clone(),
-            connection_state: connection_state.to_string(),
-            detail: connection_detail,
-            storage_chat_id: Some(health.status.storage_chat_id.clone()),
-            accounts: account_health,
-        };
         let storage = StorageWire {
             metadata_path: redact_path(&self.config.metadata_path().display().to_string()),
             data_dir: redact_path(&self.config.data_dir().display().to_string()),
@@ -2763,39 +2797,30 @@ impl AdminUiState {
             recovery_required_objects: object_status.recovery_required_objects,
             telegram_files_bytes: object_status.telegram_files_bytes,
         };
-        let checks = vec![
-            check("Telegram storage", session_usable, &health.detail),
-            check(
-                "Storage chat",
-                !health.status.storage_chat_id.is_empty(),
-                "resolved from Telegram bootstrap settings",
-            ),
-            check(
-                "UI assets",
-                self.ui_dist_dir.join("index.html").exists(),
-                "Svelte build output present",
-            ),
-        ];
-        json_response(
-            StatusCode::OK,
-            serde_json::json!({
-                "checked_at": OffsetDateTime::from_unix_timestamp(health.checked_at)
-                    .map(rfc3339)
-                    .unwrap_or_else(|_| rfc3339(OffsetDateTime::now_utc())),
-                "telegram_last_success_at": health.last_success_at.and_then(|value|
-                    OffsetDateTime::from_unix_timestamp(value).ok().map(rfc3339)),
-                "session": {"authenticated": true, "user": UserWire::from_user(&principal.user)},
-                "storage": storage,
-                "transfers": durable,
-                "traffic": traffic,
-                "stage_metrics": stage_metrics,
-                "recovery": recovery,
-                "verifier": verifier,
-                "telegram": telegram,
-                "connection_removal": connection_removal,
-                "checks": checks,
-            }),
-        )
+        let mut payload = self.overview_live_payload().await;
+        let Some(object) = payload.as_object_mut() else {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "overview payload could not be assembled",
+            );
+        };
+        object.insert(
+            "session".into(),
+            serde_json::json!({"authenticated": true, "user": UserWire::from_user(&principal.user)}),
+        );
+        object.insert(
+            "storage".into(),
+            serde_json::to_value(storage).unwrap_or_default(),
+        );
+        object.insert(
+            "recovery".into(),
+            serde_json::to_value(recovery).unwrap_or_default(),
+        );
+        object.insert(
+            "verifier".into(),
+            serde_json::to_value(verifier).unwrap_or_default(),
+        );
+        json_response(StatusCode::OK, payload)
     }
 
     async fn handle_recovery_repair(&self) -> Response<Body> {
@@ -3509,6 +3534,11 @@ struct VerifierWire {
     broken_files: u64,
     last_run_at: Option<String>,
     next_run_at: Option<String>,
+    scan_runs: u64,
+    scan_failures: u64,
+    last_scan_started_at: Option<String>,
+    last_scan_finished_at: Option<String>,
+    last_scan_duration_ms: Option<u64>,
     problems: Vec<RecoveryIssueWire>,
 }
 
@@ -3518,6 +3548,7 @@ impl VerifierWire {
         enabled: bool,
         interval_secs: u64,
         chunks_per_object: u64,
+        metrics: crate::object_format::RecoveryVerifierMetrics,
     ) -> Self {
         let mut broken_objects = std::collections::HashSet::new();
         for issue in &recovery.issues {
@@ -3560,6 +3591,15 @@ impl VerifierWire {
             broken_files: broken_objects.len() as u64,
             last_run_at: recovery.checked_at.clone(),
             next_run_at,
+            scan_runs: metrics.scan_runs,
+            scan_failures: metrics.scan_failures,
+            last_scan_started_at: metrics
+                .last_scan_started_at
+                .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok().map(rfc3339)),
+            last_scan_finished_at: metrics
+                .last_scan_finished_at
+                .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok().map(rfc3339)),
+            last_scan_duration_ms: metrics.last_scan_duration_ms,
             problems: recovery.issues.clone(),
         }
     }
