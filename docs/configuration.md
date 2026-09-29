@@ -14,8 +14,9 @@ TELEGRAM_ADMIN_BOOTSTRAP_SECRET=<generate_secure_random_value>
 TELEGRAM_ADMIN_UI_DIST_DIR=frontend/dist
 
 TELEGRAM_CHUNK_SIZE=1048576
-TELEGRAM_RECOVERY_VERIFY_ENABLED=true
-TELEGRAM_RECOVERY_VERIFY_INTERVAL_SECS=300
+  TELEGRAM_RECOVERY_VERIFY_ENABLED=true
+  TELEGRAM_RECOVERY_VERIFY_STARTUP=true
+  TELEGRAM_RECOVERY_VERIFY_INTERVAL_SECS=300
 TELEGRAM_RECOVERY_VERIFY_CHUNKS=1
 TELEGRAM_CONNECTION_TIMEOUT_SECS=30
 TELEGRAM_REQUEST_TIMEOUT_SECS=30
@@ -154,13 +155,14 @@ decrypted and verified as one unit rather than assembled from multiple
 accounts. The value changes live and persists across restart.
 
 The same policy page controls the sampled recovery verifier. When enabled, it
-runs once at startup and then at the configured interval, selecting the
+runs once at startup by default and then at the configured interval, selecting the
 requested number of distinct chunk indexes uniformly at random for each healthy
 committed object. The verifier can be disabled completely; while disabled it
 does not run automatic remote checks or quarantine objects from verifier scans,
 and the existing interval/sample values remain saved for the next enablement.
 The sample is without replacement within one scan, but coverage across scans is
 probabilistic. `TELEGRAM_RECOVERY_VERIFY_ENABLED`,
+`TELEGRAM_RECOVERY_VERIFY_STARTUP`,
 `TELEGRAM_RECOVERY_VERIFY_INTERVAL_SECS`, and
 `TELEGRAM_RECOVERY_VERIFY_CHUNKS` are one-time import defaults for databases
 that have no stored policy; the database values are authoritative afterward.

@@ -331,6 +331,21 @@ export function removeObject(csrf?: string | null, bucket = '', key = '') {
   });
 }
 
+export function moveObjects(
+  csrf: string | null | undefined,
+  body: {
+    source_bucket: string;
+    destination_bucket: string;
+    destination_prefix?: string;
+    sources: Array<{ key: string; folder?: boolean }>;
+  }
+) {
+  return requestJson<{ ok?: boolean; moved_objects?: number }>('/objects/move', csrf, {
+    method: 'POST',
+    body
+  });
+}
+
 export function getStorageSettings() {
   return requestJson<StorageSettingsState>('/telegram/storage-settings');
 }

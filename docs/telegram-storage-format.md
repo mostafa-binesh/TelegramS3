@@ -395,10 +395,28 @@ staged bytes remain encrypted at rest, but a process restart ends the browser
 session and reconciliation handles the stale receiving job as recovery work.
 
 The server does not verify every committed Telegram chunk before binding its
-listeners. The first full recovery snapshot runs in the background worker after
-startup and updates the local recovery view; this keeps health and operator
-access available while a slow or unavailable Telegram read is still being
-checked.
+listeners. When the persisted startup-scan policy is enabled, the first full
+recovery snapshot runs in the background worker after startup and updates the
+local recovery view; when it is disabled, the first remote scan waits for the
+configured verifier interval. Either choice keeps health and operator access
+available while a slow or unavailable Telegram read is still being checked.
+
+The authenticated object browser performs moves on the server. A file move
+creates a durable destination manifest with the original encrypted chunk
+references, publishes only that small manifest document, and only then
+tombstones the source. The destination manifest preserves the original payload
+identity for decryption, checksums, encryption metadata, and every replica
+location. A selected folder is expanded from its local prefix index,
+preserving its folder basename and relative descendants, including directory
+markers. A partial move is recoverable: already committed destinations remain
+visible and unprocessed sources remain intact for operator review.
+
+Automatic physical replication reuses a source chunk message when both
+connected accounts point to the same Telegram storage chat. This creates a
+ready target-account location without transferring payload bytes through the
+server. Different storage chats retain the verified encrypted
+download/upload fallback; access-mode replication remains a shared-chat
+pointer by design.
 
 Active S3 transfer jobs are also exposed to the authenticated bucket browser.
 The UI may show a key as receiving, uploading, waiting for Telegram,

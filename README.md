@@ -72,6 +72,8 @@ staging, and recovery artifacts, not committed payloads.
   with run duration and expose scan count, failure count, timestamps, and the
   last duration in the authenticated Overview. Cleanup telemetry separates
   due work, scheduled/not-yet-claimable work, and recovery-required targets.
+  Storage policy also controls whether the first remote scan runs immediately
+  when the server starts or waits for the configured interval.
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
   operator account management, in-app bucket creation, bucket/object browser
   with per-file upload, ranged download, guarded folder deletion, and resilient
@@ -113,10 +115,15 @@ staging, and recovery artifacts, not committed payloads.
   to the next enabled replica account. The integrity verifier checks sampled
   chunks through every recorded account, records durable per-account findings,
   and automatically re-uploads a damaged physical primary or replica from a
-  verified alternate when one exists; recovered replica events remain visible
-  in Recovery without hiding an otherwise healthy object. The Connections tab
-  loads its account state once when opened and provides an explicit refresh
-  action instead of polling the account list in the background.
+   verified alternate when one exists; recovered replica events remain visible
+   in Recovery without hiding an otherwise healthy object. The Connections tab
+   loads its account state once when opened and provides an explicit refresh
+   action instead of polling the account list in the background.
+- Automatic physical replication reuses existing encrypted chunk messages when
+  the source and target connections use the same Telegram storage chat. This
+  records a new account location without downloading or uploading the chunk;
+  replication between different storage chats keeps the verified download /
+  upload fallback.
 - **Maintenance queues** — selected bucket objects can be re-chunked through a
   bounded durable worker. Objects are locked and report temporary
   unavailability while their replacement manifest is published. The bucket
@@ -369,7 +376,9 @@ and recovery-verifier policy are managed from the authenticated admin panel and 
 `TELEGRAM_CHUNK_SIZE` is imported when no database policy exists; after that,
 the database value is authoritative. The verifier defaults to one random chunk
 per committed object every five minutes and can be changed or disabled live
-from **Telegram settings → Storage policy**. Download smoothing defaults to one
+from **Telegram settings → Storage policy**. The first remote scan runs at
+startup by default and can be deferred until the interval from the same
+setting. Download smoothing defaults to one
 extra verified chunk prefetched in parallel, accepts `0–4` extra chunks, and
 can also be changed live. Telegram
 API IDs and storage chat IDs are validated as numeric values
@@ -395,6 +404,7 @@ the most important variables:
 | `TELEGRAM_ADMIN_BIND_ADDR` | no | Health/metrics listener, loopback only |
 | `TELEGRAM_METADATA_PATH` / `TELEGRAM_DATA_DIR` | no | Durable state locations (`TELEGRAM_DATA_DIR` is scratch, staging, and quarantine, not committed payload storage) |
 | `TELEGRAM_RECOVERY_VERIFY_ENABLED` | no | Initial automatic verifier state when no database policy exists (default `true`; accepts `true`/`false`) |
+| `TELEGRAM_RECOVERY_VERIFY_STARTUP` | no | Initial first-scan-on-startup policy when no database setting exists (default `true`; accepts `true`/`false`) |
 | `TELEGRAM_RECOVERY_VERIFY_INTERVAL_SECS` | no | Initial sampled-verifier interval when no database policy exists (default `300`, minimum `60`) |
 | `TELEGRAM_RECOVERY_VERIFY_CHUNKS` | no | Initial random chunks checked per committed object (default `1`, maximum `1024`) |
 
@@ -412,6 +422,15 @@ are documented **gaps** — they are not silently emulated. Capability share
 links are available through the admin panel, but AWS SigV4 presigned URLs
 remain unsupported. The authoritative,
 per-operation matrix is [docs/s3-compatibility.md](docs/s3-compatibility.md).
+
+The bucket browser moves selected files and folders through a durable
+manifest-only server operation. The browser and Telegram transport never
+download or re-upload the payload: destination manifests reuse the existing
+encrypted chunk references, are committed first, and source manifests are
+tombstoned afterward. Folder moves preserve the selected folder name and
+recursively move directory markers and descendants. A partial failure leaves
+already committed destinations and untouched source data recoverable for
+review.
 
 ## Security and durability
 

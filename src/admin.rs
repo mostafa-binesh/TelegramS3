@@ -159,6 +159,24 @@ struct DeleteObjectRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
+struct MoveSourceRequest {
+    key: String,
+    #[serde(default)]
+    folder: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct MoveObjectsRequest {
+    source_bucket: String,
+    destination_bucket: String,
+    #[serde(default)]
+    destination_prefix: String,
+    sources: Vec<MoveSourceRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
 struct RecoveryAcknowledgeRequest {
     /// Recovery issue fingerprints, as served in `recovery.issues[].id`.
     ids: Vec<String>,
@@ -580,6 +598,7 @@ impl AdminUiState {
             (Method::POST, "objects/delete") => {
                 self.handle_delete_object(request, &principal).await
             }
+            (Method::POST, "objects/move") => self.handle_move_objects(request).await,
             (Method::POST, "objects/share") => self.handle_create_share(request).await,
             (Method::GET, "objects/shares") => self.handle_list_share_links(request),
             (Method::PATCH, p) if p.starts_with("objects/shares/") => {
@@ -1699,6 +1718,207 @@ impl AdminUiState {
         }
     }
 
+    /// Move committed objects entirely on the server. The destination reuses
+    /// the existing encrypted chunk references and publishes only a new
+    /// manifest; only after that commit succeeds is the source tombstoned.
+    /// Folder moves expand their prefix on the server, so the browser and the
+    /// Telegram transport never download or re-upload object bytes.
+    async fn handle_move_objects(&self, request: Request<Incoming>) -> Response<Body> {
+        let MoveObjectsRequest {
+            source_bucket,
+            destination_bucket,
+            destination_prefix,
+            sources,
+        } = match read_json(request).await {
+            Ok(body) => body,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid move payload"),
+        };
+        if source_bucket.is_empty() || destination_bucket.is_empty() || sources.is_empty() {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "source bucket, destination bucket, and at least one source are required",
+            );
+        }
+        if sources.len() > 256 {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "at most 256 sources can be moved at once",
+            );
+        }
+        if !self
+            .object_format
+            .bucket_exists(&source_bucket)
+            .unwrap_or(false)
+            || !self
+                .object_format
+                .bucket_exists(&destination_bucket)
+                .unwrap_or(false)
+        {
+            return json_error(
+                StatusCode::NOT_FOUND,
+                "source or destination bucket not found",
+            );
+        }
+        let destination_prefix = if destination_prefix.is_empty() {
+            String::new()
+        } else {
+            let mut prefix = destination_prefix.trim_matches('/').to_string();
+            if prefix.is_empty() {
+                String::new()
+            } else {
+                prefix.push('/');
+                if !is_safe_folder_path(&prefix) {
+                    return json_error(StatusCode::BAD_REQUEST, "invalid destination folder");
+                }
+                prefix
+            }
+        };
+
+        let mut plan = Vec::new();
+        let mut source_keys = std::collections::HashSet::new();
+        let mut destination_keys = std::collections::HashSet::new();
+        for source in sources {
+            if source.folder {
+                let prefix = if source.key.ends_with('/') {
+                    source.key.clone()
+                } else {
+                    format!("{}/", source.key)
+                };
+                if !is_safe_folder_path(&prefix) || prefix == "/" {
+                    return json_error(StatusCode::BAD_REQUEST, "invalid source folder");
+                }
+                if source_bucket == destination_bucket && destination_prefix.starts_with(&prefix) {
+                    return json_error(
+                        StatusCode::CONFLICT,
+                        "a folder cannot be moved into itself or one of its descendants",
+                    );
+                }
+                let folder_name = basename_key(prefix.trim_end_matches('/'));
+                let target_root = format!("{}{}/", destination_prefix, folder_name);
+                let manifests = match self
+                    .object_format
+                    .list_bucket_manifests(&source_bucket, Some(&prefix))
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                    }
+                };
+                for manifest in manifests {
+                    let key = manifest.key.clone();
+                    if !source_keys.insert(key.clone()) {
+                        continue;
+                    }
+                    let relative = key.strip_prefix(&prefix).unwrap_or_default();
+                    let destination_key = format!("{}{}", target_root, relative);
+                    plan.push((manifest, destination_key));
+                }
+            } else {
+                if !is_safe_object_key(&source.key) || !source_keys.insert(source.key.clone()) {
+                    return json_error(StatusCode::BAD_REQUEST, "invalid or duplicate source key");
+                }
+                let manifest = match self
+                    .object_format
+                    .get_active_manifest(&source_bucket, &source.key)
+                {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        return json_error(
+                            StatusCode::NOT_FOUND,
+                            &format!("object not found: {}/{}", source_bucket, source.key),
+                        );
+                    }
+                    Err(error) => {
+                        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                    }
+                };
+                let destination_key =
+                    format!("{}{}", destination_prefix, basename_key(&source.key));
+                plan.push((manifest, destination_key));
+            }
+        }
+        if plan.is_empty() {
+            return json_error(StatusCode::NOT_FOUND, "no committed objects found to move");
+        }
+        for (manifest, destination_key) in &plan {
+            if !destination_keys.insert(destination_key.clone()) {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "sources resolve to duplicate destinations",
+                );
+            }
+            if source_bucket == destination_bucket && manifest.key == *destination_key {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    &format!("source and destination are the same: {}", destination_key),
+                );
+            }
+            match self
+                .object_format
+                .get_active_manifest(&destination_bucket, destination_key)
+            {
+                Ok(Some(_)) => {
+                    return json_error(
+                        StatusCode::CONFLICT,
+                        &format!("destination already exists: {}", destination_key),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                }
+            }
+        }
+
+        // Directory markers must be removed after their children, otherwise
+        // delete_empty_folder correctly rejects the non-empty source prefix.
+        plan.sort_by_key(|(manifest, _)| {
+            (
+                manifest.key.ends_with('/'),
+                std::cmp::Reverse(manifest.key.matches('/').count()),
+            )
+        });
+        let mut moved = 0_u64;
+        for (manifest, destination_key) in plan {
+            let move_job = match self
+                .object_format
+                .enqueue_manifest_move(&manifest, &destination_bucket, &destination_key)
+                .await
+            {
+                Ok(job) => job,
+                Err(error) => {
+                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                }
+            };
+            if let Err(error) = self.object_format.wait_transfer(&move_job.id).await {
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+            let deletion = if manifest.key.ends_with('/') {
+                self.object_format
+                    .delete_empty_folder(&source_bucket, &manifest.key)
+            } else {
+                self.object_format
+                    .delete_object(&source_bucket, &manifest.key, None, None, None)
+            };
+            match deletion {
+                Ok(Some(_)) => moved += 1,
+                Ok(None) => {
+                    return json_error(
+                        StatusCode::CONFLICT,
+                        &format!("source disappeared during move: {}", manifest.key),
+                    );
+                }
+                Err(error) => {
+                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                }
+            }
+        }
+        json_response(
+            StatusCode::OK,
+            serde_json::json!({ "ok": true, "moved_objects": moved }),
+        )
+    }
+
     async fn handle_create_share(&self, request: Request<Incoming>) -> Response<Body> {
         let body = match read_json::<CreateShareRequest>(request).await {
             Ok(body) => body,
@@ -2458,6 +2678,7 @@ impl AdminUiState {
             download_prefetch_chunks,
             download_failover_retries,
             recovery_verify_enabled,
+            recovery_verify_startup,
             recovery_verify_interval_secs,
             recovery_verify_chunks,
             cleanup_retention_secs,
@@ -2487,6 +2708,8 @@ impl AdminUiState {
             .unwrap_or_else(|| self.object_format.recovery_verify_interval_secs());
         let verifier_enabled = recovery_verify_enabled
             .unwrap_or_else(|| self.object_format.recovery_verifier_enabled());
+        let verifier_startup =
+            recovery_verify_startup.unwrap_or_else(|| self.object_format.recovery_verify_startup());
         let chunks =
             recovery_verify_chunks.unwrap_or_else(|| self.object_format.recovery_verify_chunks());
         let cleanup_retention_secs = cleanup_retention_secs.unwrap_or_else(|| {
@@ -2543,6 +2766,12 @@ impl AdminUiState {
         }
         if let Err(error) = self
             .store()
+            .set_telegram_recovery_verify_startup(verifier_startup)
+        {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self
+            .store()
             .set_telegram_recovery_verify_interval_secs(interval_secs)
         {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
@@ -2564,6 +2793,8 @@ impl AdminUiState {
         }
         self.object_format
             .set_recovery_verifier_enabled(verifier_enabled);
+        self.object_format
+            .set_recovery_verify_startup(verifier_startup);
         json_response(StatusCode::OK, self.telegram_storage_settings_wire())
     }
 
@@ -2579,6 +2810,7 @@ impl AdminUiState {
             min_download_failover_retries: crate::config::MIN_DOWNLOAD_FAILOVER_RETRIES,
             max_download_failover_retries: crate::config::MAX_DOWNLOAD_FAILOVER_RETRIES,
             recovery_verify_enabled: self.object_format.recovery_verifier_enabled(),
+            recovery_verify_startup: self.object_format.recovery_verify_startup(),
             recovery_verify_interval_secs: self.object_format.recovery_verify_interval_secs(),
             min_recovery_verify_interval_secs: crate::config::MIN_RECOVERY_VERIFY_INTERVAL_SECS,
             max_recovery_verify_interval_secs: crate::config::MAX_RECOVERY_VERIFY_INTERVAL_SECS,
@@ -3709,6 +3941,7 @@ struct StorageSettingsRequest {
     download_prefetch_chunks: Option<u64>,
     download_failover_retries: Option<u64>,
     recovery_verify_enabled: Option<bool>,
+    recovery_verify_startup: Option<bool>,
     recovery_verify_interval_secs: Option<u64>,
     recovery_verify_chunks: Option<u64>,
     cleanup_retention_secs: Option<u64>,
@@ -3727,6 +3960,7 @@ struct StorageSettingsWire {
     min_download_failover_retries: u64,
     max_download_failover_retries: u64,
     recovery_verify_enabled: bool,
+    recovery_verify_startup: bool,
     recovery_verify_interval_secs: u64,
     min_recovery_verify_interval_secs: u64,
     max_recovery_verify_interval_secs: u64,

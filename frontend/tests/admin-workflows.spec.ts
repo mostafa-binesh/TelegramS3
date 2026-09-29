@@ -66,6 +66,7 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
   let downloadPrefetchChunks = 1;
   let downloadFailoverRetries = 1;
   let recoveryVerifyEnabled = true;
+  let recoveryVerifyStartup = true;
   let recoveryVerifyIntervalSecs = 300;
   let recoveryVerifyChunks = 1;
   let cleanupRetentionSecs = 43200;
@@ -134,19 +135,20 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
       return route.fulfill({ json: { settings: { telegram_api_id: '12345', telegram_api_hash: 'hash', telegram_storage_chat_id: '-1001234567890', telegram_proxy_url: '', telegram_proxy_username: '', telegram_proxy_password: '', telegram_proxy_mode: 'auto', telegram_account_phone: '+15551234567' } } });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'GET') {
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_failover_retries: downloadFailoverRetries, min_download_failover_retries: 0, max_download_failover_retries: 8, recovery_verify_enabled: recoveryVerifyEnabled, recovery_verify_interval_secs: recoveryVerifyIntervalSecs, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: recoveryVerifyChunks, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: cleanupRetentionSecs, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_failover_retries: downloadFailoverRetries, min_download_failover_retries: 0, max_download_failover_retries: 8, recovery_verify_enabled: recoveryVerifyEnabled, recovery_verify_startup: recoveryVerifyStartup, recovery_verify_interval_secs: recoveryVerifyIntervalSecs, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: recoveryVerifyChunks, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: cleanupRetentionSecs, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'POST') {
       if (options.storageFailure) return route.fulfill({ status: 400, json: { error: 'storage settings rejected for this test' } });
-      const body = request.postDataJSON() as { chunk_size: number; download_prefetch_chunks: number; download_failover_retries: number; recovery_verify_enabled: boolean; recovery_verify_interval_secs: number; recovery_verify_chunks: number; cleanup_retention_secs: number };
+      const body = request.postDataJSON() as { chunk_size: number; download_prefetch_chunks: number; download_failover_retries: number; recovery_verify_enabled: boolean; recovery_verify_startup: boolean; recovery_verify_interval_secs: number; recovery_verify_chunks: number; cleanup_retention_secs: number };
       chunkSize = body.chunk_size;
       downloadPrefetchChunks = body.download_prefetch_chunks;
       downloadFailoverRetries = body.download_failover_retries;
       recoveryVerifyEnabled = body.recovery_verify_enabled;
+      recoveryVerifyStartup = body.recovery_verify_startup;
       recoveryVerifyIntervalSecs = body.recovery_verify_interval_secs;
       recoveryVerifyChunks = body.recovery_verify_chunks;
       cleanupRetentionSecs = body.cleanup_retention_secs;
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_failover_retries: downloadFailoverRetries, min_download_failover_retries: 0, max_download_failover_retries: 8, recovery_verify_enabled: recoveryVerifyEnabled, recovery_verify_interval_secs: recoveryVerifyIntervalSecs, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: recoveryVerifyChunks, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: cleanupRetentionSecs, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_failover_retries: downloadFailoverRetries, min_download_failover_retries: 0, max_download_failover_retries: 8, recovery_verify_enabled: recoveryVerifyEnabled, recovery_verify_startup: recoveryVerifyStartup, recovery_verify_interval_secs: recoveryVerifyIntervalSecs, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: recoveryVerifyChunks, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: cleanupRetentionSecs, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
     }
     if (path === '/telegram/disconnect' && request.method() === 'POST') {
       connectionRemoved = true;
@@ -220,6 +222,10 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
       if (key === 'docs/') return route.fulfill({ status: 409, json: { error: 'folder not empty: docs/' } });
       deletedKeys.add(key);
       return route.fulfill({ json: { ok: true, deleted: true } });
+    }
+    if (path === '/objects/move' && request.method() === 'POST') {
+      const body = request.postDataJSON() as { sources: Array<{ key: string; folder?: boolean }> };
+      return route.fulfill({ json: { ok: true, moved_objects: body.sources.length } });
     }
     if (path === '/objects/folder' && request.method() === 'POST') {
       const pathName = (request.postDataJSON() as { path: string }).path;
@@ -586,10 +592,32 @@ test('move modal browses destinations and moves the selected object', async ({ p
   await expect(moveBrowser.getByText('Move here:')).toBeVisible();
   await expect(moveBrowser).toContainText('release-test/docs');
 
-  const deleteRequest = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/delete') && candidate.method() === 'POST');
+  const moveRequest = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/move') && candidate.method() === 'POST');
   await moveBrowser.getByRole('button', { name: 'Move files' }).click();
-  expect((await deleteRequest).postDataJSON()).toMatchObject({ bucket: 'release-test', key: 'readme.txt' });
-  await expect(page.getByText('Selected items moved.')).toBeVisible();
+  expect((await moveRequest).postDataJSON()).toMatchObject({
+    source_bucket: 'release-test',
+    destination_bucket: 'release-test',
+    destination_prefix: 'docs/',
+    sources: [{ key: 'readme.txt', folder: false }]
+  });
+  await expect(page.getByText('1 object moved on the server.')).toBeVisible();
+});
+
+test('folder selection is sent to the server move endpoint without browser file transfer', async ({ page }) => {
+  await mockAdminApi(page);
+  await signIn(page);
+  await openBucket(page);
+  await page.getByLabel('Select folder docs').check();
+  await page.locator('.selection-bar').getByRole('button', { name: /Move/ }).click();
+  const moveBrowser = page.locator('.move-browser');
+  await moveBrowser.getByRole('region', { name: 'Destination buckets' }).getByRole('button', { name: 'release-test', exact: true }).click();
+  const moveRequest = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/move') && candidate.method() === 'POST');
+  await moveBrowser.getByRole('button', { name: 'Move files' }).click();
+  expect((await moveRequest).postDataJSON()).toMatchObject({
+    source_bucket: 'release-test',
+    destination_bucket: 'release-test',
+    sources: [{ key: 'docs/', folder: true }]
+  });
 });
 
 test('upload modal sends the selected object expiry through the resumable upload flow', async ({ page }) => {
@@ -628,11 +656,12 @@ test('storage policy tab loads, applies MiB to bytes, and reports a save failure
   await expect(page.getByLabel('New upload chunk size')).toHaveValue('8');
   await page.getByRole('spinbutton', { name: 'Verification interval seconds' }).fill('600');
   await page.getByLabel('Random chunks per file').fill('3');
+  await expect(page.getByLabel('Run the first remote scan when the server starts')).toBeChecked();
   const [saveRequest] = await Promise.all([
     page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/telegram/storage-settings') && candidate.method() === 'POST'),
     page.getByRole('button', { name: 'Apply storage policy' }).click()
   ]);
-  expect(saveRequest.postDataJSON()).toMatchObject({ chunk_size: 8 * 1_048_576, download_prefetch_chunks: 2, download_failover_retries: 2, recovery_verify_enabled: true, recovery_verify_interval_secs: 600, recovery_verify_chunks: 3, cleanup_retention_secs: 43200 });
+  expect(saveRequest.postDataJSON()).toMatchObject({ chunk_size: 8 * 1_048_576, download_prefetch_chunks: 2, download_failover_retries: 2, recovery_verify_enabled: true, recovery_verify_startup: true, recovery_verify_interval_secs: 600, recovery_verify_chunks: 3, cleanup_retention_secs: 43200 });
   await expect(page.getByRole('alert')).toContainText('storage settings rejected for this test');
 });
 
@@ -675,6 +704,22 @@ test('storage policy can disable the verifier and overview reports it', async ({
   const verifier = page.locator('.verifier-card');
   await expect(verifier.locator('.score-chip')).toHaveText('Disabled');
   await expect(verifier.getByText('Automatic verification is disabled.')).toBeVisible();
+});
+
+test('storage policy can defer the first remote verifier scan until its interval', async ({ page }) => {
+  await mockAdminApi(page);
+  await signIn(page);
+  await page.getByRole('button', { name: 'Storage settings' }).click();
+  const startupScan = page.getByLabel('Run the first remote scan when the server starts');
+  await expect(startupScan).toBeChecked();
+  await startupScan.uncheck();
+  const [saveRequest] = await Promise.all([
+    page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/telegram/storage-settings') && candidate.method() === 'POST'),
+    page.getByRole('button', { name: 'Apply storage policy' }).click()
+  ]);
+  expect(saveRequest.postDataJSON()).toMatchObject({ recovery_verify_enabled: true, recovery_verify_startup: false });
+  await expect(page.locator('p.storage-message[role="status"]')).toContainText('Storage policy updated.');
+  await expect(page.getByText('The first remote scan waits for the configured verification interval.')).toBeVisible();
 });
 
 test('storage policy success is reflected after leaving and returning to the tab', async ({ page }) => {

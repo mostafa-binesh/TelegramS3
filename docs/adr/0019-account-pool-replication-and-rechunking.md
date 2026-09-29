@@ -14,9 +14,11 @@ change chunk policy for existing objects without exposing a mixed manifest.
 
 Keep the existing active connection as the compatibility owner, and add an
 additive account registry keyed by immutable connection ID. Persist replica and
-access locations per object/chunk. Physical replication copies encrypted bytes
-through the target connection; access replication records the source location
-and requires the target session to have chat access. The reader rotates across
+access locations per object/chunk. Physical replication reuses the source
+encrypted message when the source and target connections use the same storage
+chat; different-chat replication copies encrypted bytes through the target
+connection. Access replication records the source location and requires the
+target session to have chat access. The reader rotates across
 the primary and ready physical locations per chunk.
 
 Replication and re-chunking are durable jobs. Re-chunking stages a replacement

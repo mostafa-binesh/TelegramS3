@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.7.6-rc.18 - 2026-09-30
+
+### Metadata-only moves and shared-chat replication
+
+- Reworked authenticated server-side object and folder moves to publish a
+  durable destination manifest that reuses the existing encrypted Telegram
+  chunk locations. The browser and server no longer download and re-upload
+  payload bytes for a move; source manifests are tombstoned only after the
+  destination manifest commits.
+- Added folder expansion, basename/relative-path preservation, directory
+  marker handling, destination conflict preflight, durable per-object move
+  jobs, and recovery-safe partial failure behavior for admin moves.
+- Optimized automatic physical replication between connected accounts that
+  use the same Telegram storage chat: the target replica now references the
+  already durable Telegram message without a payload download or upload.
+  Replication across different storage chats keeps the verified encrypted
+  download/upload fallback, and access-mode replication remains metadata-only.
+- Deferred source-account transport initialization until a cross-chat physical
+  copy is required, so a disconnected source account does not block the
+  shared-chat reuse path.
+- Added Rust coverage for payload-preserving moves and shared-chat reuse,
+  refreshed the move dialog copy, and documented the transfer/recovery
+  boundaries in the README, roadmap, compatibility, storage-format, recovery,
+  and replication ADR documentation.
+- Included the persisted startup verifier policy, migration, settings UI, and
+  existing server-side move/folder test coverage in this release candidate.
+
 ## 0.7.6-rc.16 - 2026-09-29
 
 ### Cleanup queue recovery and scheduling

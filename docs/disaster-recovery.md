@@ -114,7 +114,9 @@ remain revocable but cannot have their URL reconstructed.
 3. Resume only if the upload state is safe to continue.
 4. Otherwise roll back and clean up staging or quarantined artifacts.
 
-The initial recovery snapshot may validate committed chunks against Telegram.
+The initial recovery snapshot may validate committed chunks against Telegram
+when the persisted first-scan-on-startup policy is enabled. If that policy is
+disabled, the first remote scan waits for the configured verifier interval.
 That remote work is intentionally asynchronous: a slow or unavailable
 Telegram connection must not keep a restarted container listening only through
 Docker's port proxies without the application accepting requests. Until the
@@ -193,6 +195,24 @@ Public audio/video links additionally use inline content disposition so media
 players can issue their normal metadata and range probes. This is only an HTTP
 response-header behavior; it does not change the stored manifest or Telegram
 documents.
+
+### Server-side admin moves
+
+The admin move endpoint never sends source bytes through the browser or back
+through Telegram. It expands selected folder prefixes from the local active
+index, creates a durable destination transfer whose chunks reference the
+original payload identity, publishes only the new manifest document, and only
+then tombstones the source. Directory markers are processed after their
+descendants so folder cleanup preserves the existing non-empty-folder safety
+rule. A process failure can leave a committed destination alongside an
+untouched source; this is recoverable and does not silently discard data, but
+the operator must resolve the destination conflict before retrying that item.
+
+Automatic physical replication applies the same no-payload-copy optimization
+when the source and target connections use the same Telegram storage chat:
+the target account receives a ready location pointing at the existing message.
+If the chats differ, replication falls back to the verified encrypted
+download/upload path because the target chat needs its own physical message.
 
 ### Telegram Rate Limit (`FLOOD_WAIT`)
 

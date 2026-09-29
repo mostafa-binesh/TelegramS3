@@ -16,6 +16,7 @@
   export let busy = false;
   export let selectedBuckets: string[] = [];
   export let selectedKeys: string[] = [];
+  export let selectedFolders: string[] = [];
   export let bucketSearch = '';
   export let bucketPage = 1;
   export let bucketTotal = 0;
@@ -43,6 +44,7 @@
   export let onRemoveSelectedBuckets: () => void = () => {};
   export let onRechunkSelectedBuckets: () => void = () => {};
   export let onToggleKey: (key: string) => void = () => {};
+  export let onToggleFolder: (name: string) => void = () => {};
   export let onToggleAll: () => void = () => {};
   export let onRemoveKey: (object: ObjectEntry | string) => void = () => {};
   export let onRemoveSelected: () => void = () => {};
@@ -66,7 +68,10 @@
   type PageItem = number | 'ellipsis';
 
   $: selectableObjects = listing?.objects.filter((object) => !object.uploading) ?? [];
-  $: allVisibleSelected = selectedKeys.length > 0 && selectedKeys.length === selectableObjects.length;
+  $: visibleFolderKeys = listing?.folders.map((folder) => `${currentPrefix}${folder}/`) ?? [];
+  $: allVisibleSelected = selectableObjects.length + visibleFolderKeys.length > 0
+    && selectableObjects.every((object) => selectedKeys.includes(object.key))
+    && visibleFolderKeys.every((key) => selectedFolders.includes(key));
   $: allVisibleBucketsSelected = buckets.length > 0 && buckets.every((bucket) => selectedBuckets.includes(bucket.name));
   $: bucketPageCount = Math.max(1, Math.ceil(bucketTotal / 25));
   $: globalSearchPageCount = Math.max(1, Math.ceil(globalSearchTotal / 25));
@@ -197,7 +202,7 @@
         {/if}
         {#if listing.folders.length === 0 && listing.objects.length === 0}<p class="empty-state"><span class="empty-mark" aria-hidden="true">↑</span>This folder is empty. Drop files above to upload the first one.</p>
         {:else}<div class="table-scroll" class:listing-dimmed={objectsLoading}><table class="kv-table"><colgroup><col class="selection-column"/><col class="name-column"/><col class="size-column"/><col class="modified-column"/><col class="actions-column"/></colgroup><thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={allVisibleSelected} on:change={onToggleAll}/></th><th aria-sort={objectSortKey === 'name' ? objectSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort objects by Name ${sortLabel('name', objectSortKey, objectSortDirection)}`} on:click={() => onObjectSort('name')}><span>Name</span><span class:active-sort={objectSortKey === 'name'} class="sort-glyph" aria-hidden="true">{sortGlyph('name', objectSortKey, objectSortDirection)}</span></button></th><th aria-sort={objectSortKey === 'size' ? objectSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort objects by Size ${sortLabel('size', objectSortKey, objectSortDirection)}`} on:click={() => onObjectSort('size')}><span>Size</span><span class:active-sort={objectSortKey === 'size'} class="sort-glyph" aria-hidden="true">{sortGlyph('size', objectSortKey, objectSortDirection)}</span></button></th><th aria-sort={objectSortKey === 'last_modified' ? objectSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort objects by Modified ${sortLabel('last_modified', objectSortKey, objectSortDirection)}`} on:click={() => onObjectSort('last_modified')}><span>Modified</span><span class:active-sort={objectSortKey === 'last_modified'} class="sort-glyph" aria-hidden="true">{sortGlyph('last_modified', objectSortKey, objectSortDirection)}</span></button></th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
-      {#each listing?.folders ?? [] as folder (folder)}<tr><td></td><td><button class="btn-link" on:click={() => onEnterFolder(folder)}>{folder}/</button></td><td class="muted">folder</td><td class="muted">—</td><td><div class="row-actions"><ActionIcon name="trash" label={`Delete folder ${folder}`} tone="danger" on:click={() => onRemoveKey(folder)} disabled={busy}/></div></td></tr>{/each}
+      {#each listing?.folders ?? [] as folder (folder)}<tr><td><input class="select-all" type="checkbox" checked={selectedFolders.includes(`${currentPrefix}${folder}/`)} on:change={() => onToggleFolder(folder)} aria-label={`Select folder ${folder}`}/></td><td><button class="btn-link" on:click={() => onEnterFolder(folder)}>{folder}/</button></td><td class="muted">folder</td><td class="muted">—</td><td><div class="row-actions"><ActionIcon name="trash" label={`Delete folder ${folder}`} tone="danger" on:click={() => onRemoveKey(folder)} disabled={busy}/></div></td></tr>{/each}
       {#each listing?.objects ?? [] as obj (obj.key)}
         <tr class:uploading-row={obj.uploading} class:upload-attention={obj.uploading && uploadKind(obj) === 'attention'}>
           <td>
@@ -253,7 +258,7 @@
     {:else if objectsLoading}<div class="skeleton-stack" aria-label="Loading files"><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div><div class="skeleton" style="height:40px"></div></div>
     {:else if objectsError}<LoadError title="Could not load this folder" message={objectsError} onRetry={onRefresh} />
     {/if}
-    {#if selectedKeys.length}<div class="selection-bar"><strong>{selectedKeys.length} selected</strong><button class="ghost bulk-action bulk-replicate" type="button" on:click={onOpenBulkReplication}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 11a3 3 0 0 1 4.5 2.6M16.5 19a4 4 0 0 1 4 0"/></svg><span>Replicate</span></button><button class="ghost bulk-action bulk-delete" type="button" on:click={onRemoveSelected}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16m-10 4v6m4-6v6M9 7V4h6v3m-9 0 1 13h10l1-13"/></svg><span>Delete</span></button><button class="ghost bulk-action" type="button" on:click={onOpenMove}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18m0-18-3 3m3-3 3 3M12 21l-3-3m3 3 3-3M3 12h18m0 0-3-3m3 3-3 3M3 12l3-3m-3 3 3 3"/></svg><span>Move</span></button><button class="ghost bulk-action" type="button" on:click={onRechunkSelected}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16M8 4v4m8 2v4m-5 2v4"/></svg><span>Re-chunk</span></button></div>{/if}
+    {#if selectedKeys.length + selectedFolders.length}<div class="selection-bar"><strong>{selectedKeys.length + selectedFolders.length} selected</strong><button class="ghost bulk-action bulk-replicate" type="button" on:click={onOpenBulkReplication} disabled={selectedFolders.length > 0}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 4.5 0M16 11a3 3 0 0 1 4.5 2.6M16.5 19a4 4 0 0 1 4 0"/></svg><span>Replicate</span></button><button class="ghost bulk-action bulk-delete" type="button" on:click={onRemoveSelected} disabled={selectedFolders.length > 0}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16m-10 4v6m4-6v6M9 7V4h6v3m-9 0 1 13h10l1-13"/></svg><span>Delete</span></button><button class="ghost bulk-action" type="button" on:click={onOpenMove}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18m0-18-3 3m3-3 3 3M12 21l-3-3m3 3 3-3M3 12h18m0 0-3-3m3 3-3 3M3 12l3-3m-3 3 3 3"/></svg><span>Move</span></button><button class="ghost bulk-action" type="button" on:click={onRechunkSelected} disabled={selectedFolders.length > 0}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16M8 4v4m8 2v4m-5 2v4"/></svg><span>Re-chunk</span></button></div>{/if}
   {/if}
 </section>
 <style>

@@ -35,6 +35,7 @@
   export let downloadFailoverRetriesMin = 0;
   export let downloadFailoverRetriesMax = 8;
   export let recoveryVerifyEnabled = true;
+  export let recoveryVerifyStartup = true;
   export let recoveryVerifyIntervalSecs = 300;
   export let recoveryVerifyIntervalMin = 60;
   export let recoveryVerifyIntervalMax = 604800;
@@ -190,6 +191,7 @@
         <div class="verification-heading"><div><span class="eyebrow">Recovery verifier</span><h3>Random health checks</h3></div><span class:disabled={!recoveryVerifyEnabled} class="policy-badge">{recoveryVerifyEnabled ? `${recoveryVerifyChunks} chunk${Number(recoveryVerifyChunks) === 1 ? '' : 's'} / file` : 'Disabled'}</span></div>
         <label class="verification-toggle"><input bind:checked={recoveryVerifyEnabled} type="checkbox" aria-describedby="recovery-verify-help" /><span><strong>Enable automatic recovery verification</strong><small>When disabled, the server will not schedule remote chunk checks or quarantine objects from verifier scans.</small></span></label>
         <p class="policy-description">When enabled, the server downloads a fresh random sample from every healthy committed object at each interval and verifies its checksum. It never re-uploads a failed chunk automatically.</p>
+        <label class="verification-toggle"><input bind:checked={recoveryVerifyStartup} type="checkbox" aria-describedby="recovery-verify-startup-help" /><span><strong>Run the first remote scan when the server starts</strong><small>Disable this if startup should only schedule the first scan after the configured interval.</small></span></label>
         <div class="verification-grid">
           <label><span>Verification interval</span><div class="chunk-input-wrap"><input bind:value={recoveryVerifyIntervalSecs} disabled={!recoveryVerifyEnabled} type="number" min={recoveryVerifyIntervalMin} max={recoveryVerifyIntervalMax} step="1" inputmode="numeric" aria-describedby="recovery-verify-help" /><span>seconds</span></div></label>
           <label><span>Random chunks per file</span><div class="chunk-input-wrap"><input bind:value={recoveryVerifyChunks} disabled={!recoveryVerifyEnabled} type="number" min={recoveryVerifyChunksMin} max={recoveryVerifyChunksMax} step="1" inputmode="numeric" aria-describedby="recovery-verify-help" /><span>chunks</span></div></label>
@@ -198,6 +200,7 @@
           {#each [{label: '1 min', value: 60}, {label: '5 min', value: 300}, {label: '15 min', value: 900}, {label: '1 hour', value: 3600}] as preset}<button class:chosen={Number(recoveryVerifyIntervalSecs) === preset.value} disabled={!recoveryVerifyEnabled} type="button" on:click={() => recoveryVerifyIntervalSecs = preset.value}>{preset.label}</button>{/each}
         </div>
         <p id="recovery-verify-help" class="range-help">{#if recoveryVerifyEnabled}Interval: {recoveryVerifyIntervalMin}–{recoveryVerifyIntervalMax} seconds. Sample count: {recoveryVerifyChunksMin}–{recoveryVerifyChunksMax}. A missing or checksum-bad sampled chunk quarantines the object for recovery; a temporary Telegram/network error is retried on a later scan.{:else}The verifier is disabled. Existing interval and sample values are preserved and will resume when you enable it again.{/if}</p>
+        <p id="recovery-verify-startup-help" class="range-help">{#if recoveryVerifyStartup}A remote scan starts immediately after the verifier worker starts.{:else}The first remote scan waits for the configured verification interval.{/if}</p>
         {#if storageSettingsError}<p class="storage-message message-error" role="alert">{storageSettingsError}</p>{/if}
         {#if storageSettingsMessage}<p class="storage-message" role="status">✓ {storageSettingsMessage}</p>{/if}
         <div class="policy-actions"><span class:valid={draftChunkSizeValid && recoverySettingsValid} class="draft-preview">{draftChunkSizeValid && recoverySettingsValid ? `${downloadPrefetchChunks === 0 ? 'Serial downloads' : `${downloadPrefetchChunks} chunk${Number(downloadPrefetchChunks) === 1 ? '' : 's'} prefetched`} · ${downloadFailoverRetries} failover retr${Number(downloadFailoverRetries) === 1 ? 'y' : 'ies'} · cleanup retained ${cleanupRetentionSecs}s · ${recoveryVerifyEnabled ? `checks ${recoveryVerifyChunks} random chunk${Number(recoveryVerifyChunks) === 1 ? '' : 's'} every ${recoveryVerifyIntervalSecs}s` : 'verification disabled'}` : 'Enter values in the allowed ranges'}</span><button class="primary" type="submit" disabled={storageSettingsBusy || !draftChunkSizeValid || !recoverySettingsValid}>{storageSettingsBusy ? 'Applying…' : 'Apply storage policy'}</button></div>

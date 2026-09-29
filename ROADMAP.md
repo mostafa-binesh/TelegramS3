@@ -379,6 +379,17 @@ Multi-user boundary for the next increment:
 - [x] Removed background polling from the Accounts/Connections panel and added
   an explicit manual refresh action with browser coverage for the no-poll and
   on-demand request paths.
+- [x] Replaced browser-mediated object Move with an authenticated durable
+  manifest-only transfer that reuses encrypted chunk references, commits each
+  destination before tombstoning its source, and never re-uploads payloads.
+  Folder rows are selectable and move recursively while preserving directory
+  markers; browser request and failure-boundary coverage was added.
+- [x] Optimized automatic physical replication when connected accounts share a
+  Telegram storage chat by reusing existing chunk messages; different chats
+  retain the verified encrypted download/upload fallback.
+- [x] Added schema v22 for the persisted first-remote-scan-on-startup policy.
+  The Storage policy UI can defer that first scan without disabling recurring
+  verifier scans, with migration and browser coverage.
 
 Remaining Phase 10 work:
 

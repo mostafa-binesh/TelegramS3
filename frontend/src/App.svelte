@@ -26,8 +26,7 @@
     logout,
     removeTelegramConnection,
     removeObject,
-    putObjectContent,
-    contentUrl,
+    moveObjects,
     saveTelegramSettings,
     saveStorageSettings,
     createShareLink,
@@ -159,6 +158,7 @@
   let deleteTarget: { type: 'bucket' | 'bucket-selection' | 'object' | 'folder' | 'selection' | 'operator'; name: string; key?: string } | null = null;
   let selectedBuckets: string[] = [];
   let selectedKeys: string[] = [];
+  let selectedFolders: string[] = [];
   let showMoveModal = false;
   let showReplicaModal = false;
   let replicaItems: ReplicaInfo[] = [];
@@ -231,6 +231,7 @@
   let recoveryVerifyChunksMin = 1;
   let recoveryVerifyChunksMax = 1024;
   let recoveryVerifyEnabled = true;
+  let recoveryVerifyStartup = true;
   let cleanupRetentionSecs = 43200;
   let cleanupRetentionMin = 3600;
   let cleanupRetentionMax = 2592000;
@@ -455,6 +456,7 @@
     min_download_failover_retries?: number;
     max_download_failover_retries?: number;
     recovery_verify_enabled?: boolean;
+    recovery_verify_startup?: boolean;
     recovery_verify_interval_secs: number;
     min_recovery_verify_interval_secs: number;
     max_recovery_verify_interval_secs: number;
@@ -476,6 +478,7 @@
     downloadFailoverRetriesMin = settings.min_download_failover_retries ?? 0;
     downloadFailoverRetriesMax = settings.max_download_failover_retries ?? 8;
     recoveryVerifyEnabled = settings.recovery_verify_enabled ?? true;
+    recoveryVerifyStartup = settings.recovery_verify_startup ?? true;
     recoveryVerifyIntervalSecs = settings.recovery_verify_interval_secs ?? 300;
     recoveryVerifyIntervalMin = settings.min_recovery_verify_interval_secs ?? 60;
     recoveryVerifyIntervalMax = settings.max_recovery_verify_interval_secs ?? 604800;
@@ -500,6 +503,7 @@
         download_prefetch_chunks: Number(downloadPrefetchChunks),
         download_failover_retries: Number(downloadFailoverRetries),
         recovery_verify_enabled: recoveryVerifyEnabled,
+        recovery_verify_startup: recoveryVerifyStartup,
         recovery_verify_interval_secs: Number(recoveryVerifyIntervalSecs),
         recovery_verify_chunks: Number(recoveryVerifyChunks),
         cleanup_retention_secs: Number(cleanupRetentionSecs)
@@ -714,6 +718,7 @@
     objectsError = '';
     selectedBuckets = [];
     selectedKeys = [];
+    selectedFolders = [];
     objectSearch = '';
     objectPage = 1;
     navigate({ view: 'buckets', bucket: name, prefix: '' });
@@ -762,6 +767,7 @@
     objectsError = '';
     selectedBuckets = [];
     selectedKeys = [];
+    selectedFolders = [];
     objectSearch = '';
     objectPage = 1;
     navigate({ view: 'buckets', bucket: '', prefix: '' });
@@ -910,6 +916,7 @@
     objectsError = '';
     if (!options.silent) {
       selectedKeys = [];
+      selectedFolders = [];
       objectsLoading = true;
     }
     try {
@@ -983,6 +990,7 @@
 
   function enterFolder(name: string) {
     selectedKeys = [];
+    selectedFolders = [];
     objectSearch = '';
     objectPage = 1;
     navigate({ view: 'buckets', bucket: selectedBucket, prefix: `${currentPrefix}${name}/` });
@@ -1028,6 +1036,7 @@
 
   function goToSearchResultFolder(location: string) {
     selectedKeys = [];
+    selectedFolders = [];
     objectSearch = '';
     objectPage = 1;
     navigate({ view: 'buckets', bucket: selectedBucket, prefix: location });
@@ -1045,11 +1054,13 @@
     objectSearch = result.name;
     objectPage = 1;
     selectedKeys = [];
+    selectedFolders = [];
     navigate({ view: 'buckets', bucket: result.bucket, prefix: result.location ?? '' });
   }
 
   function gotoCrumb(i: number) {
     selectedKeys = [];
+    selectedFolders = [];
     objectSearch = '';
     objectPage = 1;
     const parts = currentPrefix.split('/').filter(Boolean).slice(0, i);
@@ -1250,6 +1261,13 @@
     selectedKeys = selectedKeys.includes(key) ? selectedKeys.filter((item) => item !== key) : [...selectedKeys, key];
   }
 
+  function toggleFolder(name: string) {
+    const key = `${currentPrefix}${name}/`;
+    selectedFolders = selectedFolders.includes(key)
+      ? selectedFolders.filter((item) => item !== key)
+      : [...selectedFolders, key];
+  }
+
   async function removeSelected() {
     if (!selectedKeys.length) return;
     await loadAdminModals();
@@ -1271,23 +1289,27 @@
   }
 
   async function moveSelected() {
-    if (!selectedKeys.length || !moveBucket) return;
+    if ((!selectedKeys.length && !selectedFolders.length) || !moveBucket) return;
     busy = true;
     try {
-      for (const key of selectedKeys) {
-        const response = await fetch(contentUrl(selectedBucket, key), { credentials: 'include' });
-        if (!response.ok) throw new Error(`Could not read ${key}`);
-        const targetKey = `${movePrefix.replace(/^\/+|\/+$/g, '') ? `${movePrefix.replace(/^\/+|\/+$/g, '')}/` : ''}${key.split('/').pop() ?? key}`;
-        if (moveBucket === selectedBucket && targetKey === key) {
-          throw new Error(`Choose a different destination for ${key}`);
-        }
-        await putObjectContent(moveBucket, targetKey, await response.blob(), session?.csrf_token);
-        await removeObject(session?.csrf_token, selectedBucket, key);
-      }
-      selectedKeys = []; showMoveModal = false; notifySuccess('Selected items moved.'); await refreshObjects();
+      const result = await moveObjects(session?.csrf_token, {
+        source_bucket: selectedBucket,
+        destination_bucket: moveBucket,
+        destination_prefix: movePrefix,
+        sources: [
+          ...selectedKeys.map((key) => ({ key, folder: false })),
+          ...selectedFolders.map((key) => ({ key, folder: true }))
+        ]
+      });
+      selectedKeys = [];
+      selectedFolders = [];
+      showMoveModal = false;
+      notifySuccess(`${result.moved_objects ?? 0} object${result.moved_objects === 1 ? '' : 's'} moved on the server.`);
+      await refreshObjects();
     } catch (cause) { notifyError(normalizeError(cause)); }
     finally { busy = false; }
   }
+
 </script>
 
 <svelte:head>
@@ -1351,11 +1373,11 @@
         {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else if routeLoadError}<LoadError title="Could not load interrupted transfers" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {/if}
     {:else if view === 'telegram'}
-      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab="storage" hideTabs {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} bind:downloadPrefetchChunks {downloadPrefetchChunksMin} {downloadPrefetchChunksMax} bind:downloadFailoverRetries {downloadFailoverRetriesMin} {downloadFailoverRetriesMax} bind:recoveryVerifyEnabled bind:recoveryVerifyIntervalSecs {recoveryVerifyIntervalMin} {recoveryVerifyIntervalMax} bind:recoveryVerifyChunks {recoveryVerifyChunksMin} {recoveryVerifyChunksMax} bind:cleanupRetentionSecs {cleanupRetentionMin} {cleanupRetentionMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Storage settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
+      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab="storage" hideTabs {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} bind:downloadPrefetchChunks {downloadPrefetchChunksMin} {downloadPrefetchChunksMax} bind:downloadFailoverRetries {downloadFailoverRetriesMin} {downloadFailoverRetriesMax} bind:recoveryVerifyEnabled bind:recoveryVerifyStartup bind:recoveryVerifyIntervalSecs {recoveryVerifyIntervalMin} {recoveryVerifyIntervalMax} bind:recoveryVerifyChunks {recoveryVerifyChunksMin} {recoveryVerifyChunksMax} bind:cleanupRetentionSecs {cleanupRetentionMin} {cleanupRetentionMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Storage settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')} onStageMetricsTest={runStageMetricsDiagnostic} stageTestBusy={stageTestBusy}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedBuckets} {selectedKeys} {bucketSearch} {bucketPage} {bucketTotal} {bucketSortKey} {bucketSortDirection} globalSearchResults={globalSearchResults} globalSearchPage={globalSearchPage} globalSearchTotal={globalSearchTotal} globalSearchLoading={globalSearchLoading} globalSearchError={globalSearchError} {objectSearch} {objectPage} {objectTotal} {objectSortKey} {objectSortDirection} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onBucketSort={sortBuckets} onGlobalSearchPage={goToGlobalSearchPage} onOpenSearchResult={openGlobalSearchResult} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onObjectSort={sortObjects} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBucketPage()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleBucket={toggleBucket} onToggleAllBuckets={toggleAllBuckets} onRemoveSelectedBuckets={removeSelectedBuckets} onRechunkSelectedBuckets={openBucketRechunkModal} onToggleKey={toggleKey} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onRechunkSelected={openRechunkModal} onOpenReplicas={openReplicaDetails} onOpenBulkReplication={() => openReplicaDetails(selectedBucket, undefined, [...selectedKeys])} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedBuckets} {selectedKeys} {selectedFolders} {bucketSearch} {bucketPage} {bucketTotal} {bucketSortKey} {bucketSortDirection} globalSearchResults={globalSearchResults} globalSearchPage={globalSearchPage} globalSearchTotal={globalSearchTotal} globalSearchLoading={globalSearchLoading} globalSearchError={globalSearchError} {objectSearch} {objectPage} {objectTotal} {objectSortKey} {objectSortDirection} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onBucketSort={sortBuckets} onGlobalSearchPage={goToGlobalSearchPage} onOpenSearchResult={openGlobalSearchResult} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onObjectSort={sortObjects} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBucketPage()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleBucket={toggleBucket} onToggleAllBuckets={toggleAllBuckets} onRemoveSelectedBuckets={removeSelectedBuckets} onRechunkSelectedBuckets={openBucketRechunkModal} onToggleKey={toggleKey} onToggleFolder={toggleFolder} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onRechunkSelected={openRechunkModal} onOpenReplicas={openReplicaDetails} onOpenBulkReplication={() => openReplicaDetails(selectedBucket, undefined, [...selectedKeys])} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'accounts'}
       {#if AccountsPanelComponent}<svelte:component this={AccountsPanelComponent} csrf={session?.csrf_token} buckets={buckets} {accountsTab} onTabChange={(tab: AccountsTab) => navigate({ view: 'accounts', accountsTab: tab })} overview={overview} {session} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose} onRemoveConnection={removeCurrentConnection}/>{:else if routeLoadError}<LoadError title="Could not load accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'users'}

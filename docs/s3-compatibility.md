@@ -53,9 +53,12 @@ features, so they are documented separately.
 The operator API adds `/accounts`, `/replication`, `/replicas`, and `/rechunk`.
 These are management extensions rather than S3 operations. Replication is
 bucket-scoped and durable: `one_time` jobs finish once, while `automatic` jobs
-are rescheduled. `replica` mode uploads encrypted chunk bytes to the target
-connection; `access` mode records a shared-chat location without uploading a
-second copy. A chunk may have several account locations and the shared reader
+are rescheduled. `replica` mode reuses the existing encrypted chunk message
+when the source and target connections use the same Telegram storage chat,
+avoiding server-side payload download/upload. When their storage chats differ,
+it uploads encrypted chunk bytes to the target connection; `access` mode always
+records a shared-chat location without uploading a second copy. A chunk may
+have several account locations and the shared reader
 rotates across them; an access-only target must be able to resolve the source
 peer. The Accounts workspace is the single home for the primary connection and
 additional connections, with separate Connections, Replication, and
@@ -179,6 +182,13 @@ while transient account/network failures remain retryable.
   authenticated admin-plane endpoints, not S3 multipart APIs; a server restart
   drops an in-flight browser reception and the existing inactivity lease still
   applies.
+- The authenticated admin object browser supports server-side moves for
+  selected files and folders through `POST /_admin/api/objects/move`.
+  Destination manifests reuse the existing encrypted chunk references and are
+  committed before source tombstones, so neither the browser nor the server
+  re-uploads object payloads. Folder moves preserve the selected folder name
+  and recursively include descendants and directory markers. This is an
+  admin-plane operation and does not add an S3 MoveObject API.
 - Bulk/folder download or server-side ZIP is **not** available at this level
   (avoiding whole-object RAM buffering) and is an explicit future item.
 - The bucket browser preserves bucket names exactly, including Unicode names;

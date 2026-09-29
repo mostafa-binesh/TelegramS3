@@ -9,6 +9,7 @@ const CHUNK_SIZE_SETTING: &str = "telegram_chunk_size";
 pub(crate) const DOWNLOAD_PREFETCH_CHUNKS_SETTING: &str = "telegram_download_prefetch_chunks";
 pub(crate) const DOWNLOAD_FAILOVER_RETRIES_SETTING: &str = "telegram_download_failover_retries";
 const RECOVERY_VERIFY_ENABLED_SETTING: &str = "telegram_recovery_verify_enabled";
+const RECOVERY_VERIFY_STARTUP_SETTING: &str = "telegram_recovery_verify_startup";
 const RECOVERY_VERIFY_INTERVAL_SETTING: &str = "telegram_recovery_verify_interval_secs";
 const RECOVERY_VERIFY_CHUNKS_SETTING: &str = "telegram_recovery_verify_chunks";
 pub(crate) const CLEANUP_RETENTION_SETTING: &str = "telegram_cleanup_retention_secs";
@@ -130,8 +131,16 @@ impl MetadataStore {
         self.read_bool_setting(RECOVERY_VERIFY_ENABLED_SETTING)
     }
 
+    pub fn telegram_recovery_verify_startup(&self) -> Result<Option<bool>, MetadataError> {
+        self.read_bool_setting(RECOVERY_VERIFY_STARTUP_SETTING)
+    }
+
     pub fn set_telegram_recovery_verify_enabled(&self, enabled: bool) -> Result<(), MetadataError> {
         self.set_bool_setting(RECOVERY_VERIFY_ENABLED_SETTING, enabled)
+    }
+
+    pub fn set_telegram_recovery_verify_startup(&self, enabled: bool) -> Result<(), MetadataError> {
+        self.set_bool_setting(RECOVERY_VERIFY_STARTUP_SETTING, enabled)
     }
 
     pub fn set_telegram_recovery_verify_interval_secs(
@@ -519,6 +528,13 @@ mod tests {
             store.telegram_recovery_verify_enabled().expect("enabled"),
             None
         );
+        assert_eq!(
+            store.telegram_recovery_verify_startup().expect("startup"),
+            Some(true)
+        );
+        store
+            .set_telegram_recovery_verify_startup(false)
+            .expect("startup write");
         store
             .set_telegram_recovery_verify_enabled(false)
             .expect("enabled write");
@@ -544,6 +560,12 @@ mod tests {
             store
                 .telegram_recovery_verify_enabled()
                 .expect("enabled after migration"),
+            Some(false)
+        );
+        assert_eq!(
+            store
+                .telegram_recovery_verify_startup()
+                .expect("startup after migration"),
             Some(false)
         );
         assert_eq!(

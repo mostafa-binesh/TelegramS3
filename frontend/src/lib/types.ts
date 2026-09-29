@@ -283,6 +283,7 @@ export interface StorageSettings {
   min_download_failover_retries: number;
   max_download_failover_retries: number;
   recovery_verify_enabled: boolean;
+  recovery_verify_startup: boolean;
   recovery_verify_interval_secs: number;
   min_recovery_verify_interval_secs: number;
   max_recovery_verify_interval_secs: number;

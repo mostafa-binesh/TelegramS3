@@ -23,6 +23,7 @@ pub const MIN_RECOVERY_VERIFY_CHUNKS: u64 = 1;
 pub const MAX_RECOVERY_VERIFY_CHUNKS: u64 = 1024;
 pub const DEFAULT_RECOVERY_VERIFY_CHUNKS: u64 = 1;
 pub const DEFAULT_RECOVERY_VERIFY_ENABLED: bool = true;
+pub const DEFAULT_RECOVERY_VERIFY_STARTUP: bool = true;
 pub const MIN_CLEANUP_RETENTION_SECS: u64 = 60 * 60;
 pub const MAX_CLEANUP_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
 pub const DEFAULT_CLEANUP_RETENTION_SECS: u64 = 12 * 60 * 60;
@@ -34,6 +35,7 @@ pub struct AppConfig {
     pub telegram_session_path: Option<String>,
     pub telegram_chunk_size: Option<String>,
     pub telegram_recovery_verify_enabled: Option<String>,
+    pub telegram_recovery_verify_startup: Option<String>,
     pub telegram_recovery_verify_interval_secs: Option<String>,
     pub telegram_recovery_verify_chunks: Option<String>,
     pub telegram_staging_max_bytes: Option<String>,
@@ -94,6 +96,7 @@ impl AppConfig {
             telegram_session_path: read("TELEGRAM_SESSION_PATH"),
             telegram_chunk_size: read("TELEGRAM_CHUNK_SIZE"),
             telegram_recovery_verify_enabled: read("TELEGRAM_RECOVERY_VERIFY_ENABLED"),
+            telegram_recovery_verify_startup: read("TELEGRAM_RECOVERY_VERIFY_STARTUP"),
             telegram_recovery_verify_interval_secs: read("TELEGRAM_RECOVERY_VERIFY_INTERVAL_SECS"),
             telegram_recovery_verify_chunks: read("TELEGRAM_RECOVERY_VERIFY_CHUNKS"),
             telegram_staging_max_bytes: read("TELEGRAM_STAGING_MAX_BYTES"),
@@ -183,6 +186,14 @@ impl AppConfig {
             "TELEGRAM_RECOVERY_VERIFY_ENABLED",
             self.telegram_recovery_verify_enabled.as_deref(),
             DEFAULT_RECOVERY_VERIFY_ENABLED,
+        )
+    }
+
+    pub fn recovery_verify_startup(&self) -> Result<bool, ConfigError> {
+        parse_bool(
+            "TELEGRAM_RECOVERY_VERIFY_STARTUP",
+            self.telegram_recovery_verify_startup.as_deref(),
+            DEFAULT_RECOVERY_VERIFY_STARTUP,
         )
     }
 
@@ -384,6 +395,7 @@ impl AppConfig {
     fn validate_runtime_settings(&self) -> Result<(), ConfigError> {
         self.chunk_size()?;
         self.recovery_verify_enabled()?;
+        self.recovery_verify_startup()?;
         self.recovery_verify_interval_secs()?;
         self.recovery_verify_chunks()?;
         self.connection_timeout_secs()?;

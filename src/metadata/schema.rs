@@ -3,7 +3,7 @@ use super::rows::{count_rows, parse_rfc3339_timestamp, timestamp_now};
 use super::{MetadataError, MetadataStatus, MetadataStore, SCHEMA_VERSION};
 use crate::config::{
     DEFAULT_CLEANUP_RETENTION_SECS, DEFAULT_DOWNLOAD_FAILOVER_RETRIES,
-    DEFAULT_DOWNLOAD_PREFETCH_CHUNKS,
+    DEFAULT_DOWNLOAD_PREFETCH_CHUNKS, DEFAULT_RECOVERY_VERIFY_STARTUP,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -100,6 +100,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_rechunk_replica_schema(connection)?;
         ensure_integrity_recovery_events_schema(connection)?;
         ensure_cleanup_retention_setting(connection)?;
+        ensure_recovery_verify_startup_setting(connection)?;
         return Ok(());
     }
 
@@ -376,6 +377,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_rechunk_replica_schema(connection)?;
     ensure_integrity_recovery_events_schema(connection)?;
     ensure_cleanup_retention_setting(connection)?;
+    ensure_recovery_verify_startup_setting(connection)?;
     Ok(())
 }
 
@@ -634,6 +636,20 @@ fn ensure_cleanup_retention_setting(connection: &mut Connection) -> Result<(), M
         params![
             super::settings::CLEANUP_RETENTION_SETTING,
             DEFAULT_CLEANUP_RETENTION_SECS.to_string(),
+            timestamp_now()?
+        ],
+    )?;
+    Ok(())
+}
+
+fn ensure_recovery_verify_startup_setting(
+    connection: &mut Connection,
+) -> Result<(), MetadataError> {
+    connection.execute(
+        "INSERT OR IGNORE INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)",
+        params![
+            "telegram_recovery_verify_startup",
+            DEFAULT_RECOVERY_VERIFY_STARTUP.to_string(),
             timestamp_now()?
         ],
     )?;
@@ -1324,6 +1340,43 @@ mod tests {
                 Ok(())
             })
             .expect("event table");
+        assert_eq!(
+            store
+                .telegram_recovery_verify_startup()
+                .expect("startup setting"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn migration_from_version_twenty_one_adds_startup_verifier_setting() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("metadata.sqlite");
+        {
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE schema_version (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        version INTEGER NOT NULL,
+                        applied_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_version (id, version, applied_at)
+                    VALUES (1, 21, '2026-09-29T00:00:00Z');
+                    "#,
+                )
+                .expect("seed");
+        }
+
+        let store = MetadataStore::open(&path).expect("migrate");
+        assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+        assert_eq!(
+            store
+                .telegram_recovery_verify_startup()
+                .expect("startup setting"),
+            Some(true)
+        );
     }
 
     #[test]

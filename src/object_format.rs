@@ -460,6 +460,7 @@ pub struct ObjectFormatService {
     download_prefetch_chunks: Arc<RwLock<u64>>,
     download_failover_retries: Arc<RwLock<u64>>,
     recovery_verify_enabled: Arc<RwLock<bool>>,
+    recovery_verify_startup: Arc<RwLock<bool>>,
     recovery_verify_interval_secs: Arc<RwLock<u64>>,
     recovery_verify_chunks: Arc<RwLock<u64>>,
     storage_chat_id: Arc<RwLock<String>>,
@@ -838,6 +839,14 @@ impl ObjectFormatService {
                 value
             }
         };
+        let recovery_verify_startup = match metadata.telegram_recovery_verify_startup()? {
+            Some(value) => value,
+            None => {
+                let value = config.recovery_verify_startup()?;
+                metadata.set_telegram_recovery_verify_startup(value)?;
+                value
+            }
+        };
         let recovery_verify_chunks = match metadata.telegram_recovery_verify_chunks()? {
             Some(value) => AppConfig::validate_recovery_verify_chunks(value)?,
             None => {
@@ -863,6 +872,7 @@ impl ObjectFormatService {
             recovery_verify_chunks,
         )?;
         service.set_recovery_verifier_enabled(recovery_verify_enabled);
+        service.set_recovery_verify_startup(recovery_verify_startup);
         Ok(service)
     }
 
@@ -895,6 +905,9 @@ impl ObjectFormatService {
             download_failover_retries: Arc::new(RwLock::new(download_failover_retries)),
             recovery_verify_enabled: Arc::new(RwLock::new(
                 crate::config::DEFAULT_RECOVERY_VERIFY_ENABLED,
+            )),
+            recovery_verify_startup: Arc::new(RwLock::new(
+                crate::config::DEFAULT_RECOVERY_VERIFY_STARTUP,
             )),
             recovery_verify_interval_secs: Arc::new(RwLock::new(
                 crate::config::DEFAULT_RECOVERY_VERIFY_INTERVAL_SECS,
@@ -1151,6 +1164,20 @@ impl ObjectFormatService {
             .recovery_verify_enabled
             .write()
             .expect("recovery verification enabled lock") = enabled;
+    }
+
+    pub fn recovery_verify_startup(&self) -> bool {
+        *self
+            .recovery_verify_startup
+            .read()
+            .expect("recovery verification startup lock")
+    }
+
+    pub fn set_recovery_verify_startup(&self, enabled: bool) {
+        *self
+            .recovery_verify_startup
+            .write()
+            .expect("recovery verification startup lock") = enabled;
     }
 
     pub fn recovery_verify_chunks(&self) -> u64 {
@@ -4452,6 +4479,19 @@ mod tests {
     }
 
     #[test]
+    fn same_storage_chat_replication_reuses_existing_message() {
+        assert!(workflow::can_reuse_replica_message(
+            "-100123",
+            Some("-100123")
+        ));
+        assert!(!workflow::can_reuse_replica_message(
+            "-100123",
+            Some("-100456")
+        ));
+        assert!(!workflow::can_reuse_replica_message("-100123", None));
+    }
+
+    #[test]
     fn internal_http_route_bucket_names_are_reserved() {
         assert_eq!(RESERVED_BUCKET_NAMES, ["_public", "_admin"]);
         assert!(RESERVED_BUCKET_NAMES.contains(&"_public"));
@@ -4728,6 +4768,68 @@ mod tests {
         assert!(!service.chunk_path(manifest.object_id, 0).exists());
         assert!(!service.manifest_file_path(manifest.object_id).exists());
         assert!(tempdir.path().join("data/mock-telegram/1.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn manifest_move_reuses_payload_and_publishes_only_new_manifest() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        service.set_chunk_size(1024).expect("small chunks");
+        let payload = (0..2500)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let source = service
+            .put_bytes("bucket", "source.bin", "application/octet-stream", &payload)
+            .await
+            .expect("source put");
+        let remote_dir = tempdir.path().join("data/mock-telegram");
+        let remote_files_before = fs::read_dir(&remote_dir)
+            .expect("mock Telegram directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("bin")
+            })
+            .count();
+
+        let job = service
+            .enqueue_manifest_move(&source, "bucket", "moved/source.bin")
+            .await
+            .expect("queue manifest move");
+        let moved = service.wait_transfer(&job.id).await.expect("move");
+
+        assert_eq!(moved.content_length, source.content_length);
+        assert_eq!(moved.chunks.len(), source.chunks.len());
+        for (moved_chunk, source_chunk) in moved.chunks.iter().zip(&source.chunks) {
+            assert_eq!(
+                moved_chunk.payload_identity(moved.object_id),
+                source_chunk.payload_identity(source.object_id)
+            );
+            assert!(moved_chunk.references_remote_payload());
+            assert_eq!(
+                moved_chunk.telegram_message_id,
+                source_chunk.telegram_message_id
+            );
+        }
+        let remote_files_after = fs::read_dir(&remote_dir)
+            .expect("mock Telegram directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("bin")
+            })
+            .count();
+        assert_eq!(remote_files_after, remote_files_before + 1);
+
+        service
+            .metadata_store()
+            .tombstone_manifest(source.object_id, "moved in test")
+            .expect("tombstone source");
+        assert_eq!(
+            service
+                .read_bytes("bucket", "moved/source.bin", 0..payload.len() as u64)
+                .await
+                .expect("read moved object"),
+            payload
+        );
     }
 
     #[tokio::test]

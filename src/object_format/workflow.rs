@@ -22,6 +22,13 @@ fn is_explicit_flood_wait(error: &ObjectFormatError) -> bool {
     )
 }
 
+pub(crate) fn can_reuse_replica_message(
+    source_peer_id: &str,
+    target_storage_chat_id: Option<&str>,
+) -> bool {
+    target_storage_chat_id == Some(source_peer_id)
+}
+
 impl ObjectFormatService {
     /// Drain a duplicate S3 request without staging it. The already-durable
     /// multipart job remains the source of truth, so a broken retry body must
@@ -71,6 +78,85 @@ impl ObjectFormatService {
             expires_at,
         )
         .await
+    }
+
+    /// Queue a logical move without copying the encrypted payload. A move is
+    /// represented as a new manifest whose chunks point at the original
+    /// payload identity, so the normal durable transfer worker only publishes
+    /// the small manifest document to Telegram. The caller tombstones the old
+    /// manifest after this transfer commits.
+    pub(crate) async fn enqueue_manifest_move(
+        &self,
+        source: &ObjectManifest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<TransferJob, ObjectFormatError> {
+        self.ensure_connection_not_removing()?;
+        let object_id = Uuid::new_v4();
+        let mut manifest = source.clone();
+        manifest.schema_version = MANIFEST_SCHEMA_VERSION;
+        manifest.commit_state = CommitState::Staging;
+        manifest.object_id = object_id;
+        manifest.bucket = bucket.to_string();
+        manifest.key = key.to_string();
+        manifest.version_id = Some(object_id.to_string());
+        manifest.telegram = TelegramLocation {
+            peer_id: self.storage_chat_id()?,
+            message_id: 0,
+            document_id: Some(format!("local:{object_id}:manifest")),
+        };
+        for chunk in &mut manifest.chunks {
+            let (source_object_id, source_chunk_order) = chunk.payload_identity(source.object_id);
+            chunk.source_object_id = Some(source_object_id);
+            chunk.source_chunk_order = Some(source_chunk_order);
+        }
+        manifest
+            .validate()
+            .map_err(ObjectFormatError::InvalidPlan)?;
+
+        let id = self.metadata.begin_transfer(object_id, bucket, key)?;
+        let dir = self.staging_dir(object_id);
+        let queued = async {
+            async_fs::create_dir_all(&dir).await?;
+            let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+            self.metadata
+                .reserve_staging(&id, manifest_bytes.len() as u64, self.staging_budget)?;
+            write_json_file(&dir.join(MANIFEST_FILE_NAME), &manifest)?;
+            let operation = self
+                .metadata
+                .stage_manifest(OperationKind::Put, manifest.clone())?;
+            self.metadata.set_transfer_conditionals(
+                &id,
+                Some(&TransferWriteConditionals {
+                    if_match: None,
+                    if_none_match: Some("*".to_string()),
+                }),
+            )?;
+            self.metadata
+                .queue_transfer(&id, operation, manifest.chunks.len())?;
+            self.metadata
+                .transfer(&id)?
+                .ok_or_else(|| ObjectFormatError::InvalidPlan("move transfer missing".into()))
+        }
+        .await;
+        let job = match queued {
+            Ok(job) => job,
+            Err(error) => {
+                let removed = match async_fs::remove_dir_all(&dir).await {
+                    Ok(()) => true,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+                    Err(_) => false,
+                };
+                let _ = self.metadata.fail_reception(
+                    &id,
+                    removed,
+                    "Metadata-only move could not be durably queued",
+                );
+                return Err(error);
+            }
+        };
+        self.ensure_workers();
+        Ok(job)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -408,7 +494,7 @@ impl ObjectFormatService {
         let service = self.clone();
         let mut recovery_shutdown = shutdown_rx.clone();
         let recovery_handle = tokio::spawn(async move {
-            if service.recovery_verifier_enabled() {
+            if service.recovery_verifier_enabled() && service.recovery_verify_startup() {
                 let _ = service.refresh_recovery_snapshot().await;
             }
             loop {
@@ -605,11 +691,10 @@ impl ObjectFormatService {
         let source_manager = if job.source_account_id == active
             || (job.source_account_id == "legacy" && active == "legacy")
         {
-            Arc::clone(&self.transport_manager)
+            Some(Arc::clone(&self.transport_manager))
         } else {
-            self.account_manager(&job.source_account_id).await?
+            None
         };
-        let source_transport = source_manager.current().await?;
         let mut manifests = self.list_bucket_manifests(&job.bucket, None)?;
         if !job.object_keys.is_empty() {
             let selected = job
@@ -635,6 +720,17 @@ impl ObjectFormatService {
         } else {
             None
         };
+        let target_storage_chat_id = if let Some(target) = &target {
+            Some(target.status().await?.storage_chat_id)
+        } else {
+            None
+        };
+        // A same-chat replica only needs the target account to be available:
+        // it can reference the existing Telegram message directly. Resolve
+        // the source transport lazily so a disconnected source account does
+        // not block that metadata-only path. Different chats still acquire
+        // it before the first payload copy.
+        let mut source_transport: Option<Arc<crate::telegram::TelegramTransport>> = None;
         let mut done_objects = 0_u64;
         let mut done_chunks = 0_u64;
         let mut bytes_done = 0_u64;
@@ -677,7 +773,11 @@ impl ObjectFormatService {
                     let source_location = if job.source_account_id == active
                         || (job.source_account_id == "legacy" && active == "legacy")
                     {
-                        None
+                        Some(TelegramLocation {
+                            peer_id: chunk.telegram_peer_id.clone(),
+                            message_id: chunk.telegram_message_id,
+                            document_id: chunk.telegram_document_id.clone(),
+                        })
                     } else {
                         chunk
                             .replicas
@@ -686,34 +786,55 @@ impl ObjectFormatService {
                                 replica.account_id == job.source_account_id
                                     && replica.mode == ReplicaMode::Replica
                             })
-                            .map(|replica| replica.telegram_message_id)
+                            .map(|replica| TelegramLocation {
+                                peer_id: replica.telegram_peer_id.clone(),
+                                message_id: replica.telegram_message_id,
+                                document_id: replica.telegram_document_id.clone(),
+                            })
                     };
-                    let source_message_id = match source_location {
-                        Some(message_id) => message_id,
-                        None if job.source_account_id == active
-                            || (job.source_account_id == "legacy" && active == "legacy") =>
-                        {
-                            chunk.telegram_message_id
-                        }
-                        None => {
-                            return Err(ObjectFormatError::InvalidPlan(format!(
-                                "source account {} has no physical replica for object {} chunk {}",
-                                job.source_account_id, manifest.key, chunk.order
-                            )));
-                        }
-                    };
-                    let message_id = i32::try_from(source_message_id).map_err(|_| {
-                        ObjectFormatError::InvalidRead("source message id is out of range".into())
+                    let source_location = source_location.ok_or_else(|| {
+                        ObjectFormatError::InvalidPlan(format!(
+                            "source account {} has no physical replica for object {} chunk {}",
+                            job.source_account_id, manifest.key, chunk.order
+                        ))
                     })?;
-                    let ciphertext = self
-                        .download_message_bytes_once_with_transport(
-                            Arc::clone(&source_transport),
-                            message_id,
-                        )
-                        .await?;
-                    bytes_done = bytes_done.saturating_add(ciphertext.len() as u64);
-                    let location = self
-                        .upload_replica_bytes(
+                    let location = if can_reuse_replica_message(
+                        &source_location.peer_id,
+                        target_storage_chat_id.as_deref(),
+                    ) {
+                        // Both connected accounts point at the same Telegram
+                        // storage chat. The target account can therefore use
+                        // the existing message without a server-side download
+                        // or a second Telegram upload.
+                        source_location
+                    } else {
+                        let source_transport = match &source_transport {
+                            Some(transport) => Arc::clone(transport),
+                            None => {
+                                let manager = if let Some(manager) = source_manager.as_ref() {
+                                    Arc::clone(manager)
+                                } else {
+                                    self.account_manager(&job.source_account_id).await?
+                                };
+                                let transport = manager.current().await?;
+                                source_transport = Some(Arc::clone(&transport));
+                                transport
+                            }
+                        };
+                        let message_id =
+                            i32::try_from(source_location.message_id).map_err(|_| {
+                                ObjectFormatError::InvalidRead(
+                                    "source message id is out of range".into(),
+                                )
+                            })?;
+                        let ciphertext = self
+                            .download_message_bytes_once_with_transport(
+                                Arc::clone(&source_transport),
+                                message_id,
+                            )
+                            .await?;
+                        bytes_done = bytes_done.saturating_add(ciphertext.len() as u64);
+                        self.upload_replica_bytes(
                             target.as_ref().ok_or_else(|| {
                                 ObjectFormatError::InvalidPlan(
                                     "target transport is unavailable".into(),
@@ -724,7 +845,8 @@ impl ObjectFormatService {
                             &ciphertext,
                             &job.target_account_id,
                         )
-                        .await?;
+                        .await?
+                    };
                     self.metadata.insert_replica_location(
                         manifest.object_id,
                         chunk.order,
