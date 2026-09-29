@@ -2433,6 +2433,7 @@ impl AdminUiState {
         };
         self.object_format.clear_recovery_snapshot();
         self.object_format.ensure_workers();
+        self.object_format.notify_cleanup_worker();
         json_response(
             StatusCode::ACCEPTED,
             serde_json::json!({
@@ -2459,6 +2460,7 @@ impl AdminUiState {
             recovery_verify_enabled,
             recovery_verify_interval_secs,
             recovery_verify_chunks,
+            cleanup_retention_secs,
         } = match read_json(request).await {
             Ok(body) => body,
             Err(_) => {
@@ -2487,10 +2489,20 @@ impl AdminUiState {
             .unwrap_or_else(|| self.object_format.recovery_verifier_enabled());
         let chunks =
             recovery_verify_chunks.unwrap_or_else(|| self.object_format.recovery_verify_chunks());
+        let cleanup_retention_secs = cleanup_retention_secs.unwrap_or_else(|| {
+            self.store()
+                .telegram_cleanup_retention_secs()
+                .ok()
+                .flatten()
+                .unwrap_or(crate::config::DEFAULT_CLEANUP_RETENTION_SECS)
+        });
         if let Err(error) = AppConfig::validate_recovery_verify_interval_secs(interval_secs) {
             return json_error(StatusCode::BAD_REQUEST, &error.to_string());
         }
         if let Err(error) = AppConfig::validate_recovery_verify_chunks(chunks) {
+            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+        if let Err(error) = AppConfig::validate_cleanup_retention_secs(cleanup_retention_secs) {
             return json_error(StatusCode::BAD_REQUEST, &error.to_string());
         }
         if let Err(error) = self.store().set_telegram_chunk_size(chunk_size) {
@@ -2539,6 +2551,12 @@ impl AdminUiState {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
         }
         if let Err(error) = self
+            .store()
+            .set_telegram_cleanup_retention_secs(cleanup_retention_secs)
+        {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self
             .object_format
             .set_recovery_verification_settings(interval_secs, chunks)
         {
@@ -2567,6 +2585,14 @@ impl AdminUiState {
             recovery_verify_chunks: self.object_format.recovery_verify_chunks(),
             min_recovery_verify_chunks: crate::config::MIN_RECOVERY_VERIFY_CHUNKS,
             max_recovery_verify_chunks: crate::config::MAX_RECOVERY_VERIFY_CHUNKS,
+            cleanup_retention_secs: self
+                .store()
+                .telegram_cleanup_retention_secs()
+                .ok()
+                .flatten()
+                .unwrap_or(crate::config::DEFAULT_CLEANUP_RETENTION_SECS),
+            min_cleanup_retention_secs: crate::config::MIN_CLEANUP_RETENTION_SECS,
+            max_cleanup_retention_secs: crate::config::MAX_CLEANUP_RETENTION_SECS,
             source: "database".to_string(),
         }
     }
@@ -3685,6 +3711,7 @@ struct StorageSettingsRequest {
     recovery_verify_enabled: Option<bool>,
     recovery_verify_interval_secs: Option<u64>,
     recovery_verify_chunks: Option<u64>,
+    cleanup_retention_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3706,6 +3733,9 @@ struct StorageSettingsWire {
     recovery_verify_chunks: u64,
     min_recovery_verify_chunks: u64,
     max_recovery_verify_chunks: u64,
+    cleanup_retention_secs: u64,
+    min_cleanup_retention_secs: u64,
+    max_cleanup_retention_secs: u64,
     source: String,
 }
 

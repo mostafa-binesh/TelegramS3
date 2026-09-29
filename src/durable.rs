@@ -32,6 +32,24 @@ fn active_connection_id(tx: &rusqlite::Transaction<'_>) -> Result<String, Metada
         .unwrap_or_else(|| "legacy".to_string()))
 }
 
+fn cleanup_retention_secs(tx: &rusqlite::Transaction<'_>) -> Result<i64, MetadataError> {
+    let value: Option<String> = tx
+        .query_row(
+            "SELECT value FROM app_settings WHERE key=?1",
+            [crate::metadata::CLEANUP_RETENTION_SETTING],
+            |row| row.get(0),
+        )
+        .optional()?;
+    value
+        .map(|value| {
+            value.parse::<i64>().map_err(|_| {
+                MetadataError::InvalidManifest("invalid stored cleanup retention".into())
+            })
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(crate::config::DEFAULT_CLEANUP_RETENTION_SECS as i64))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TransferJob {
     pub id: String,
@@ -89,6 +107,15 @@ pub(crate) struct CleanupTarget {
     pub lease: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CleanupEvidenceAttempt {
+    pub id: i64,
+    pub object_id: String,
+    pub connection_id: String,
+    pub token: String,
+    pub started_at: i64,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DurableMetrics {
     pub pending_jobs: u64,
@@ -138,6 +165,7 @@ pub(crate) fn enqueue_part_cleanup_preserving(
     retained_chunks: &HashSet<(String, i64)>,
 ) -> Result<(), MetadataError> {
     let connection_id = active_connection_id(tx)?;
+    let retention_secs = cleanup_retention_secs(tx)?;
     let cleanup_object_id = part
         .manifest
         .as_ref()
@@ -145,7 +173,7 @@ pub(crate) fn enqueue_part_cleanup_preserving(
         .unwrap_or_else(|| part.upload_id.to_string());
     tx.execute(
         "INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,0,'evidence',?4)",
-        params![cleanup_object_id, connection_id, format!("evidence:{cleanup_object_id}"), now() + crate::object_format::GARBAGE_COLLECTION_RETENTION_SECONDS],
+        params![cleanup_object_id, connection_id, format!("evidence:{cleanup_object_id}"), now() + retention_secs],
     )?;
     let mut locations = vec![part.telegram.clone()];
     if let Some(m) = &part.manifest {
@@ -164,7 +192,7 @@ pub(crate) fn enqueue_part_cleanup_preserving(
         );
     }
     for l in locations {
-        tx.execute("INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,?4,'message',?5)",params![cleanup_object_id,connection_id,l.peer_id,l.message_id,now()+crate::object_format::GARBAGE_COLLECTION_RETENTION_SECONDS])?;
+        tx.execute("INSERT OR IGNORE INTO cleanup_targets(object_id,connection_id,peer_id,message_id,target_kind,due_at) VALUES (?1,?2,?3,?4,'message',?5)",params![cleanup_object_id,connection_id,l.peer_id,l.message_id,now()+retention_secs])?;
     }
     Ok(())
 }
@@ -273,19 +301,131 @@ impl MetadataStore {
     pub(crate) fn claim_cleanup(&self) -> Result<Option<CleanupTarget>, MetadataError> {
         self.with_connection(|c| {
             let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let row: Option<(i64, String, String, String, i64, String)> = tx.query_row(
-                "SELECT t.id,t.object_id,t.connection_id,t.peer_id,t.message_id,t.target_kind FROM cleanup_targets t WHERE t.completed=0 AND ((t.state IN ('pending','retry_wait') AND t.due_at<=?1 AND t.next_retry<=?1) OR (t.state='running' AND t.lease_until<?1)) AND (t.target_kind='evidence' OR EXISTS(SELECT 1 FROM cleanup_targets e WHERE e.object_id=t.object_id AND e.target_kind='evidence' AND e.completed=1)) ORDER BY CASE t.target_kind WHEN 'evidence' THEN 0 ELSE 1 END,t.id LIMIT 1",
-                [now()],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
-            ).optional()?;
+            let current = now();
+            let select_target = |sql: &str| -> Result<_, MetadataError> {
+                Ok(tx
+                    .query_row(sql, [current], |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ))
+                    })
+                    .optional()?)
+            };
+            let row = select_target(
+                "SELECT id,object_id,connection_id,peer_id,message_id,target_kind FROM cleanup_targets WHERE completed=0 AND target_kind='evidence' AND ((state IN ('pending','retry_wait') AND due_at<=?1 AND next_retry<=?1) OR (state='running' AND lease_until<?1 AND evidence_attempt_token IS NULL)) ORDER BY id LIMIT 1",
+            )?
+            .or(select_target(
+                "SELECT t.id,t.object_id,t.connection_id,t.peer_id,t.message_id,t.target_kind FROM cleanup_targets t WHERE t.completed=0 AND t.target_kind='message' AND ((t.state IN ('pending','retry_wait') AND t.due_at<=?1 AND t.next_retry<=?1) OR (t.state='running' AND t.lease_until<?1)) AND EXISTS(SELECT 1 FROM cleanup_targets e WHERE e.object_id=t.object_id AND e.target_kind='evidence' AND e.completed=1) ORDER BY t.id LIMIT 1",
+            )?);
             let Some((id, object_id, connection_id, peer_id, message_id, kind)) = row else { return Ok(None); };
             let lease = Uuid::new_v4().to_string();
             tx.execute(
-                "UPDATE cleanup_targets SET state='running',lease=?2,lease_until=?3+120,attempts=attempts+1,error=NULL WHERE id=?1",
-                params![id, lease, now()],
+                "UPDATE cleanup_targets SET state='running',lease=?2,lease_until=?3+120,attempts=attempts+1,error=NULL WHERE id=?1 AND completed=0",
+                params![id, lease, current],
             )?;
             tx.commit()?;
             Ok(Some(CleanupTarget { id, object_id, connection_id, peer_id, message_id, kind, lease }))
+        })
+    }
+
+    pub(crate) fn cleanup_evidence_attempts(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<CleanupEvidenceAttempt>, MetadataError> {
+        self.with_connection(|c| {
+            let mut statement = c.prepare(
+                "SELECT id,object_id,connection_id,evidence_attempt_token,evidence_attempt_started_at FROM cleanup_targets WHERE completed=0 AND target_kind='evidence' AND evidence_attempt_token IS NOT NULL AND evidence_attempt_started_at IS NOT NULL AND (state='recovery_required' OR (state='running' AND lease_until<?1)) ORDER BY id LIMIT ?2",
+            )?;
+            let rows = statement
+                .query_map(params![now(), i64::from(limit)], |row| {
+                    Ok(CleanupEvidenceAttempt {
+                        id: row.get(0)?,
+                        object_id: row.get(1)?,
+                        connection_id: row.get(2)?,
+                        token: row.get(3)?,
+                        started_at: row.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    pub(crate) fn begin_cleanup_evidence_attempt(
+        &self,
+        id: i64,
+        lease: &str,
+        object_id: &str,
+    ) -> Result<(String, i64), MetadataError> {
+        self.with_connection(|c| {
+            let token = format!("telegram-s3-cleanup-{object_id}-{}.json", Uuid::new_v4());
+            let started_at = now();
+            let updated = c.execute(
+                "UPDATE cleanup_targets SET evidence_attempt_token=?3,evidence_attempt_started_at=?4 WHERE id=?1 AND lease=?2 AND state='running' AND completed=0",
+                params![id, lease, token, started_at],
+            )?;
+            if updated != 1 {
+                return Err(MetadataError::PreconditionFailed(
+                    "cleanup evidence lease lost".into(),
+                ));
+            }
+            Ok((token, started_at))
+        })
+    }
+
+    pub(crate) fn resolve_cleanup_evidence(
+        &self,
+        id: i64,
+        location: &TelegramLocation,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|c| {
+            let location_json = serde_json::to_string(location)?;
+            c.execute(
+                "UPDATE cleanup_targets SET state='completed',completed=1,lease=NULL,lease_until=0,error=NULL,evidence_location_json=?2 WHERE id=?1 AND completed=0 AND target_kind='evidence'",
+                params![id, location_json],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn retry_cleanup_evidence_after_reconciliation(
+        &self,
+        id: i64,
+        message: &str,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|c| {
+            c.execute(
+                "UPDATE cleanup_targets SET state='pending',due_at=?2,next_retry=0,lease=NULL,lease_until=0,error=?3 WHERE id=?1 AND completed=0 AND target_kind='evidence'",
+                params![id, now(), message],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn cleanup_wake_delay_secs(&self) -> Result<u64, MetadataError> {
+        self.with_connection(|c| {
+            let current = now();
+            let next_evidence: Option<i64> = c.query_row(
+                "SELECT MIN(CASE WHEN state='running' THEN lease_until ELSE MAX(due_at,next_retry) END) FROM cleanup_targets WHERE completed=0 AND target_kind='evidence' AND ((state IN ('pending','retry_wait') AND due_at>?1 OR state='running'))",
+                [current],
+                |row| row.get(0),
+            )?;
+            let next_message: Option<i64> = c.query_row(
+                "SELECT MIN(CASE WHEN t.state='running' THEN t.lease_until ELSE MAX(t.due_at,t.next_retry) END) FROM cleanup_targets t WHERE t.completed=0 AND t.target_kind='message' AND ((t.state IN ('pending','retry_wait') AND MAX(t.due_at,t.next_retry)>?1) OR t.state='running') AND EXISTS(SELECT 1 FROM cleanup_targets e WHERE e.object_id=t.object_id AND e.target_kind='evidence' AND e.completed=1)",
+                [current],
+                |row| row.get(0),
+            )?;
+            let next = [next_evidence, next_message]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(current.saturating_add(60));
+            Ok(next.saturating_sub(current).clamp(1, 60) as u64)
         })
     }
 

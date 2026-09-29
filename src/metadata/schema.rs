@@ -1,7 +1,10 @@
 use super::pool::DEFAULT_CONNECTION_POOL_SIZE;
 use super::rows::{count_rows, parse_rfc3339_timestamp, timestamp_now};
 use super::{MetadataError, MetadataStatus, MetadataStore, SCHEMA_VERSION};
-use crate::config::{DEFAULT_DOWNLOAD_FAILOVER_RETRIES, DEFAULT_DOWNLOAD_PREFETCH_CHUNKS};
+use crate::config::{
+    DEFAULT_CLEANUP_RETENTION_SECS, DEFAULT_DOWNLOAD_FAILOVER_RETRIES,
+    DEFAULT_DOWNLOAD_PREFETCH_CHUNKS,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 
 impl MetadataStore {
@@ -96,6 +99,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_replication_scope_schema(connection)?;
         ensure_rechunk_replica_schema(connection)?;
         ensure_integrity_recovery_events_schema(connection)?;
+        ensure_cleanup_retention_setting(connection)?;
         return Ok(());
     }
 
@@ -326,11 +330,17 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
             lease_until INTEGER NOT NULL DEFAULT 0,
             error TEXT,
             evidence_location_json TEXT,
+            evidence_attempt_token TEXT,
+            evidence_attempt_started_at INTEGER,
             completed INTEGER NOT NULL DEFAULT 0,
             UNIQUE(peer_id, message_id)
         );
         CREATE INDEX IF NOT EXISTS idx_cleanup_due
             ON cleanup_targets(state, due_at, next_retry, id);
+        CREATE INDEX IF NOT EXISTS idx_cleanup_claim
+            ON cleanup_targets(target_kind, completed, state, due_at, next_retry, id);
+        CREATE INDEX IF NOT EXISTS idx_cleanup_object_kind_completed
+            ON cleanup_targets(object_id, target_kind, completed);
         INSERT OR IGNORE INTO app_settings(key, value, updated_at)
             SELECT 'setup_complete', CASE WHEN EXISTS(SELECT 1 FROM users) THEN 'true' ELSE 'false' END, '';
         "#,
@@ -365,6 +375,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_replication_scope_schema(connection)?;
     ensure_rechunk_replica_schema(connection)?;
     ensure_integrity_recovery_events_schema(connection)?;
+    ensure_cleanup_retention_setting(connection)?;
     Ok(())
 }
 
@@ -617,6 +628,18 @@ fn ensure_download_failover_setting(connection: &mut Connection) -> Result<(), M
     Ok(())
 }
 
+fn ensure_cleanup_retention_setting(connection: &mut Connection) -> Result<(), MetadataError> {
+    connection.execute(
+        "INSERT OR IGNORE INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)",
+        params![
+            super::settings::CLEANUP_RETENTION_SETTING,
+            DEFAULT_CLEANUP_RETENTION_SECS.to_string(),
+            timestamp_now()?
+        ],
+    )?;
+    Ok(())
+}
+
 fn ensure_share_schema(connection: &mut Connection) -> Result<(), MetadataError> {
     connection.execute_batch(
         r#"
@@ -702,6 +725,8 @@ fn ensure_phase10_schema(connection: &mut Connection) -> Result<(), MetadataErro
         ("write_conditionals_json", "TEXT"),
         ("error", "TEXT"),
         ("evidence_location_json", "TEXT"),
+        ("evidence_attempt_token", "TEXT"),
+        ("evidence_attempt_started_at", "INTEGER"),
     ] {
         if !column_exists(connection, "cleanup_targets", column)? {
             connection.execute(
@@ -737,6 +762,10 @@ fn ensure_phase10_schema(connection: &mut Connection) -> Result<(), MetadataErro
         r#"
         CREATE INDEX IF NOT EXISTS idx_cleanup_due
             ON cleanup_targets(state, due_at, next_retry, id);
+        CREATE INDEX IF NOT EXISTS idx_cleanup_claim
+            ON cleanup_targets(target_kind, completed, state, due_at, next_retry, id);
+        CREATE INDEX IF NOT EXISTS idx_cleanup_object_kind_completed
+            ON cleanup_targets(object_id, target_kind, completed);
         CREATE TABLE IF NOT EXISTS transfer_send_attempts (
             job_id TEXT NOT NULL REFERENCES transfer_jobs(id),
             chunk_order INTEGER NOT NULL,
@@ -775,6 +804,7 @@ fn backfill_cleanup_outbox(connection: &mut Connection) -> Result<(), MetadataEr
     if !table_exists(connection, "cleanup_targets")? {
         return Ok(());
     }
+    let retention_secs = cleanup_retention_seconds(connection)?;
     let manifests = {
         let mut statement = connection.prepare(
             "SELECT manifest_json, tombstoned_at FROM object_manifests WHERE commit_state='tombstoned'",
@@ -792,20 +822,38 @@ fn backfill_cleanup_outbox(connection: &mut Connection) -> Result<(), MetadataEr
             .as_deref()
             .map(parse_rfc3339_timestamp)
             .transpose()?
-            .map(|value| {
-                (value
-                    + time::Duration::seconds(
-                        crate::object_format::GARBAGE_COLLECTION_RETENTION_SECONDS,
-                    ))
-                .unix_timestamp()
-            })
-            .unwrap_or_else(|| {
-                crate::durable::now() + crate::object_format::GARBAGE_COLLECTION_RETENTION_SECONDS
-            });
+            .map(|value| (value + time::Duration::seconds(retention_secs)).unix_timestamp())
+            .unwrap_or_else(|| crate::durable::now() + retention_secs);
         crate::durable::enqueue_manifest_cleanup_at(&tx, &manifest, due_at)?;
     }
     tx.commit()?;
     Ok(())
+}
+
+fn cleanup_retention_seconds(connection: &Connection) -> Result<i64, MetadataError> {
+    let has_settings: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_settings')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_settings {
+        return Ok(DEFAULT_CLEANUP_RETENTION_SECS as i64);
+    }
+    let value: Option<String> = connection
+        .query_row(
+            "SELECT value FROM app_settings WHERE key=?1",
+            [super::settings::CLEANUP_RETENTION_SETTING],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value
+        .map(|value| {
+            value.parse::<i64>().map_err(|_| {
+                MetadataError::InvalidManifest("invalid stored cleanup retention".into())
+            })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_CLEANUP_RETENTION_SECS as i64))
 }
 
 fn read_schema_version(connection: &Connection) -> Result<u32, MetadataError> {

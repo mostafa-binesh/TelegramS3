@@ -344,7 +344,7 @@ multipart initiation). Expired objects disappear from S3/admin listings and
 return as missing on reads; the background cleanup worker sweeps them into the
 evidence-first tombstone path, after which the normal retention-aware GC policy
 removes their Telegram data. Local tombstones and orphaned cleanup material
-are retained for 24 hours by default before `gc` can remove them. The admin browser exposes the same seconds-
+are retained for 12 hours by default before `gc` can remove them. The admin browser exposes the same seconds-
 based expiry control. Operators can create bearer share links from the object
 browser at `/_public/<token>`, with an optional link expiry capped by the object
 expiry. Each file row shows how many active or expired-but-manageable links it
@@ -379,6 +379,10 @@ The account-failover setting defaults to one retry after the initial attempt and
 accepts `0–8` retries before moving to another enabled replica location; each
 attempt retains the normal per-chunk retry and 120-second stream recovery
 behavior.
+Cleanup retention is persisted in `app_settings` and can be changed from the
+same page. It defaults to 12 hours, accepts one hour through 30 days, and
+controls future delayed/orphan cleanup targets; existing scheduled and
+recovery-required rows keep their current state.
 The complete reference lives in [docs/configuration.md](docs/configuration.md);
 the most important variables:
 

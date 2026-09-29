@@ -11,6 +11,7 @@ pub(crate) const DOWNLOAD_FAILOVER_RETRIES_SETTING: &str = "telegram_download_fa
 const RECOVERY_VERIFY_ENABLED_SETTING: &str = "telegram_recovery_verify_enabled";
 const RECOVERY_VERIFY_INTERVAL_SETTING: &str = "telegram_recovery_verify_interval_secs";
 const RECOVERY_VERIFY_CHUNKS_SETTING: &str = "telegram_recovery_verify_chunks";
+pub(crate) const CLEANUP_RETENTION_SETTING: &str = "telegram_cleanup_retention_secs";
 const TELEGRAM_ACCOUNT_PHONE_SETTING: &str = "telegram_account_phone";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +147,17 @@ impl MetadataStore {
 
     pub fn set_telegram_recovery_verify_chunks(&self, chunks: u64) -> Result<(), MetadataError> {
         self.set_numeric_setting(RECOVERY_VERIFY_CHUNKS_SETTING, chunks)
+    }
+
+    pub fn telegram_cleanup_retention_secs(&self) -> Result<Option<u64>, MetadataError> {
+        self.read_numeric_setting(CLEANUP_RETENTION_SETTING)
+    }
+
+    pub fn set_telegram_cleanup_retention_secs(
+        &self,
+        retention_secs: u64,
+    ) -> Result<(), MetadataError> {
+        self.set_numeric_setting(CLEANUP_RETENTION_SETTING, retention_secs)
     }
 
     fn read_numeric_setting(&self, key: &str) -> Result<Option<u64>, MetadataError> {
@@ -623,6 +635,33 @@ mod tests {
                 .telegram_download_failover_retries()
                 .expect("failover after migration"),
             Some(4)
+        );
+    }
+
+    #[test]
+    fn cleanup_retention_setting_defaults_and_round_trips() {
+        let store = MetadataStore::open_in_memory().expect("metadata");
+        assert_eq!(
+            store
+                .telegram_cleanup_retention_secs()
+                .expect("cleanup retention read"),
+            Some(crate::config::DEFAULT_CLEANUP_RETENTION_SECS)
+        );
+        store
+            .set_telegram_cleanup_retention_secs(24 * 60 * 60)
+            .expect("cleanup retention write");
+        assert_eq!(
+            store
+                .telegram_cleanup_retention_secs()
+                .expect("cleanup retention read"),
+            Some(24 * 60 * 60)
+        );
+        store.migrate().expect("idempotent migration");
+        assert_eq!(
+            store
+                .telegram_cleanup_retention_secs()
+                .expect("cleanup retention after migration"),
+            Some(24 * 60 * 60)
         );
     }
 

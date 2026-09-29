@@ -37,7 +37,7 @@ features, so they are documented separately.
 | Checksums | implemented | cargo test | Ordinary PUTs use whole-byte SHA-256; multipart objects use `sha256-parts-v1`, a domain-separated digest of ordered part number, size, algorithm, and verified part checksum; every chunk is still SHA-256 verified on read | A multipart composite checksum is not the raw-byte SHA-256 of the concatenated object | 5 |
 | Presigned URLs | compatibility gap | none yet | AWS SigV4 presigning is not implemented; the admin surface provides separate opaque `/_public/<token>` capability links | Share links are local metadata capabilities, not Telegram URLs | 5 |
 | Server-side copy | implemented | cargo check | Copy uses the local object-format backend and manifest reuse | Telegram copy may not preserve metadata exactly | 5 |
-| Lifecycle cleanup | implemented | cargo test | Garbage collection now removes only tombstoned data older than the 24-hour retention window after dry-run review | Cleanup is conservative and retention-based | 6 |
+| Lifecycle cleanup | implemented | cargo test | Garbage collection now removes only tombstoned data older than the configurable retention window, defaulting to 12 hours, after dry-run review | Cleanup is conservative, evidence-first, and retention-based; ambiguous evidence remains recovery-required | 6 |
 | Batch delete | compatibility gap | none yet | Can be translated to per-object tombstones | Telegram does not batch object deletes | 6 |
 | Bucket policies | compatibility gap | none yet | Policy evaluation belongs above storage | Telegram is out of scope | 6 |
 | Retention/object lock | compatibility gap | none yet | Requires additional metadata and enforcement | Telegram cannot enforce S3 locks | 6 |

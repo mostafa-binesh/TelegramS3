@@ -289,6 +289,9 @@ export interface StorageSettings {
   recovery_verify_chunks: number;
   min_recovery_verify_chunks: number;
   max_recovery_verify_chunks: number;
+  cleanup_retention_secs: number;
+  min_cleanup_retention_secs: number;
+  max_cleanup_retention_secs: number;
   source: 'database' | string;
 }
 

@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.7.6-rc.16 - 2026-09-29
+
+### Cleanup queue recovery and scheduling
+
+- Added schema v21 migration coverage for cleanup claim indexes and durable
+  cleanup retention settings. Existing metadata is upgraded additively; no
+  objects, Telegram messages, or recovery-required rows are deleted by the
+  migration.
+- Reworked cleanup claims to prefer evidence targets and use indexed
+  object-dependency checks before message deletion. The idle worker now sleeps
+  until the next actionable window, with a one-minute responsiveness cap,
+  instead of running the expensive dependency scan every second.
+- Added an explicit worker wake notification for newly queued object deletes
+  and connection-removal cleanup, so the low-duty-cycle worker starts due work
+  immediately without returning to one-second polling.
+- Added durable unique cleanup-evidence attempt tokens and timestamps before
+  each remote evidence upload. Ambiguous uploads are reconciled by exact token
+  and exact evidence bytes; only a complete scan proving absence permits a new
+  attempt. Exact matches complete the evidence target, while connectivity
+  errors and byte collisions remain `recovery_required`.
+- Preserved historical recovery-required rows that predate attempt tokens as
+  quarantined. They are not bulk-marked complete and are not physically
+  deleted without operator-led evidence reconciliation.
+- Added a Storage policy control for cleanup retention with a default of 12
+  hours, a one-hour minimum, and a 30-day maximum. It applies to future
+  delayed/orphan cleanup targets and leaves existing scheduled targets
+  unchanged.
+- Added Playwright coverage for saving and reloading the cleanup-retention
+  policy, plus metadata persistence and cleanup state-machine coverage.
+- Updated the storage, recovery, compatibility, roadmap, and ADR documentation
+  with the new cleanup safety and scheduling boundaries.
+
 ## 0.7.6-rc.15 - 2026-09-29
 
 ### Overview performance and verifier observability

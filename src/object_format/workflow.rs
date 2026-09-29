@@ -434,11 +434,13 @@ impl ObjectFormatService {
         });
         let service = self.clone();
         let mut cleanup_shutdown = shutdown_rx;
+        let cleanup_wake = Arc::clone(&self.worker_runtime.cleanup_wake);
         let cleanup_handle = tokio::spawn(async move {
             loop {
                 if *cleanup_shutdown.borrow() {
                     break;
                 }
+                let _ = service.reconcile_cleanup_evidence().await;
                 let _ = service.finalize_connection_removal().await;
                 let _ = service
                     .metadata
@@ -459,12 +461,17 @@ impl ObjectFormatService {
                         }
                         let _ = service.finalize_connection_removal().await;
                     }
-                    Ok(None) => tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                    Ok(None) => {
+                        let delay = service.metadata.cleanup_wake_delay_secs().unwrap_or(60);
+                        tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {},
+                        _ = cleanup_wake.notified() => {},
                         _ = cleanup_shutdown.changed() => {},
-                    },
+                        }
+                    }
                     Err(_) => tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {},
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
+                        _ = cleanup_wake.notified() => {},
                         _ = cleanup_shutdown.changed() => {},
                     },
                 }
@@ -1006,6 +1013,10 @@ impl ObjectFormatService {
         self.worker_runtime.started.store(false, Ordering::SeqCst);
     }
 
+    pub(crate) fn notify_cleanup_worker(&self) {
+        self.worker_runtime.cleanup_wake.notify_one();
+    }
+
     pub async fn wait_transfer(&self, id: &str) -> Result<ObjectManifest, ObjectFormatError> {
         self.ensure_workers();
         loop {
@@ -1528,8 +1539,13 @@ impl ObjectFormatService {
             if let Some(parent) = path.parent() {
                 sync_directory(parent)?;
             }
+            let (attempt_token, _) = self.metadata.begin_cleanup_evidence_attempt(
+                target.id,
+                &target.lease,
+                &target.object_id,
+            )?;
             let location = match self
-                .upload_local_file_to_telegram(&path, "deletion-evidence.json")
+                .upload_local_file_to_telegram(&path, &attempt_token)
                 .await
             {
                 Ok(location) => location,
@@ -1581,6 +1597,54 @@ impl ObjectFormatService {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
+    async fn reconcile_cleanup_evidence(&self) -> Result<(), ObjectFormatError> {
+        for attempt in self.metadata.cleanup_evidence_attempts(25)? {
+            if self.metadata.active_connection_id()?.as_deref()
+                != Some(attempt.connection_id.as_str())
+            {
+                continue;
+            }
+            let path = self
+                .data_dir
+                .join(CLEANUP_EVIDENCE_ROOT)
+                .join(format!("{}.json", attempt.object_id));
+            if !path.exists() {
+                tracing::warn!(
+                    target_id = attempt.id,
+                    "cleanup evidence cannot be reconciled because its local copy is missing"
+                );
+                continue;
+            }
+            match self
+                .reconcile_remote_file(&path, &attempt.token, attempt.started_at)
+                .await
+            {
+                Ok(RemoteReconciliation::Match(location)) => {
+                    self.metadata
+                        .resolve_cleanup_evidence(attempt.id, &location)?;
+                    tracing::info!(
+                        target_id = attempt.id,
+                        "cleanup evidence reconciliation matched the exact remote document"
+                    );
+                }
+                Ok(RemoteReconciliation::Absent) => {
+                    self.metadata.retry_cleanup_evidence_after_reconciliation(
+                        attempt.id,
+                        "Reconciled absent; a new uniquely-tokened evidence attempt is safe",
+                    )?;
+                    tracing::info!(
+                        target_id = attempt.id,
+                        "cleanup evidence reconciliation proved the remote document absent"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(target_id = attempt.id, error = %error, "cleanup evidence reconciliation deferred");
+                }
             }
         }
         Ok(())

@@ -43,7 +43,7 @@ Each object is represented by:
 3. a local index row and journal entry
 4. optional multipart session and part rows while an upload is in progress
 
-Schema v20 additionally stores an account registry, durable replication jobs,
+Schema v21 additionally stores an account registry, durable replication jobs,
 selected-object replication scopes, replica/access locations, and re-chunk
 locks/jobs. Account rows include `download_enabled`, an additive read-selection
 policy that defaults to enabled for existing data. The `object_keys_json` migration is additive: an empty array keeps
@@ -70,6 +70,15 @@ Verifier scans emit start/end or failure log records and maintain process-local
 run, failure, timestamp, and duration metrics for the operator Overview. These
 metrics describe the scan work; integrity findings remain represented by the
 durable recovery-event and manifest state described above.
+
+Cleanup targets use evidence-first ordering. Schema v21 adds indexed claim and
+object-dependency paths so an idle worker does not repeatedly scan the entire
+outbox. The worker backs off to the next actionable window, capped at one
+minute so newly-created due work remains responsive. Ambiguous evidence uploads
+persist a unique attempt token and start time; exact-token and exact-byte
+reconciliation must prove absence before a replacement attempt is allowed.
+Rows created before attempt-token persistence remain quarantined rather than
+being guessed through.
 
 Replication copies encrypted chunk bytes, preserving the object checksum and
 encryption identity. Access-only replication records the source location and
@@ -199,7 +208,9 @@ not look for a local staged chunk or upload the payload again.
 is an RFC3339 UTC timestamp. The local index and all S3/admin read and list
 paths treat the object as missing at or after that instant, while the manifest
 and Telegram chunks remain recoverable until normal tombstone retention and
-garbage collection complete. The default local tombstone retention is 24 hours.
+garbage collection complete. The default local tombstone retention is 12 hours;
+the value is persisted in `app_settings` and is configurable from Storage
+policy for future delayed cleanup targets.
 Share-link expiry is stored separately in local metadata and can never extend
 beyond this manifest deadline. Each share link stores a hash of its opaque
 bearer token for lookup, plus ciphertext encrypted under a key derived from

@@ -3,6 +3,10 @@ import { defineConfig, devices } from '@playwright/test';
 export default defineConfig({
   testDir: './tests',
   timeout: 30_000,
+  // The mocked admin routes are page-scoped, but all workers share the local
+  // Vite dev server. Serial-by-default keeps the acceptance gate deterministic
+  // on constrained release hosts; Playwright CLI flags can still override it.
+  workers: 1,
   fullyParallel: true,
   reporter: process.env.CI ? [['line'], ['junit', { outputFile: 'test-results/playwright.xml' }]] : 'list',
   use: {

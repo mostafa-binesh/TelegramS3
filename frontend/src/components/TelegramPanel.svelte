@@ -41,6 +41,9 @@
   export let recoveryVerifyChunks = 1;
   export let recoveryVerifyChunksMin = 1;
   export let recoveryVerifyChunksMax = 1024;
+  export let cleanupRetentionSecs = 43200;
+  export let cleanupRetentionMin = 3600;
+  export let cleanupRetentionMax = 2592000;
   export let storageSettingsBusy = false;
   export let storageSettingsError = '';
   export let storageSettingsMessage = '';
@@ -85,7 +88,10 @@
   $: recoveryVerifyChunksValid = Number.isInteger(Number(recoveryVerifyChunks))
     && Number(recoveryVerifyChunks) >= recoveryVerifyChunksMin
     && Number(recoveryVerifyChunks) <= recoveryVerifyChunksMax;
-  $: recoverySettingsValid = downloadPrefetchChunksValid && downloadFailoverRetriesValid && recoveryVerifyIntervalValid && recoveryVerifyChunksValid;
+  $: cleanupRetentionValid = Number.isInteger(Number(cleanupRetentionSecs))
+    && Number(cleanupRetentionSecs) >= cleanupRetentionMin
+    && Number(cleanupRetentionSecs) <= cleanupRetentionMax;
+  $: recoverySettingsValid = downloadPrefetchChunksValid && downloadFailoverRetriesValid && recoveryVerifyIntervalValid && recoveryVerifyChunksValid && cleanupRetentionValid;
   $: phoneConfirmationMatches = Boolean(telegramAccountPhone)
     && phoneConfirmation.trim() === telegramAccountPhone.trim();
 
@@ -174,6 +180,13 @@
           {#each [0, 1, 2, 4, 8] as preset}<button class:chosen={Number(downloadFailoverRetries) === preset} type="button" on:click={() => downloadFailoverRetries = preset}>{preset}</button>{/each}
         </div>
         <p id="download-failover-help" class="range-help">Allowed range: {downloadFailoverRetriesMin}–{downloadFailoverRetriesMax}. Zero switches after the first failed complete attempt; one allows two attempts on the selected account.</p>
+        <div class="verification-heading"><div><span class="eyebrow">Cleanup safety</span><h3>Cleanup retention</h3></div><span class="policy-badge">{cleanupRetentionSecs >= 86400 ? `${(cleanupRetentionSecs / 86400).toFixed(cleanupRetentionSecs % 86400 === 0 ? 0 : 1)} day${cleanupRetentionSecs >= 172800 ? 's' : ''}` : `${Math.round(cleanupRetentionSecs / 3600)} hour${cleanupRetentionSecs >= 7200 ? 's' : ''}`}</span></div>
+        <p class="policy-description">Keep orphaned local cleanup material and delayed cleanup targets recoverable before irreversible garbage collection becomes eligible. This applies to future cleanup work; existing scheduled or recovery-required rows keep their current state.</p>
+        <label class="chunk-input-label"><span>Cleanup retention</span><div class="chunk-input-wrap"><input bind:value={cleanupRetentionSecs} aria-label="Cleanup retention seconds" type="number" min={cleanupRetentionMin} max={cleanupRetentionMax} step="1" inputmode="numeric" aria-describedby="cleanup-retention-help" /><span>seconds</span></div></label>
+        <div class="preset-grid verification-presets" aria-label="Cleanup retention presets">
+          {#each [{label: '1 hour', value: 3600}, {label: '12 hours', value: 43200}, {label: '24 hours', value: 86400}, {label: '7 days', value: 604800}] as preset}<button class:chosen={Number(cleanupRetentionSecs) === preset.value} type="button" on:click={() => cleanupRetentionSecs = preset.value}>{preset.label}</button>{/each}
+        </div>
+        <p id="cleanup-retention-help" class="range-help">Allowed range: {cleanupRetentionMin}–{cleanupRetentionMax} seconds. The default is 12 hours.</p>
         <div class="verification-heading"><div><span class="eyebrow">Recovery verifier</span><h3>Random health checks</h3></div><span class:disabled={!recoveryVerifyEnabled} class="policy-badge">{recoveryVerifyEnabled ? `${recoveryVerifyChunks} chunk${Number(recoveryVerifyChunks) === 1 ? '' : 's'} / file` : 'Disabled'}</span></div>
         <label class="verification-toggle"><input bind:checked={recoveryVerifyEnabled} type="checkbox" aria-describedby="recovery-verify-help" /><span><strong>Enable automatic recovery verification</strong><small>When disabled, the server will not schedule remote chunk checks or quarantine objects from verifier scans.</small></span></label>
         <p class="policy-description">When enabled, the server downloads a fresh random sample from every healthy committed object at each interval and verifies its checksum. It never re-uploads a failed chunk automatically.</p>
@@ -187,7 +200,7 @@
         <p id="recovery-verify-help" class="range-help">{#if recoveryVerifyEnabled}Interval: {recoveryVerifyIntervalMin}–{recoveryVerifyIntervalMax} seconds. Sample count: {recoveryVerifyChunksMin}–{recoveryVerifyChunksMax}. A missing or checksum-bad sampled chunk quarantines the object for recovery; a temporary Telegram/network error is retried on a later scan.{:else}The verifier is disabled. Existing interval and sample values are preserved and will resume when you enable it again.{/if}</p>
         {#if storageSettingsError}<p class="storage-message message-error" role="alert">{storageSettingsError}</p>{/if}
         {#if storageSettingsMessage}<p class="storage-message" role="status">✓ {storageSettingsMessage}</p>{/if}
-        <div class="policy-actions"><span class:valid={draftChunkSizeValid && recoverySettingsValid} class="draft-preview">{draftChunkSizeValid && recoverySettingsValid ? `${downloadPrefetchChunks === 0 ? 'Serial downloads' : `${downloadPrefetchChunks} chunk${Number(downloadPrefetchChunks) === 1 ? '' : 's'} prefetched`} · ${downloadFailoverRetries} failover retr${Number(downloadFailoverRetries) === 1 ? 'y' : 'ies'} · ${recoveryVerifyEnabled ? `checks ${recoveryVerifyChunks} random chunk${Number(recoveryVerifyChunks) === 1 ? '' : 's'} every ${recoveryVerifyIntervalSecs}s` : 'verification disabled'}` : 'Enter values in the allowed ranges'}</span><button class="primary" type="submit" disabled={storageSettingsBusy || !draftChunkSizeValid || !recoverySettingsValid}>{storageSettingsBusy ? 'Applying…' : 'Apply storage policy'}</button></div>
+        <div class="policy-actions"><span class:valid={draftChunkSizeValid && recoverySettingsValid} class="draft-preview">{draftChunkSizeValid && recoverySettingsValid ? `${downloadPrefetchChunks === 0 ? 'Serial downloads' : `${downloadPrefetchChunks} chunk${Number(downloadPrefetchChunks) === 1 ? '' : 's'} prefetched`} · ${downloadFailoverRetries} failover retr${Number(downloadFailoverRetries) === 1 ? 'y' : 'ies'} · cleanup retained ${cleanupRetentionSecs}s · ${recoveryVerifyEnabled ? `checks ${recoveryVerifyChunks} random chunk${Number(recoveryVerifyChunks) === 1 ? '' : 's'} every ${recoveryVerifyIntervalSecs}s` : 'verification disabled'}` : 'Enter values in the allowed ranges'}</span><button class="primary" type="submit" disabled={storageSettingsBusy || !draftChunkSizeValid || !recoverySettingsValid}>{storageSettingsBusy ? 'Applying…' : 'Apply storage policy'}</button></div>
       </form>
 
       <aside class="policy-card policy-impact">

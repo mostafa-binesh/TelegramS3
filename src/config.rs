@@ -23,6 +23,9 @@ pub const MIN_RECOVERY_VERIFY_CHUNKS: u64 = 1;
 pub const MAX_RECOVERY_VERIFY_CHUNKS: u64 = 1024;
 pub const DEFAULT_RECOVERY_VERIFY_CHUNKS: u64 = 1;
 pub const DEFAULT_RECOVERY_VERIFY_ENABLED: bool = true;
+pub const MIN_CLEANUP_RETENTION_SECS: u64 = 60 * 60;
+pub const MAX_CLEANUP_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+pub const DEFAULT_CLEANUP_RETENTION_SECS: u64 = 12 * 60 * 60;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppConfig {
@@ -206,6 +209,13 @@ impl AppConfig {
     pub fn validate_recovery_verify_chunks(value: u64) -> Result<u64, ConfigError> {
         if !(MIN_RECOVERY_VERIFY_CHUNKS..=MAX_RECOVERY_VERIFY_CHUNKS).contains(&value) {
             return Err(ConfigError::Invalid("TELEGRAM_RECOVERY_VERIFY_CHUNKS"));
+        }
+        Ok(value)
+    }
+
+    pub fn validate_cleanup_retention_secs(value: u64) -> Result<u64, ConfigError> {
+        if !(MIN_CLEANUP_RETENTION_SECS..=MAX_CLEANUP_RETENTION_SECS).contains(&value) {
+            return Err(ConfigError::Invalid("TELEGRAM_CLEANUP_RETENTION_SECS"));
         }
         Ok(value)
     }

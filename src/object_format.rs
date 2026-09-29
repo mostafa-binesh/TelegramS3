@@ -53,9 +53,9 @@ pub struct RecoveryVerifierMetrics {
 const CHECKSUM_ALGORITHM: &str = "sha256";
 const MULTIPART_CHECKSUM_ALGORITHM: &str = "sha256-parts-v1";
 const ENCRYPTION_FORMAT: &str = "chacha20poly1305-v1";
-/// Local tombstones and orphaned cleanup material are retained for one day
+/// Local tombstones and orphaned cleanup material are retained for twelve hours
 /// before irreversible garbage collection becomes eligible.
-pub const GARBAGE_COLLECTION_RETENTION_SECONDS: i64 = 24 * 60 * 60;
+pub const GARBAGE_COLLECTION_RETENTION_SECONDS: i64 = 12 * 60 * 60;
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const STAGING_ROOT: &str = "staging";
 const MANIFEST_ROOT: &str = "manifests";
@@ -709,11 +709,22 @@ impl TrafficCounters {
     }
 }
 
-#[derive(Default)]
 struct WorkerRuntime {
     started: std::sync::atomic::AtomicBool,
     shutdown: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    cleanup_wake: Arc<tokio::sync::Notify>,
+}
+
+impl Default for WorkerRuntime {
+    fn default() -> Self {
+        Self {
+            started: std::sync::atomic::AtomicBool::new(false),
+            shutdown: Mutex::new(None),
+            handles: Mutex::new(Vec::new()),
+            cleanup_wake: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
 }
 
 struct ReadPinGuard {
@@ -1308,7 +1319,9 @@ impl ObjectFormatService {
                     .tombstone_manifest(manifest.object_id, "object expired")?;
             }
         }
-        Ok(self.metadata.delete_bucket(bucket)?)
+        self.metadata.delete_bucket(bucket)?;
+        self.notify_cleanup_worker();
+        Ok(())
     }
 
     pub fn bucket_exists(&self, bucket: &str) -> Result<bool, ObjectFormatError> {
@@ -1363,14 +1376,18 @@ impl ObjectFormatService {
         if_match_last_modified_time: Option<&s3s::dto::Timestamp>,
         if_match_size: Option<i64>,
     ) -> Result<Option<ObjectManifest>, ObjectFormatError> {
-        Ok(self.metadata.delete_active_key(
+        let result = self.metadata.delete_active_key(
             bucket,
             key,
             "deleted via S3",
             if_match,
             if_match_last_modified_time,
             if_match_size,
-        )?)
+        )?;
+        if result.is_some() {
+            self.notify_cleanup_worker();
+        }
+        Ok(result)
     }
 
     pub fn delete_empty_folder(
@@ -1378,9 +1395,13 @@ impl ObjectFormatService {
         bucket: &str,
         folder_key: &str,
     ) -> Result<Option<ObjectManifest>, ObjectFormatError> {
-        Ok(self
+        let result = self
             .metadata
-            .delete_empty_folder(bucket, folder_key, "deleted via admin")?)
+            .delete_empty_folder(bucket, folder_key, "deleted via admin")?;
+        if result.is_some() {
+            self.notify_cleanup_worker();
+        }
+        Ok(result)
     }
 
     pub fn tombstone_manifest(
@@ -1388,7 +1409,9 @@ impl ObjectFormatService {
         object_id: Uuid,
         reason: &str,
     ) -> Result<ObjectManifest, ObjectFormatError> {
-        Ok(self.metadata.tombstone_manifest(object_id, reason)?)
+        let result = self.metadata.tombstone_manifest(object_id, reason)?;
+        self.notify_cleanup_worker();
+        Ok(result)
     }
 
     pub fn tombstone_manifest_with_conditionals(
@@ -1399,13 +1422,15 @@ impl ObjectFormatService {
         if_match_last_modified_time: Option<&s3s::dto::Timestamp>,
         if_match_size: Option<i64>,
     ) -> Result<ObjectManifest, ObjectFormatError> {
-        Ok(self.metadata.tombstone_manifest_with_conditionals(
+        let result = self.metadata.tombstone_manifest_with_conditionals(
             object_id,
             reason,
             if_match,
             if_match_last_modified_time,
             if_match_size,
-        )?)
+        )?;
+        self.notify_cleanup_worker();
+        Ok(result)
     }
 
     pub fn initiate_multipart_upload(
@@ -5536,6 +5561,7 @@ mod tests {
             .expect("begin removal");
 
         service.ensure_workers();
+        service.notify_cleanup_worker();
         for _ in 0..100 {
             if service
                 .metadata

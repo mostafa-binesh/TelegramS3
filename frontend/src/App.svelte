@@ -231,6 +231,9 @@
   let recoveryVerifyChunksMin = 1;
   let recoveryVerifyChunksMax = 1024;
   let recoveryVerifyEnabled = true;
+  let cleanupRetentionSecs = 43200;
+  let cleanupRetentionMin = 3600;
+  let cleanupRetentionMax = 2592000;
   let storageSettingsBusy = false;
   let storageSettingsError = '';
   let storageSettingsMessage = '';
@@ -458,6 +461,9 @@
     recovery_verify_chunks: number;
     min_recovery_verify_chunks: number;
     max_recovery_verify_chunks: number;
+    cleanup_retention_secs?: number;
+    min_cleanup_retention_secs?: number;
+    max_cleanup_retention_secs?: number;
   }) {
     storageChunkSizeBytes = settings.chunk_size;
     storageChunkSizeMin = settings.min_chunk_size;
@@ -476,6 +482,9 @@
     recoveryVerifyChunks = settings.recovery_verify_chunks ?? 1;
     recoveryVerifyChunksMin = settings.min_recovery_verify_chunks ?? 1;
     recoveryVerifyChunksMax = settings.max_recovery_verify_chunks ?? 1024;
+    cleanupRetentionSecs = settings.cleanup_retention_secs ?? 43200;
+    cleanupRetentionMin = settings.min_cleanup_retention_secs ?? 3600;
+    cleanupRetentionMax = settings.max_cleanup_retention_secs ?? 2592000;
     storageSettingsError = '';
   }
 
@@ -492,7 +501,8 @@
         download_failover_retries: Number(downloadFailoverRetries),
         recovery_verify_enabled: recoveryVerifyEnabled,
         recovery_verify_interval_secs: Number(recoveryVerifyIntervalSecs),
-        recovery_verify_chunks: Number(recoveryVerifyChunks)
+        recovery_verify_chunks: Number(recoveryVerifyChunks),
+        cleanup_retention_secs: Number(cleanupRetentionSecs)
       });
       applyStorageSettings(response);
       storageSettingsMessage = recoveryVerifyEnabled
@@ -1341,7 +1351,7 @@
         {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else if routeLoadError}<LoadError title="Could not load interrupted transfers" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {/if}
     {:else if view === 'telegram'}
-      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab="storage" hideTabs {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} bind:downloadPrefetchChunks {downloadPrefetchChunksMin} {downloadPrefetchChunksMax} bind:downloadFailoverRetries {downloadFailoverRetriesMin} {downloadFailoverRetriesMax} bind:recoveryVerifyEnabled bind:recoveryVerifyIntervalSecs {recoveryVerifyIntervalMin} {recoveryVerifyIntervalMax} bind:recoveryVerifyChunks {recoveryVerifyChunksMin} {recoveryVerifyChunksMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Storage settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
+      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab="storage" hideTabs {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} bind:downloadPrefetchChunks {downloadPrefetchChunksMin} {downloadPrefetchChunksMax} bind:downloadFailoverRetries {downloadFailoverRetriesMin} {downloadFailoverRetriesMax} bind:recoveryVerifyEnabled bind:recoveryVerifyIntervalSecs {recoveryVerifyIntervalMin} {recoveryVerifyIntervalMax} bind:recoveryVerifyChunks {recoveryVerifyChunksMin} {recoveryVerifyChunksMax} bind:cleanupRetentionSecs {cleanupRetentionMin} {cleanupRetentionMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Storage settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')} onStageMetricsTest={runStageMetricsDiagnostic} stageTestBusy={stageTestBusy}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}

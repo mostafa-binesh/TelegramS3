@@ -34,6 +34,12 @@ Write path:
   is cleared in the request transaction, while optional Telegram deletion is
   completed by a durable, retryable worker job
 - startup reconciliation is required
+- cleanup claims use indexed evidence dependencies and bounded idle backoff;
+  schema v21 stores a configurable cleanup-retention setting whose default is
+  twelve hours for future delayed/orphan cleanup targets
+- ambiguous cleanup-evidence uploads are retried only after complete
+  exact-token, exact-byte reconciliation proves that no matching Telegram
+  document exists
 
 ## Rejected Alternatives
 

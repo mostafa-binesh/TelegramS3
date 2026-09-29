@@ -216,8 +216,9 @@ recovery boundary.
    required, or orphaned rows will be reconciled.
 2. Use `telegram-s3 repair` only after the dry-run shows the expected scope.
 3. The cleanup worker drains tombstone outbox entries automatically. Local
-   tombstones and orphaned cleanup material are retained for 24 hours by
-   default before `gc` can remove them. Run
+   tombstones and orphaned cleanup material are retained for 12 hours by
+   default before `gc` can remove them. The retention can be changed from
+   Telegram settings for future delayed cleanup targets. Run
    `telegram-s3 gc --dry-run` when reviewing older tombstones or a manual
    cleanup scope; Telegram message removal remains evidence-first and retryable.
 4. Run `telegram-s3 gc` only when the dry-run output matches the intended

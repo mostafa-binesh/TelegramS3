@@ -259,6 +259,10 @@ Completed in this increment:
 - verifier scans now log start/end or failure, record duration and run/failure
   counters, and expose those metrics in the Overview; cleanup counts are
   separated into due, scheduled, and recovery-required work
+- cleanup claims now use dependency indexes and idle backoff instead of
+  rescanning the full outbox every second; cleanup evidence attempts have
+  durable unique tokens for exact reconciliation, and future delayed cleanup
+  retention is configurable from Storage policy with a 12-hour default
 - public audio/video links now advertise inline media disposition while
   non-media links remain attachments, preserving range-based player probing
   without changing stored objects

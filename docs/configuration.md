@@ -130,6 +130,11 @@ new value immediately to new uploads and resumable receptions. Existing
 manifests and active transfers retain their recorded chunk boundaries; no
 rechunking or Telegram migration is performed.
 
+The same page controls `telegram_cleanup_retention_secs`. Its database default
+is `43200` seconds (12 hours), with an allowed range of one hour through 30
+days. It applies to future delayed/orphan cleanup targets and does not rewrite
+existing scheduled or `recovery_required` cleanup rows.
+
 The same page controls `telegram_download_prefetch_chunks`, the number of
 extra complete chunks allowed in flight while a client download is streaming.
 Its database default is `1`; `0` disables prefetching and `4` is the maximum.
