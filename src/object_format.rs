@@ -4843,6 +4843,40 @@ mod tests {
             .count();
         assert_eq!(remote_files_after, remote_files_before + 1);
 
+        // A move publishes a new manifest document, not another encrypted
+        // payload.  The remote filename is the opaque send-attempt token, so
+        // it intentionally has no `.json` extension; the document bytes must
+        // nevertheless remain a valid committed ObjectManifest and the token
+        // sidecar must match the location used for reconciliation.
+        let published_manifest_bytes =
+            fs::read(remote_dir.join(format!("{}.bin", moved.telegram.message_id)))
+                .expect("published destination manifest");
+        let published_manifest: ObjectManifest = serde_json::from_slice(&published_manifest_bytes)
+            .expect("destination Telegram document is JSON manifest");
+        assert_eq!(published_manifest.commit_state, CommitState::Committed);
+        assert_eq!(published_manifest.bucket, "bucket");
+        assert_eq!(published_manifest.key, "moved/source.bin");
+        assert_eq!(published_manifest.content_length, source.content_length);
+
+        let document_id = moved
+            .telegram
+            .document_id
+            .as_deref()
+            .expect("mock Telegram document id");
+        let token_prefix = format!("mock:{}:", moved.telegram.message_id);
+        let token = document_id
+            .strip_prefix(&token_prefix)
+            .expect("mock document id contains its send-attempt token");
+        let sidecar: serde_json::Value = serde_json::from_slice(
+            &fs::read(remote_dir.join(format!("{}.json", moved.telegram.message_id)))
+                .expect("published destination manifest sidecar"),
+        )
+        .expect("manifest sidecar JSON");
+        assert_eq!(
+            sidecar.get("file_name").and_then(|value| value.as_str()),
+            Some(token)
+        );
+
         service
             .metadata_store()
             .tombstone_manifest(source.object_id, "moved in test")

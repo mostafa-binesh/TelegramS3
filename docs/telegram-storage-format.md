@@ -157,9 +157,14 @@ the operator.
 
 The manifest is a small JSON document. The committed manifest lives in the
 local metadata store and is also published to Telegram as a document during
-commit. `TELEGRAM_DATA_DIR` is only for transient staging, quarantine, and
-recovery artifacts; it must not be the only copy of object bytes or metadata.
-The manifest must not depend on captions alone.
+commit. The Telegram document's filename is the opaque, durable send-attempt
+token rather than `manifest.json` and is intentionally extensionless. The
+bytes are still the JSON manifest; the token lets ambiguous sends be
+reconciled by exact filename/token and exact bytes instead of captions. The
+same naming rule applies to cleanup-evidence documents, whose contents are
+JSON evidence records. `TELEGRAM_DATA_DIR` is only for transient staging,
+quarantine, and recovery artifacts; it must not be the only copy of object
+bytes or metadata. The manifest must not depend on captions alone.
 
 ```json
 {
@@ -412,13 +417,18 @@ available while a slow or unavailable Telegram read is still being checked.
 
 The authenticated object browser performs moves on the server. A file move
 creates a durable destination manifest with the original encrypted chunk
-references, publishes only that small manifest document, and only then
-tombstones the source. The destination manifest preserves the original payload
-identity for decryption, checksums, encryption metadata, and every replica
-location. A selected folder is expanded from its local prefix index,
-preserving its folder basename and relative descendants, including directory
-markers. A partial move is recoverable: already committed destinations remain
-visible and unprocessed sources remain intact for operator review.
+references, publishes only that small JSON manifest document, and only then
+tombstones the source. The destination manifest preserves the original
+payload identity for decryption, checksums, encryption metadata, and every
+replica location. Its Telegram filename is the extensionless send-attempt
+token described above, not an indication that the content is non-JSON. When
+the source tombstone later reaches evidence-first cleanup, the worker may also
+publish a separate JSON deletion-evidence document; neither document is an
+extra object payload. A selected folder is expanded from its local prefix
+index, preserving its folder basename and relative descendants, including
+directory markers. A partial move is recoverable: already committed
+destinations remain visible and unprocessed sources remain intact for operator
+review.
 
 Automatic physical replication reuses a source chunk message when both
 connected accounts point to the same Telegram storage chat. This creates a

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.6-rc.21 - 2026-09-30
+
+### Metadata-only move publication verification
+
+- Verified that server-side file and folder moves publish a valid committed
+  JSON destination manifest while reusing the existing encrypted Telegram
+  chunks; no payload bytes are downloaded or re-uploaded.
+- Added a regression test that parses the published destination document as an
+  `ObjectManifest` and verifies its bucket, key, commit state, size, and exact
+  send-attempt token used for remote reconciliation.
+- Documented why Telegram shows the destination manifest without a `.json`
+  filename: the extensionless name is the durable opaque attempt token, while
+  the document content remains JSON. Also documented the separate JSON
+  deletion-evidence document that may be published by later cleanup.
+
 ## 0.7.6-rc.20 - 2026-09-30
 
 ### Eligible cleanup trigger

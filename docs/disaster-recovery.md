@@ -201,12 +201,17 @@ documents.
 The admin move endpoint never sends source bytes through the browser or back
 through Telegram. It expands selected folder prefixes from the local active
 index, creates a durable destination transfer whose chunks reference the
-original payload identity, publishes only the new manifest document, and only
-then tombstones the source. Directory markers are processed after their
-descendants so folder cleanup preserves the existing non-empty-folder safety
-rule. A process failure can leave a committed destination alongside an
-untouched source; this is recoverable and does not silently discard data, but
-the operator must resolve the destination conflict before retrying that item.
+original payload identity, publishes only the new JSON manifest document, and
+only then tombstones the source. The published manifest is named with its
+opaque send-attempt token, so an extensionless Telegram filename is expected;
+reconciliation uses that token and exact bytes. Later evidence-first cleanup
+may publish a separate JSON deletion-evidence document before deleting the old
+manifest message. Neither operation re-uploads the encrypted chunk payload.
+Directory markers are processed after their descendants so folder cleanup
+preserves the existing non-empty-folder safety rule. A process failure can
+leave a committed destination alongside an untouched source; this is
+recoverable and does not silently discard data, but the operator must resolve
+the destination conflict before retrying that item.
 
 Automatic physical replication applies the same no-payload-copy optimization
 when the source and target connections use the same Telegram storage chat:

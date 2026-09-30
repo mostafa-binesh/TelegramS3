@@ -210,6 +210,10 @@ A full request-lifecycle and consistency walkthrough is in
   Telegram documents for that token and repairs the checkpoint only after an
   exact encrypted-byte match; otherwise it schedules a safe retry. It never
   guesses from captions or silently duplicates an unknown send.
+- Committed manifests and cleanup-evidence records are JSON documents on
+  Telegram, but their remote filenames are intentionally extensionless opaque
+  attempt tokens. The token is the reconciliation identity; it does not
+  describe the document content.
 - An explicit Telegram `FLOOD_WAIT` is different from a timeout: Telegram has
   rejected the send before publication, so the durable worker records a
   retryable attempt, waits for Telegram pacing, and resumes automatically.
