@@ -121,8 +121,9 @@ That remote work is intentionally asynchronous: a slow or unavailable
 Telegram connection must not keep a restarted container listening only through
 Docker's port proxies without the application accepting requests. Until the
 scan completes, the admin recovery view reports that the recovery scan is
-pending; committed-object visibility remains governed by the local metadata
-index and the normal recovery rules below.
+scheduled or pending with the next interval visible; committed-object
+visibility remains governed by the local metadata index and the normal recovery
+rules below.
 
 ### Interrupted Admin Browser Reception
 
@@ -304,6 +305,8 @@ the saved interval/sample policy. For every healthy committed object it selects 
 the configured number of distinct chunk indexes. The admin overview shows the
 next run, sample policy, distinct broken-file count, and the current verifier
 problem list.
+If startup scanning is deferred, the Overview schedules and displays the next
+first scan from the configured interval even though no scan has completed yet.
 
 Each verifier run logs its start and completion (or failure) with elapsed
 duration. The Overview also reports total scans, failed scans, last start/end

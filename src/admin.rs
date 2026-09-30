@@ -3857,15 +3857,30 @@ impl VerifierWire {
                 broken_objects.insert(object_id.clone());
             }
         }
-        let next_run_at = enabled
-            .then_some(recovery.checked_at.as_deref())
-            .flatten()
-            .and_then(|checked_at| {
-                OffsetDateTime::parse(checked_at, &time::format_description::well_known::Rfc3339)
-                    .ok()
-                    .and_then(|value| value.checked_add(Duration::seconds(interval_secs as i64)))
-                    .map(rfc3339)
-            });
+        let next_run_at = if enabled {
+            metrics
+                .next_run_at
+                .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok())
+                .map(rfc3339)
+                .or_else(|| {
+                    recovery
+                        .checked_at
+                        .as_deref()
+                        .and_then(|checked_at| {
+                            OffsetDateTime::parse(
+                                checked_at,
+                                &time::format_description::well_known::Rfc3339,
+                            )
+                            .ok()
+                        })
+                        .and_then(|value| {
+                            value.checked_add(Duration::seconds(interval_secs as i64))
+                        })
+                        .map(rfc3339)
+                })
+        } else {
+            None
+        };
         let status = if !enabled {
             "disabled"
         } else if recovery.scan_error.is_some() {
@@ -3873,7 +3888,11 @@ impl VerifierWire {
         } else if !broken_objects.is_empty() {
             "attention"
         } else if recovery.checked_at.is_none() {
-            "pending"
+            if next_run_at.is_some() {
+                "scheduled"
+            } else {
+                "pending"
+            }
         } else {
             "healthy"
         };

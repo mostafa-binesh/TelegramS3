@@ -134,7 +134,9 @@ while transient account/network failures remain retryable.
   multipart references are counted once and protocol overhead is excluded),
   and a bounded Download stage metrics testing section that separates first
   chunk, Telegram, retry-wait, decrypt, checksum-verify, and total read time
-  for recent public/admin/S3 streams,
+  for recent public/admin/S3 streams and shows client/Telegram byte totals;
+  completed final-byte delivery is not mislabeled as cancellation when a
+  response consumer closes without an extra terminal poll,
   and a Storage policy action that manually queues the integrity verifier and
   resets its next scheduled interval after the run completes,
   plus a safe **Run eligible cleanup now** action that wakes the durable worker

@@ -62,7 +62,10 @@ staging, and recovery artifacts, not committed payloads.
 - **Download stage diagnostics** — the authenticated Overview keeps a bounded,
   process-local sample of recent public/admin/S3 reads, separating first-chunk,
   Telegram, retry-wait, decrypt, checksum-verify, and total timings for live
-  performance testing. It is diagnostic telemetry, not durable accounting.
+  performance testing, together with client-downloaded and Telegram-read byte
+  totals. A stream that delivers its final bytes successfully is recorded as
+  completed even when the HTTP consumer closes without an extra terminal poll.
+  It is diagnostic telemetry, not durable accounting.
 - **Low-cost Overview polling** — storage counts and the logical committed
   Telegram payload size use a short-lived cached snapshot, while the
   five-second dashboard refresh uses a separate `/overview/live` payload for
@@ -78,6 +81,8 @@ staging, and recovery artifacts, not committed payloads.
   scan completes. It also provides **Run eligible cleanup now**, which wakes
   the durable cleanup worker without bypassing retention or recovery-required
   safeguards.
+  When startup scanning is deferred, the Overview still shows the scheduled
+  next run instead of waiting indefinitely for a first-scan timestamp.
 - **Operator web UI** — an authenticated `/_admin` Svelte app: dashboard,
   operator account management, in-app bucket creation, bucket/object browser
   with per-file upload, ranged download, guarded folder deletion, and resilient
@@ -350,7 +355,10 @@ path. After a public, admin, or S3 read completes (or fails), it reports the
 recent first-chunk, Telegram, retry-wait, decrypt, checksum-verify, and total
 durations, along with chunk and payload counts. Samples are process-local and
 bounded to the latest 20 reads, so this panel does not replace durable traffic
-accounting or recovery records.
+accounting or recovery records. Client-downloaded and Telegram-read byte sizes
+are shown separately, and successful final-byte delivery is recorded as
+completed even if the response consumer drops the stream immediately after
+receiving those bytes.
 
 Per-object expiry is available as a Telegram S3 extension. Send either
 `x-amz-meta-telegram-s3-expires-at: <RFC3339 timestamp>` or

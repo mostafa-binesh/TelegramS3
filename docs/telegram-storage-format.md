@@ -290,7 +290,10 @@ The Overview keeps manifest-derived object counts and unique committed Telegram
 payload size in a five-second cache. Its five-second background refresh reads
 the separate `/overview/live` surface for transfer, traffic, stage, and
 connection telemetry, so routine dashboard polling does not reparse every
-manifest. A manual/full Overview refresh can still update the cached storage
+manifest. Stage samples include client-emitted and Telegram-read byte totals,
+and a response that delivers its complete requested range is completed even if
+the HTTP consumer drops the stream before polling the terminal end marker. A
+manual/full Overview refresh can still update the cached storage
 snapshot.
 
 Public share and authenticated admin responses advertise `Accept-Ranges: bytes`

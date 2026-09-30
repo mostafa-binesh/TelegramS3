@@ -48,4 +48,6 @@ the configured interval. The environment variable
   a process failure leaves committed destinations and untouched sources for
   retry review.
 - Operators can defer the expensive first remote verifier scan without
-  disabling the recurring verifier policy.
+  disabling the recurring verifier policy. The scheduled first-run timestamp
+  is exposed immediately, so the Overview does not remain at an indefinite
+  “waiting for first scan” state.

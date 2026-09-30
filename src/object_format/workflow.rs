@@ -497,6 +497,8 @@ impl ObjectFormatService {
         let recovery_handle = tokio::spawn(async move {
             if service.recovery_verifier_enabled() && service.recovery_verify_startup() {
                 let _ = service.refresh_recovery_snapshot().await;
+            } else if service.recovery_verifier_enabled() {
+                service.schedule_recovery_verification();
             }
             loop {
                 if *recovery_shutdown.borrow() {

@@ -48,6 +48,7 @@ pub struct RecoveryVerifierMetrics {
     pub last_scan_started_at: Option<i64>,
     pub last_scan_finished_at: Option<i64>,
     pub last_scan_duration_ms: Option<u64>,
+    pub next_run_at: Option<i64>,
 }
 
 const CHECKSUM_ALGORITHM: &str = "sha256";
@@ -540,6 +541,7 @@ struct DownloadStageAccumulator {
     surface: &'static str,
     started: StdInstant,
     started_at: String,
+    expected_client_bytes: u64,
     chunks: u64,
     client_bytes: u64,
     telegram_bytes: u64,
@@ -557,7 +559,11 @@ struct DownloadStageGuard {
 }
 
 impl DownloadStageMetricsStore {
-    fn start(self: &Arc<Self>, surface: &'static str) -> DownloadStageGuard {
+    fn start(
+        self: &Arc<Self>,
+        surface: &'static str,
+        expected_client_bytes: u64,
+    ) -> DownloadStageGuard {
         self.active_requests.fetch_add(1, Ordering::Relaxed);
         if surface == "diagnostic-test" {
             self.test_active_requests.fetch_add(1, Ordering::Relaxed);
@@ -571,6 +577,7 @@ impl DownloadStageMetricsStore {
                 started_at: OffsetDateTime::now_utc()
                     .format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string()),
+                expected_client_bytes,
                 chunks: 0,
                 client_bytes: 0,
                 telegram_bytes: 0,
@@ -659,14 +666,15 @@ impl DownloadStageGuard {
         sample.verify_us = sample.verify_us.saturating_add(result.verify_us);
     }
 
-    fn record_emitted(&mut self, bytes: u64) {
+    fn record_emitted(&mut self, bytes: u64) -> bool {
         let Some(sample) = self.sample.as_mut() else {
-            return;
+            return false;
         };
         sample.client_bytes = sample.client_bytes.saturating_add(bytes);
         if sample.first_chunk_us.is_none() {
             sample.first_chunk_us = Some(sample.started.elapsed().as_micros() as u64);
         }
+        sample.expected_client_bytes > 0 && sample.client_bytes >= sample.expected_client_bytes
     }
 
     fn finish(&mut self, status: &'static str, error: Option<String>) {
@@ -1166,6 +1174,17 @@ impl ObjectFormatService {
             .recovery_verify_enabled
             .write()
             .expect("recovery verification enabled lock") = enabled;
+        if let Ok(mut metrics) = self.recovery_verifier_metrics.write() {
+            metrics.next_run_at = if enabled {
+                Some(
+                    OffsetDateTime::now_utc()
+                        .unix_timestamp()
+                        .saturating_add(self.recovery_verify_interval_secs() as i64),
+                )
+            } else {
+                None
+            };
+        }
     }
 
     /// Queue one verifier scan immediately. The recovery worker owns the
@@ -1202,6 +1221,24 @@ impl ObjectFormatService {
             .recovery_verify_startup
             .write()
             .expect("recovery verification startup lock") = enabled;
+        if !enabled {
+            self.schedule_recovery_verification();
+        }
+    }
+
+    pub(crate) fn schedule_recovery_verification(&self) {
+        if !self.recovery_verifier_enabled() {
+            return;
+        }
+        if let Ok(mut metrics) = self.recovery_verifier_metrics.write()
+            && metrics.next_run_at.is_none()
+        {
+            metrics.next_run_at = Some(
+                OffsetDateTime::now_utc()
+                    .unix_timestamp()
+                    .saturating_add(self.recovery_verify_interval_secs() as i64),
+            );
+        }
     }
 
     pub fn recovery_verify_chunks(&self) -> u64 {
@@ -1224,6 +1261,15 @@ impl ObjectFormatService {
             .recovery_verify_interval_secs
             .write()
             .expect("recovery verification interval lock") = interval_secs;
+        if let Ok(mut metrics) = self.recovery_verifier_metrics.write()
+            && metrics.next_run_at.is_some()
+        {
+            metrics.next_run_at = Some(
+                OffsetDateTime::now_utc()
+                    .unix_timestamp()
+                    .saturating_add(interval_secs as i64),
+            );
+        }
         *self
             .recovery_verify_chunks
             .write()
@@ -2185,6 +2231,8 @@ impl ObjectFormatService {
             metrics.last_scan_started_at = Some(started_at_unix);
             metrics.last_scan_finished_at = Some(finished_at_unix);
             metrics.last_scan_duration_ms = Some(duration_ms);
+            metrics.next_run_at =
+                Some(finished_at_unix.saturating_add(self.recovery_verify_interval_secs() as i64));
             if result.is_err() {
                 metrics.scan_failures = metrics.scan_failures.saturating_add(1);
             }
@@ -2772,7 +2820,10 @@ impl ObjectFormatService {
         surface: &'static str,
     ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + 'static + use<> {
         let pin = this.pin_object(manifest.object_id);
-        let stage = this.download_stage_metrics.start(surface);
+        let expected_client_bytes = spans.iter().map(|span| span.length).sum();
+        let stage = this
+            .download_stage_metrics
+            .start(surface, expected_client_bytes);
         let concurrency = usize::try_from(this.download_prefetch_chunks().saturating_add(1))
             .unwrap_or(usize::MAX)
             .max(1);
@@ -2806,7 +2857,16 @@ impl ObjectFormatService {
                     Some(Ok(result)) => {
                         let length = result.length;
                         stage.record_chunk(&result);
-                        stage.record_emitted(length);
+                        let complete = stage.record_emitted(length);
+                        if complete {
+                            // Some HTTP consumers drop the body immediately
+                            // after receiving the final bytes instead of
+                            // polling once more for the terminal `None`.
+                            // Mark the sample complete before yielding those
+                            // bytes so a successful download is not reported
+                            // as cancelled by the guard's Drop implementation.
+                            stage.finish("completed", None);
+                        }
                         let bytes = result.bytes;
                         Some((
                             Ok({
@@ -5548,6 +5608,56 @@ mod tests {
         assert!(snapshot.0.is_none());
         assert_eq!(snapshot.1.len(), 0);
         assert_eq!(snapshot.2.as_deref(), Some("Recovery scan pending"));
+    }
+
+    #[tokio::test]
+    async fn disabled_startup_scan_reports_the_first_scheduled_run() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        service
+            .set_recovery_verification_settings(60, 1)
+            .expect("verifier settings");
+        service.set_recovery_verify_startup(false);
+
+        let metrics = service.recovery_verifier_metrics();
+        assert_eq!(metrics.scan_runs, 0);
+        let next_run = metrics.next_run_at.expect("scheduled first scan");
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        assert!((now + 55..=now + 60).contains(&next_run));
+    }
+
+    #[tokio::test]
+    async fn completed_read_is_not_marked_cancelled_when_consumer_drops_after_final_bytes() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = Arc::new(sample_service(&tempdir).await);
+        let payload = b"complete without terminal poll";
+        let manifest = service
+            .put_bytes("bucket", "complete.txt", "text/plain", payload)
+            .await
+            .expect("put");
+        let plan =
+            ObjectFormatService::plan_read(&manifest, 0..payload.len() as u64).expect("read plan");
+        let mut stream = Box::pin(ObjectFormatService::read_spans_to_stream(
+            Arc::clone(&service),
+            &manifest,
+            plan.chunks,
+            "test-final-drop",
+        ));
+
+        assert_eq!(
+            stream
+                .next()
+                .await
+                .expect("final stream item")
+                .expect("read bytes")
+                .as_ref(),
+            payload
+        );
+        drop(stream);
+
+        let metrics = service.download_stage_metrics();
+        assert_eq!(metrics.recent[0].status, "completed");
+        assert_eq!(metrics.recent[0].client_bytes, payload.len() as u64);
     }
 
     #[tokio::test]

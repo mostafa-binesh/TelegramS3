@@ -84,7 +84,7 @@
   }
 
   function verifierStatusLabel(status: string) {
-    return status === 'disabled' ? 'Disabled' : status === 'healthy' ? 'Healthy' : status === 'attention' ? 'Needs attention' : status === 'unavailable' ? 'Unavailable' : 'Starting';
+    return status === 'disabled' ? 'Disabled' : status === 'healthy' ? 'Healthy' : status === 'attention' ? 'Needs attention' : status === 'unavailable' ? 'Unavailable' : status === 'scheduled' ? 'Scheduled' : 'Starting';
   }
 
   function formatStageDuration(microseconds?: number | null) {
@@ -190,7 +190,7 @@
         {#if stageMetrics.last_test}
           <div class="diagnostic-test" aria-label="Last diagnostic stage test">
             <div class="diagnostic-heading"><div><strong>Last diagnostic test</strong><small>One verified chunk from a committed object</small></div><span class:stage-ok={stageMetrics.last_test.status === 'completed'} class:stage-bad={stageMetrics.last_test.status === 'failed'} class="stage-status">{stageMetrics.last_test.status}</span></div>
-            <div class="diagnostic-grid"><span>First chunk <strong>{formatStageDuration(stageMetrics.last_test.first_chunk_us)}</strong></span><span>Telegram <strong>{formatStageDuration(stageMetrics.last_test.telegram_us)}</strong></span><span>Decrypt <strong>{formatStageDuration(stageMetrics.last_test.decrypt_us)}</strong></span><span>Verify <strong>{formatStageDuration(stageMetrics.last_test.verify_us)}</strong></span><span>Total <strong>{formatStageDuration(stageMetrics.last_test.total_us)}</strong></span></div>
+            <div class="diagnostic-grid"><span>Downloaded <strong>{formatBytes(stageMetrics.last_test.client_bytes)}</strong></span><span>Telegram data <strong>{formatBytes(stageMetrics.last_test.telegram_bytes)}</strong></span><span>First chunk <strong>{formatStageDuration(stageMetrics.last_test.first_chunk_us)}</strong></span><span>Telegram <strong>{formatStageDuration(stageMetrics.last_test.telegram_us)}</strong></span><span>Decrypt <strong>{formatStageDuration(stageMetrics.last_test.decrypt_us)}</strong></span><span>Verify <strong>{formatStageDuration(stageMetrics.last_test.verify_us)}</strong></span><span>Total <strong>{formatStageDuration(stageMetrics.last_test.total_us)}</strong></span></div>
           </div>
         {:else}
           <p class="fine-print">Run a dedicated one-chunk diagnostic to measure the server path without borrowing the latest client download.</p>
@@ -198,12 +198,14 @@
         {#if stageMetrics.recent.length}
           <div class="stage-table-scroll">
             <table class="stage-table" aria-label="Recent download stage timings">
-              <thead><tr><th>Surface</th><th>Status</th><th>First chunk</th><th>Telegram</th><th>Retry wait</th><th>Decrypt</th><th>Verify</th><th>Total</th></tr></thead>
+              <thead><tr><th>Surface</th><th>Status</th><th>Downloaded</th><th>Telegram data</th><th>First chunk</th><th>Telegram</th><th>Retry wait</th><th>Decrypt</th><th>Verify</th><th>Total</th></tr></thead>
               <tbody>
                 {#each stageMetrics.recent.slice(0, 8) as sample (sample.request_id)}
                   <tr>
                     <td>{sample.surface}</td>
                     <td><span class:stage-ok={sample.status === 'completed'} class:stage-bad={sample.status === 'failed'} class="stage-status">{sample.status}</span>{#if sample.error}<small>{sample.error}</small>{/if}</td>
+                    <td>{formatBytes(sample.client_bytes)}</td>
+                    <td>{formatBytes(sample.telegram_bytes)}</td>
                     <td>{formatStageDuration(sample.first_chunk_us)}</td>
                     <td>{formatStageDuration(sample.telegram_us)}</td>
                     <td>{formatStageDuration(sample.retry_wait_us)}</td>

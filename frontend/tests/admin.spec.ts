@@ -432,6 +432,7 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
   await expect(page.getByText('Telegram → server')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Download stage metrics' })).toBeVisible();
   await expect(page.getByRole('table', { name: 'Recent download stage timings' })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Recent download stage timings' })).toContainText('8.0 MiB');
   const stageTestRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/_admin/api/stage-metrics/test' && request.method() === 'POST');
   await page.getByRole('button', { name: 'Run test' }).click();
   await stageTestRequest;

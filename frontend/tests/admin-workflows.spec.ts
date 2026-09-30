@@ -125,7 +125,7 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
           ...overview,
           storage: { ...overview.storage, buckets: buckets.length, committed_objects: 2 - deletedKeys.size, active_objects: 2 - deletedKeys.size, chunk_size: chunkSize },
           recovery: { ...overview.recovery, issue_count: issue.filter((item) => !item.acknowledged_at).length, unacknowledged_count: issue.filter((item) => !item.acknowledged_at).length, issues: issue },
-          verifier: { ...overview.verifier, enabled: recoveryVerifyEnabled, status: !recoveryVerifyEnabled ? 'disabled' : activeIssue.length ? 'attention' : 'healthy', broken_files: activeIssue.length ? 1 : 0, problems: issue },
+          verifier: { ...overview.verifier, enabled: recoveryVerifyEnabled, status: !recoveryVerifyEnabled ? 'disabled' : !recoveryVerifyStartup ? 'scheduled' : activeIssue.length ? 'attention' : 'healthy', broken_files: activeIssue.length ? 1 : 0, problems: issue },
           telegram: connectionRemoved ? { ...overview.telegram, connection_state: 'needs_reauth', detail: 'Telegram storage is not connected' } : overview.telegram
         }
       });
@@ -728,6 +728,9 @@ test('storage policy can defer the first remote verifier scan until its interval
   expect(saveRequest.postDataJSON()).toMatchObject({ recovery_verify_enabled: true, recovery_verify_startup: false });
   await expect(page.locator('p.storage-message[role="status"]')).toContainText('Storage policy updated.');
   await expect(page.getByText('The first remote scan waits for the configured verification interval.')).toBeVisible();
+  await page.getByRole('button', { name: 'Overview', exact: true }).click();
+  await expect(page.locator('.verifier-card .score-chip')).toHaveText('Scheduled');
+  await expect(page.locator('.verifier-card')).not.toContainText('Waiting for first scan');
 });
 
 test('storage policy can run the integrity verifier manually and reset its interval', async ({ page }) => {

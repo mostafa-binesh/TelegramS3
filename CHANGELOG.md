@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.6-rc.22 - 2026-09-30
+
+### Verifier scheduling and download metrics corrections
+
+- Fixed deferred startup verification so the Overview shows the next scheduled
+  first scan instead of remaining at “Waiting for first scan” indefinitely.
+- Added client-downloaded and Telegram-read byte sizes to Download stage metrics.
+- Fixed successful reads being recorded as `cancelled` when the HTTP consumer
+  closed immediately after receiving the final bytes.
+- Added Rust and Playwright regression coverage for both behaviors.
+
 ## 0.7.6-rc.21 - 2026-09-30
 
 ### Metadata-only move publication verification
