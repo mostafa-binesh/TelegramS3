@@ -94,6 +94,10 @@
     if (milliseconds < 1000) return `${milliseconds < 10 ? milliseconds.toFixed(1) : Math.round(milliseconds)}ms`;
     return `${(milliseconds / 1000).toFixed(1)}s`;
   }
+
+  function accountLabel(accountId: string) {
+    return overview?.telegram?.accounts?.find((account) => account.id === accountId)?.label ?? accountId;
+  }
 </script>
 
 <section class="section-head overview-head">
@@ -190,7 +194,10 @@
         {#if stageMetrics.last_test}
           <div class="diagnostic-test" aria-label="Last diagnostic stage test">
             <div class="diagnostic-heading"><div><strong>Last diagnostic test</strong><small>One verified chunk from a committed object</small></div><span class:stage-ok={stageMetrics.last_test.status === 'completed'} class:stage-bad={stageMetrics.last_test.status === 'failed'} class="stage-status">{stageMetrics.last_test.status}</span></div>
-            <div class="diagnostic-grid"><span>Downloaded <strong>{formatBytes(stageMetrics.last_test.client_bytes)}</strong></span><span>Telegram data <strong>{formatBytes(stageMetrics.last_test.telegram_bytes)}</strong></span><span>First chunk <strong>{formatStageDuration(stageMetrics.last_test.first_chunk_us)}</strong></span><span>Telegram <strong>{formatStageDuration(stageMetrics.last_test.telegram_us)}</strong></span><span>Decrypt <strong>{formatStageDuration(stageMetrics.last_test.decrypt_us)}</strong></span><span>Verify <strong>{formatStageDuration(stageMetrics.last_test.verify_us)}</strong></span><span>Total <strong>{formatStageDuration(stageMetrics.last_test.total_us)}</strong></span></div>
+            <div class="diagnostic-grid"><span>Downloaded <strong>{formatBytes(stageMetrics.last_test.client_bytes)}</strong></span><span>Telegram data <strong>{formatBytes(stageMetrics.last_test.telegram_bytes)}</strong></span><span>First chunk <strong>{formatStageDuration(stageMetrics.last_test.first_chunk_us)}</strong></span><span>Telegram <strong>{formatStageDuration(stageMetrics.last_test.telegram_us)}</strong></span><span>Decrypt <strong>{formatStageDuration(stageMetrics.last_test.decrypt_us)}</strong></span><span>Verify <strong>{formatStageDuration(stageMetrics.last_test.verify_us)}</strong></span><span>Prefetch <strong>{stageMetrics.last_test.prefetch_window_final ?? '—'}/{stageMetrics.last_test.prefetch_window_max ?? '—'}</strong></span><span>Total <strong>{formatStageDuration(stageMetrics.last_test.total_us)}</strong></span></div>
+            {#if stageMetrics.last_test.accounts?.length}
+              <div class="stage-accounts" aria-label="Diagnostic Telegram account usage"><strong>Telegram accounts</strong>{#each stageMetrics.last_test.accounts as account (account.account_id)}<span><b>{accountLabel(account.account_id)}</b> · {formatBytes(account.telegram_bytes)} · {account.chunks} chunk{account.chunks === 1 ? '' : 's'} · {formatStageDuration(account.telegram_us)}</span>{/each}</div>
+            {/if}
           </div>
         {:else}
           <p class="fine-print">Run a dedicated one-chunk diagnostic to measure the server path without borrowing the latest client download.</p>
@@ -198,7 +205,7 @@
         {#if stageMetrics.recent.length}
           <div class="stage-table-scroll">
             <table class="stage-table" aria-label="Recent download stage timings">
-              <thead><tr><th>Surface</th><th>Status</th><th>Downloaded</th><th>Telegram data</th><th>First chunk</th><th>Telegram</th><th>Retry wait</th><th>Decrypt</th><th>Verify</th><th>Total</th></tr></thead>
+              <thead><tr><th>Surface</th><th>Status</th><th>Downloaded</th><th>Telegram data</th><th>Accounts</th><th>First chunk</th><th>Telegram</th><th>Retry wait</th><th>Decrypt</th><th>Verify</th><th>Total</th></tr></thead>
               <tbody>
                 {#each stageMetrics.recent.slice(0, 8) as sample (sample.request_id)}
                   <tr>
@@ -206,6 +213,7 @@
                     <td><span class:stage-ok={sample.status === 'completed'} class:stage-bad={sample.status === 'failed'} class="stage-status">{sample.status}</span>{#if sample.error}<small>{sample.error}</small>{/if}</td>
                     <td>{formatBytes(sample.client_bytes)}</td>
                     <td>{formatBytes(sample.telegram_bytes)}</td>
+                    <td>{#if sample.accounts?.length}<div class="account-pills">{#each sample.accounts as account (account.account_id)}<span title={`${accountLabel(account.account_id)}: ${formatBytes(account.telegram_bytes)}`}>{accountLabel(account.account_id)} · {formatBytes(account.telegram_bytes)}</span>{/each}</div>{:else}—{/if}</td>
                     <td>{formatStageDuration(sample.first_chunk_us)}</td>
                     <td>{formatStageDuration(sample.telegram_us)}</td>
                     <td>{formatStageDuration(sample.retry_wait_us)}</td>
@@ -267,6 +275,11 @@
   .diagnostic-grid { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 8px; }
   .diagnostic-grid span { color: var(--muted); font-size: .68rem; }
   .diagnostic-grid strong { display: block; margin-top: 4px; color: #203b57; font-size: .8rem; }
+  .stage-accounts { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; color: var(--muted); font-size: .68rem; }
+  .stage-accounts > strong { color: #24526f; }
+  .stage-accounts span, .account-pills span { padding: 4px 7px; border: 1px solid #dce7ef; border-radius: 999px; background: #f7fafc; color: #526c82; }
+  .account-pills { display: flex; flex-wrap: wrap; gap: 4px; max-width: 220px; white-space: normal; }
+  .account-pills span { display: block; font-size: .64rem; }
   .live-chip span { width: 7px; height: 7px; border-radius: 50%; background: #2e9a73; box-shadow: 0 0 0 4px rgba(46,154,115,.12); }
   .score-chip { flex: 0 0 auto; padding: 6px 9px; border: 1px solid #efc88b; border-radius: 999px; background: #fff8e9; color: #9a630f; font-size: .7rem; font-weight: 800; }
   .score-chip.clear, .score-chip.healthy { border-color: #b8dfce; background: #effaf5; color: #197658; }

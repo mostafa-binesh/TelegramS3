@@ -274,8 +274,11 @@ and defaults to `1`; `0` keeps the reader serial. Prefetched chunks remain
 ordered behind the current output, and every prefetched chunk is fully fetched,
 decrypted, and checksum-verified before emission. This reduces normal
 chunk-boundary idle gaps without buffering a whole object; the maximum active
-window is `prefetch + 1` chunks. Dropping the client stream drops outstanding
-prefetch work as well.
+window is `prefetch + 1` chunks. The actual window is adaptive: it ramps up
+after clean reads and backs off after retries or measured throughput drops. A
+per-account limiter keeps one active Telegram payload read per account, so
+different enabled replicas can still provide parallel capacity. Dropping the
+client stream drops outstanding prefetch work as well.
 
 The first requested span is intentionally fetched on its own before the
 speculative window is opened. This first-chunk priority improves time to first
@@ -283,7 +286,8 @@ byte while preserving manifest order and the same bounded concurrency limit.
 The authenticated Overview exposes a bounded, process-local testing snapshot
 for recent reads: surface, chunk and payload counts, first-chunk latency,
 Telegram and retry-wait time, decrypt time, checksum-verification time, and
-total duration. The snapshot retains only the latest 20 samples and is not
+total duration, plus the final/max adaptive window and per-account Telegram
+chunk, byte, retry, and duration totals. The snapshot retains only the latest 20 samples and is not
 part of the manifest, metadata journal, recovery state, or traffic totals.
 
 The Overview keeps manifest-derived object counts and unique committed Telegram

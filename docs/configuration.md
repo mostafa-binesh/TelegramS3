@@ -95,6 +95,13 @@ chunks in parallel, but preserves output order and never emits a prefetched
 chunk before its decryption and checksum verification complete. Public share
 responses advertise `Accept-Ranges: bytes`; a client can resume an exhausted
 stream with a single byte range without any additional setting.
+
+The prefetch scheduler starts with a small window, ramps up after clean reads,
+and backs off after retries or a measured throughput drop. It permits only one
+active Telegram payload read per account, so a single account is not made to
+compete with itself; enabled physical replicas can still provide parallel
+capacity. The Overview Download stage metrics show the final/max window and
+per-account chunk, byte, retry, and Telegram-duration totals.
 For public links, stored `audio/*` and `video/*` objects use
 `Content-Disposition: inline` so media players can open the URL directly;
 other content types continue to use attachment disposition.
@@ -143,7 +150,9 @@ The setting is introduced by metadata schema v13 and is safe to change without
 rewriting existing objects or changing active transfer chunk boundaries. A
 larger value can reduce visible zero-speed gaps at the cost of additional
 parallel Telegram traffic and up to `(prefetch + 1) × chunk size` of transient
-per-stream plaintext/ciphertext work.
+per-stream plaintext/ciphertext work. It is a ceiling for the adaptive
+scheduler; the scheduler may use a smaller window when the account is retrying
+or slowing.
 
 The same page controls `telegram_download_failover_retries`, introduced by
 schema v19. It is the number of additional complete attempts made on the

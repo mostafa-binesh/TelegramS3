@@ -63,8 +63,10 @@ staging, and recovery artifacts, not committed payloads.
   process-local sample of recent public/admin/S3 reads, separating first-chunk,
   Telegram, retry-wait, decrypt, checksum-verify, and total timings for live
   performance testing, together with client-downloaded and Telegram-read byte
-  totals. A stream that delivers its final bytes successfully is recorded as
-  completed even when the HTTP consumer closes without an extra terminal poll.
+  totals. It also reports the adaptive prefetch window and the Telegram bytes,
+  retries, chunks, and duration attributed to each account. A stream that
+  delivers its final bytes successfully is recorded as completed even when the
+  HTTP consumer closes without an extra terminal poll.
   It is diagnostic telemetry, not durable accounting.
 - **Low-cost Overview polling** — storage counts and the logical committed
   Telegram payload size use a short-lived cached snapshot, while the
@@ -394,9 +396,12 @@ the database value is authoritative. The verifier defaults to one random chunk
 per committed object every five minutes and can be changed or disabled live
 from **Telegram settings → Storage policy**. The first remote scan runs at
 startup by default and can be deferred until the interval from the same
-setting. Download smoothing defaults to one
-extra verified chunk prefetched in parallel, accepts `0–4` extra chunks, and
-can also be changed live. Telegram
+setting. Download smoothing defaults to one extra verified chunk prefetched in
+parallel, accepts `0–4` extra chunks, and can also be changed live. The reader
+starts conservatively, ramps up after clean reads, and backs off after retries
+or throughput drops. It keeps at most one active Telegram payload read per
+account so replicas can add parallel capacity without making one account
+compete with itself. Telegram
 API IDs and storage chat IDs are validated as numeric values
 before persistence; connection refresh failures are returned as JSON warnings
 from the admin API rather than as proxy-level failures.

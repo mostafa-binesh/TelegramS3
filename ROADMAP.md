@@ -245,13 +245,17 @@ Completed in this increment:
 - download streams now support a bounded, database-backed parallel prefetch
   window of `0–4` extra verified chunks, configurable from Telegram settings;
   output order, checksum boundaries, and memory use remain bounded
+- the prefetch window is adaptive: it ramps up after clean reads and backs off
+  after retries or measured throughput drops, while a per-account limiter keeps
+  one account from competing with itself
 - the shared download reader now delivers the first requested chunk before
   opening speculative prefetch, reducing time to first byte without changing
   the ordered `0–4` concurrency bound
 - the Overview includes a bounded Download stage metrics testing section for
   recent public/admin/S3 reads, exposing first-chunk, Telegram, retry-wait,
   decrypt, checksum-verify, and total timings without adding per-read SQLite
-  writes; it also reports client/Telegram byte totals and treats complete
+  writes; it also reports client/Telegram byte totals, adaptive-window values,
+  and per-account Telegram bytes/retries/duration, and treats complete
   final-byte delivery as completed when a response consumer closes early
 - the Overview caches manifest-derived object counts and unique Telegram
   payload size for five seconds; its five-second refresh uses the cheap

@@ -177,7 +177,11 @@ parallel. The policy is stored in metadata schema v13, defaults to one extra
 chunk, and can be set from zero through four in Telegram settings. Prefetching
 does not change object durability or manifest layout: each chunk is still
 verified before delivery, output remains ordered, and outstanding work is
-cancelled when the client stream ends.
+cancelled when the client stream ends. The adaptive scheduler starts small,
+ramps up after clean reads, and backs off after retries or measured throughput
+drops. A per-account limiter allows at most one active Telegram payload read per
+account, while enabled physical replicas can still serve different chunks in
+parallel.
 
 The first requested chunk is fetched before speculative prefetch begins to
 reduce time to first byte. The authenticated Overview's Download stage metrics

@@ -17,6 +17,7 @@ use crate::telegram::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use grammers_client::media::Media;
 use grammers_client::message::InputMessage;
 use rand_core::{OsRng, RngCore};
@@ -26,9 +27,11 @@ use s3s::dto::StreamingBlob;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, File};
+use std::future::Future;
 use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration as StdDuration, Instant as StdInstant};
@@ -36,6 +39,7 @@ use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tokio::fs as async_fs;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -69,6 +73,10 @@ const OVERVIEW_STATUS_CACHE_TTL: StdDuration = StdDuration::from_secs(5);
 pub const TELEGRAM_STREAM_RECOVERY_WINDOW_SECS: u64 = 120;
 const TELEGRAM_STREAM_RECOVERY_WINDOW: StdDuration =
     StdDuration::from_secs(TELEGRAM_STREAM_RECOVERY_WINDOW_SECS);
+/// Keep one active Telegram payload read per account. A prefetch window may
+/// still overlap different replicated accounts, but it cannot turn one
+/// account's rate limit into several competing reads.
+const TELEGRAM_ACCOUNT_DOWNLOAD_CONCURRENCY: usize = 1;
 pub const RESERVED_BUCKET_NAMES: [&str; 2] = ["_public", "_admin"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -476,6 +484,7 @@ pub struct ObjectFormatService {
     traffic: Arc<TrafficCounters>,
     download_stage_metrics: Arc<DownloadStageMetricsStore>,
     account_managers: Arc<Mutex<HashMap<String, Arc<TelegramTransportManager>>>>,
+    account_download_limits: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
 /// Payload counters displayed by the operator overview.
@@ -516,6 +525,9 @@ pub struct DownloadStageSample {
     pub client_bytes: u64,
     pub telegram_bytes: u64,
     pub telegram_retries: u64,
+    pub prefetch_window_max: u64,
+    pub prefetch_window_final: u64,
+    pub accounts: Vec<DownloadAccountStageSample>,
     pub first_chunk_us: Option<u64>,
     pub telegram_us: u64,
     pub retry_wait_us: u64,
@@ -523,6 +535,15 @@ pub struct DownloadStageSample {
     pub verify_us: u64,
     pub total_us: u64,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DownloadAccountStageSample {
+    pub account_id: String,
+    pub chunks: u64,
+    pub telegram_bytes: u64,
+    pub telegram_retries: u64,
+    pub telegram_us: u64,
 }
 
 #[derive(Default)]
@@ -546,11 +567,22 @@ struct DownloadStageAccumulator {
     client_bytes: u64,
     telegram_bytes: u64,
     telegram_retries: u64,
+    prefetch_window_max: u64,
+    prefetch_window_final: u64,
+    accounts: BTreeMap<String, DownloadAccountStageAccumulator>,
     first_chunk_us: Option<u64>,
     telegram_us: u64,
     retry_wait_us: u64,
     decrypt_us: u64,
     verify_us: u64,
+}
+
+#[derive(Default)]
+struct DownloadAccountStageAccumulator {
+    chunks: u64,
+    telegram_bytes: u64,
+    telegram_retries: u64,
+    telegram_us: u64,
 }
 
 struct DownloadStageGuard {
@@ -563,6 +595,7 @@ impl DownloadStageMetricsStore {
         self: &Arc<Self>,
         surface: &'static str,
         expected_client_bytes: u64,
+        prefetch_window_max: u64,
     ) -> DownloadStageGuard {
         self.active_requests.fetch_add(1, Ordering::Relaxed);
         if surface == "diagnostic-test" {
@@ -582,6 +615,9 @@ impl DownloadStageMetricsStore {
                 client_bytes: 0,
                 telegram_bytes: 0,
                 telegram_retries: 0,
+                prefetch_window_max,
+                prefetch_window_final: 1,
+                accounts: BTreeMap::new(),
                 first_chunk_us: None,
                 telegram_us: 0,
                 retry_wait_us: 0,
@@ -627,6 +663,19 @@ impl DownloadStageMetricsStore {
             client_bytes: sample.client_bytes,
             telegram_bytes: sample.telegram_bytes,
             telegram_retries: sample.telegram_retries,
+            prefetch_window_max: sample.prefetch_window_max,
+            prefetch_window_final: sample.prefetch_window_final,
+            accounts: sample
+                .accounts
+                .into_iter()
+                .map(|(account_id, account)| DownloadAccountStageSample {
+                    account_id,
+                    chunks: account.chunks,
+                    telegram_bytes: account.telegram_bytes,
+                    telegram_retries: account.telegram_retries,
+                    telegram_us: account.telegram_us,
+                })
+                .collect(),
             first_chunk_us: sample.first_chunk_us,
             telegram_us: sample.telegram_us,
             retry_wait_us: sample.retry_wait_us,
@@ -660,10 +709,26 @@ impl DownloadStageGuard {
         sample.telegram_retries = sample
             .telegram_retries
             .saturating_add(result.telegram_retries);
+        let account = sample
+            .accounts
+            .entry(result.account_id.clone())
+            .or_default();
+        account.chunks = account.chunks.saturating_add(1);
+        account.telegram_bytes = account.telegram_bytes.saturating_add(result.telegram_bytes);
+        account.telegram_retries = account
+            .telegram_retries
+            .saturating_add(result.telegram_retries);
+        account.telegram_us = account.telegram_us.saturating_add(result.telegram_us);
         sample.telegram_us = sample.telegram_us.saturating_add(result.telegram_us);
         sample.retry_wait_us = sample.retry_wait_us.saturating_add(result.retry_wait_us);
         sample.decrypt_us = sample.decrypt_us.saturating_add(result.decrypt_us);
         sample.verify_us = sample.verify_us.saturating_add(result.verify_us);
+    }
+
+    fn record_prefetch_window(&mut self, window: usize) {
+        if let Some(sample) = self.sample.as_mut() {
+            sample.prefetch_window_final = window as u64;
+        }
     }
 
     fn record_emitted(&mut self, bytes: u64) -> bool {
@@ -784,6 +849,178 @@ impl Drop for ReceivingGuard {
             files_removed,
             "Upload reception failed before durable acceptance; resend the source file",
         );
+    }
+}
+
+type ReadSpanFuture = Pin<Box<dyn Future<Output = Result<ReadSpanResult, io::Error>> + Send>>;
+type IndexedReadFuture =
+    Pin<Box<dyn Future<Output = (usize, Result<ReadSpanResult, io::Error>)> + Send>>;
+
+struct ReadPipeline {
+    object_format: Arc<ObjectFormatService>,
+    manifest: ObjectManifest,
+    first: Option<ReadSpanFuture>,
+    remaining: Option<AdaptiveReadWindow>,
+    spans: Vec<ReadSpan>,
+    max_window: usize,
+}
+
+impl ReadPipeline {
+    fn new(
+        object_format: Arc<ObjectFormatService>,
+        manifest: ObjectManifest,
+        spans: Vec<ReadSpan>,
+        max_window: usize,
+    ) -> Self {
+        let first = spans.first().cloned().map(|span| {
+            let object_format = Arc::clone(&object_format);
+            let manifest = manifest.clone();
+            Box::pin(read_stream_span(object_format, manifest, span)) as ReadSpanFuture
+        });
+        Self {
+            object_format,
+            manifest,
+            first,
+            remaining: None,
+            spans,
+            max_window,
+        }
+    }
+
+    async fn next(&mut self) -> Option<Result<ReadSpanResult, io::Error>> {
+        if let Some(first) = self.first.take() {
+            let result = first.await;
+            if result.is_ok() {
+                self.remaining = Some(AdaptiveReadWindow::new(
+                    Arc::clone(&self.object_format),
+                    self.manifest.clone(),
+                    self.spans.iter().skip(1).cloned().collect(),
+                    self.max_window,
+                ));
+            }
+            return Some(result);
+        }
+        self.remaining.as_mut()?.next().await
+    }
+
+    fn current_window(&self) -> usize {
+        self.remaining
+            .as_ref()
+            .map_or(1, AdaptiveReadWindow::window)
+    }
+}
+
+struct AdaptiveReadWindow {
+    object_format: Arc<ObjectFormatService>,
+    manifest: ObjectManifest,
+    spans: Vec<ReadSpan>,
+    next_to_schedule: usize,
+    next_to_emit: usize,
+    pending: FuturesUnordered<IndexedReadFuture>,
+    ready: BTreeMap<usize, Result<ReadSpanResult, io::Error>>,
+    window: usize,
+    max_window: usize,
+    clean_streak: u8,
+    throughput_ewma: Option<f64>,
+}
+
+impl AdaptiveReadWindow {
+    fn new(
+        object_format: Arc<ObjectFormatService>,
+        manifest: ObjectManifest,
+        spans: Vec<ReadSpan>,
+        max_window: usize,
+    ) -> Self {
+        Self {
+            object_format,
+            manifest,
+            spans,
+            next_to_schedule: 0,
+            next_to_emit: 0,
+            pending: FuturesUnordered::new(),
+            ready: BTreeMap::new(),
+            window: max_window.clamp(1, 2),
+            max_window,
+            clean_streak: 0,
+            throughput_ewma: None,
+        }
+    }
+
+    fn window(&self) -> usize {
+        self.window
+    }
+
+    fn fill(&mut self) {
+        while self.next_to_schedule < self.spans.len()
+            && self.pending.len() + self.ready.len() < self.window
+        {
+            let sequence = self.next_to_schedule;
+            let span = self.spans[sequence].clone();
+            let object_format = Arc::clone(&self.object_format);
+            let manifest = self.manifest.clone();
+            self.pending.push(Box::pin(async move {
+                (
+                    sequence,
+                    read_stream_span(object_format, manifest, span).await,
+                )
+            }));
+            self.next_to_schedule += 1;
+        }
+    }
+
+    fn observe(&mut self, result: &Result<ReadSpanResult, io::Error>) {
+        let Ok(result) = result else {
+            self.window = (self.window / 2).max(1);
+            self.clean_streak = 0;
+            return;
+        };
+        if result.telegram_retries > 0 {
+            self.window = self.window.saturating_sub(1).max(1);
+            self.clean_streak = 0;
+        } else {
+            let throughput = if result.telegram_us == 0 {
+                None
+            } else {
+                Some(result.telegram_bytes as f64 / result.telegram_us as f64)
+            };
+            let slowed_down = throughput
+                .zip(self.throughput_ewma)
+                .is_some_and(|(current, baseline)| self.window > 1 && current < baseline * 0.70);
+            if slowed_down {
+                self.window = (self.window / 2).max(1);
+                self.clean_streak = 0;
+            } else {
+                self.clean_streak = self.clean_streak.saturating_add(1);
+                if self.clean_streak >= 2 && self.window < self.max_window {
+                    self.window += 1;
+                    self.clean_streak = 0;
+                }
+            }
+            if let Some(current) = throughput {
+                self.throughput_ewma = Some(match self.throughput_ewma {
+                    Some(previous) => previous * 0.8 + current * 0.2,
+                    None => current,
+                });
+            }
+        }
+    }
+
+    async fn next(&mut self) -> Option<Result<ReadSpanResult, io::Error>> {
+        self.fill();
+        loop {
+            if let Some(result) = self.ready.remove(&self.next_to_emit) {
+                self.next_to_emit += 1;
+                self.observe(&result);
+                self.fill();
+                return Some(result);
+            }
+            match self.pending.next().await {
+                Some((sequence, result)) => {
+                    self.ready.insert(sequence, result);
+                }
+                None => return None,
+            }
+        }
     }
 }
 
@@ -941,6 +1178,7 @@ impl ObjectFormatService {
             traffic: Arc::new(TrafficCounters::from_totals(traffic_totals)),
             download_stage_metrics: Arc::new(DownloadStageMetricsStore::default()),
             account_managers: Arc::new(Mutex::new(HashMap::new())),
+            account_download_limits: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -1319,6 +1557,28 @@ impl ObjectFormatService {
         if let Ok(mut managers) = self.account_managers.lock() {
             managers.remove(account_id);
         }
+        if let Ok(mut limits) = self.account_download_limits.lock() {
+            limits.remove(account_id);
+        }
+    }
+
+    fn account_download_limit(&self, account_id: &str) -> Arc<Semaphore> {
+        if let Ok(mut limits) = self.account_download_limits.lock() {
+            return Arc::clone(limits.entry(account_id.to_string()).or_insert_with(|| {
+                Arc::new(Semaphore::new(TELEGRAM_ACCOUNT_DOWNLOAD_CONCURRENCY))
+            }));
+        }
+        Arc::new(Semaphore::new(TELEGRAM_ACCOUNT_DOWNLOAD_CONCURRENCY))
+    }
+
+    async fn acquire_account_download_permit(
+        &self,
+        account_id: &str,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, io::Error> {
+        self.account_download_limit(account_id)
+            .acquire_owned()
+            .await
+            .map_err(|_| io::Error::other("Telegram account download limiter closed"))
     }
 
     pub fn create_share_link(
@@ -2821,42 +3081,25 @@ impl ObjectFormatService {
     ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + 'static + use<> {
         let pin = this.pin_object(manifest.object_id);
         let expected_client_bytes = spans.iter().map(|span| span.length).sum();
-        let stage = this
-            .download_stage_metrics
-            .start(surface, expected_client_bytes);
-        let concurrency = usize::try_from(this.download_prefetch_chunks().saturating_add(1))
+        let max_window = usize::try_from(this.download_prefetch_chunks().saturating_add(1))
             .unwrap_or(usize::MAX)
             .max(1);
-        let mut spans = spans.into_iter();
-        let first_span = spans.next();
-        let remaining_spans = spans.collect::<Vec<_>>();
-        let first = futures::stream::iter(first_span)
-            .map({
-                let object_format = Arc::clone(&this);
-                let manifest = manifest.clone();
-                move |span| read_stream_span(Arc::clone(&object_format), manifest.clone(), span)
-            })
-            .buffered(1);
-        let prefetched = futures::stream::iter(remaining_spans)
-            .map({
-                let object_format = Arc::clone(&this);
-                let manifest = manifest.clone();
-                move |span| read_stream_span(Arc::clone(&object_format), manifest.clone(), span)
-            })
-            .buffered(concurrency);
-        let buffered = first.chain(prefetched);
-        let buffered = Box::pin(buffered);
+        let stage =
+            this.download_stage_metrics
+                .start(surface, expected_client_bytes, max_window as u64);
+        let pipeline = ReadPipeline::new(Arc::clone(&this), manifest.clone(), spans, max_window);
         futures::stream::unfold(
-            (buffered, this, pin, stage, false),
-            |(mut buffered, object_format, pin, mut stage, done)| async move {
+            (pipeline, this, pin, stage, false),
+            |(mut pipeline, object_format, pin, mut stage, done)| async move {
                 if done {
                     stage.finish("cancelled", None);
                     return None;
                 }
-                match buffered.as_mut().next().await {
+                match pipeline.next().await {
                     Some(Ok(result)) => {
                         let length = result.length;
                         stage.record_chunk(&result);
+                        stage.record_prefetch_window(pipeline.current_window());
                         let complete = stage.record_emitted(length);
                         if complete {
                             // Some HTTP consumers drop the body immediately
@@ -2873,14 +3116,16 @@ impl ObjectFormatService {
                                 object_format.add_client_download_bytes(length);
                                 bytes
                             }),
-                            (buffered, object_format, pin, stage, false),
+                            (pipeline, object_format, pin, stage, false),
                         ))
                     }
                     Some(Err(error)) => {
+                        stage.record_prefetch_window(pipeline.current_window());
                         stage.finish("failed", Some(error.to_string()));
-                        Some((Err(error), (buffered, object_format, pin, stage, true)))
+                        Some((Err(error), (pipeline, object_format, pin, stage, true)))
                     }
                     None => {
+                        stage.record_prefetch_window(pipeline.current_window());
                         stage.finish("completed", None);
                         None
                     }
@@ -4236,6 +4481,16 @@ async fn read_stream_span(
                 continue;
             }
         };
+        let permit = match object_format
+            .acquire_account_download_permit(account_id)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
         let result = if *is_primary {
             object_format
                 .download_message_bytes_for_stream(message_id)
@@ -4253,9 +4508,10 @@ async fn read_stream_span(
                 Err(error) => Err(io::Error::other(error.to_string())),
             }
         };
+        drop(permit);
         match result {
             Ok(telegram) => {
-                telegram_result = Some(telegram);
+                telegram_result = Some((account_id.clone(), telegram));
                 break;
             }
             Err(error) => {
@@ -4273,7 +4529,7 @@ async fn read_stream_span(
             }
         }
     }
-    let telegram = telegram_result.ok_or_else(|| {
+    let (account_id, telegram) = telegram_result.ok_or_else(|| {
         last_error.unwrap_or_else(|| io::Error::other("all Telegram account read attempts failed"))
     })?;
     let telegram_bytes = telegram.bytes.len() as u64;
@@ -4317,6 +4573,7 @@ async fn read_stream_span(
         ));
     }
     Ok(ReadSpanResult {
+        account_id,
         length: span.length,
         bytes: Bytes::copy_from_slice(&plaintext[start..end]),
         telegram_bytes,
@@ -4338,6 +4595,7 @@ fn account_failover_candidate_index(
 }
 
 struct ReadSpanResult {
+    account_id: String,
     length: u64,
     bytes: Bytes,
     telegram_bytes: u64,
@@ -4560,6 +4818,72 @@ mod tests {
         assert_eq!(attempts, vec![1, 1, 2, 2, 0, 0]);
         assert_eq!(account_failover_candidate_index(0, 2, 1, 0), 0);
         assert_eq!(account_failover_candidate_index(0, 2, 1, 1), 1);
+    }
+
+    #[tokio::test]
+    async fn account_download_limiter_serializes_reads_per_account() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        let first = service
+            .acquire_account_download_permit("same-account")
+            .await
+            .expect("first permit");
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            service.acquire_account_download_permit("same-account"),
+        )
+        .await;
+        assert!(blocked.is_err(), "one account must have one active read");
+        drop(first);
+        let _second = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            service.acquire_account_download_permit("same-account"),
+        )
+        .await
+        .expect("released permit")
+        .expect("second permit");
+    }
+
+    #[tokio::test]
+    async fn adaptive_prefetch_ramps_up_and_backs_off_on_slow_or_retrying_reads() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = Arc::new(sample_service(&tempdir).await);
+        let manifest = service
+            .put_bytes(
+                "bucket",
+                "adaptive.bin",
+                "application/octet-stream",
+                &[7; 4096],
+            )
+            .await
+            .expect("put");
+        let spans = ObjectFormatService::plan_read(&manifest, 0..4096)
+            .expect("read plan")
+            .chunks;
+        let mut window = AdaptiveReadWindow::new(Arc::clone(&service), manifest, spans, 4);
+        assert_eq!(window.window(), 2);
+        let clean = |telegram_us, telegram_retries| ReadSpanResult {
+            account_id: "same-account".to_string(),
+            length: 1024,
+            bytes: Bytes::new(),
+            telegram_bytes: 1024,
+            telegram_retries,
+            telegram_us,
+            retry_wait_us: 0,
+            decrypt_us: 0,
+            verify_us: 0,
+        };
+        window.observe(&Ok(clean(1_000, 0)));
+        window.observe(&Ok(clean(1_000, 0)));
+        assert_eq!(window.window(), 3, "clean reads should ramp slowly");
+        window.observe(&Ok(clean(2_000, 0)));
+        assert_eq!(window.window(), 1, "a throughput drop should back off");
+        window.observe(&Ok(clean(1_000, 1)));
+        assert_eq!(
+            window.window(),
+            1,
+            "a retry should keep the window conservative"
+        );
     }
 
     #[test]

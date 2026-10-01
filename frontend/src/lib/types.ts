@@ -149,6 +149,9 @@ export interface DownloadStageSample {
   client_bytes: number;
   telegram_bytes: number;
   telegram_retries: number;
+  prefetch_window_max?: number;
+  prefetch_window_final?: number;
+  accounts?: DownloadAccountStageSample[];
   first_chunk_us?: number | null;
   telegram_us: number;
   retry_wait_us: number;
@@ -156,6 +159,14 @@ export interface DownloadStageSample {
   verify_us: number;
   total_us: number;
   error?: string | null;
+}
+
+export interface DownloadAccountStageSample {
+  account_id: string;
+  chunks: number;
+  telegram_bytes: number;
+  telegram_retries: number;
+  telegram_us: number;
 }
 
 export interface DownloadStageMetrics {

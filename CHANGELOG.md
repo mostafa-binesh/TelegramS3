@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.6-rc.23 - 2026-10-02
+
+### Account-aware adaptive download prefetch
+
+- Added an adaptive ordered prefetch scheduler. It starts conservatively, ramps
+  up after clean reads, and backs off after retries or measured throughput drops.
+- Added a per-account Telegram read limiter so concurrent prefetch cannot make a
+  single account compete with itself; enabled physical replicas can still serve
+  different chunks in parallel.
+- Extended Download stage metrics with the maximum/final prefetch window and
+  per-account chunk, byte, retry, and Telegram-duration totals.
+- Added Rust coverage for per-account serialization and adaptive ramp/backoff,
+  plus Overview rendering for per-account diagnostics.
+- Updated the storage, recovery, compatibility, roadmap, configuration, and
+  architecture documentation.
+
 ## 0.7.6-rc.22 - 2026-09-30
 
 ### Verifier scheduling and download metrics corrections

@@ -20,6 +20,14 @@ concurrency is `prefetch + 1`, so the current chunk and only the configured
 look-ahead window can be active. Results are emitted in manifest order even if
 later Telegram requests finish first.
 
+The configured value is a ceiling for an adaptive window. The reader starts
+with a small window, grows it after clean reads, and backs it off after retries
+or measured throughput drops. A per-account semaphore permits only one active
+Telegram payload read for an account; different enabled physical replicas may
+therefore provide parallel capacity without multiplying pressure on one
+account. Download stage diagnostics record the final/max window and per-account
+bytes, retries, chunks, and Telegram duration.
+
 Every prefetched result must complete remote download, decryption, and checksum
 verification before it enters the output stream. Client traffic counters are
 incremented only when a verified result is emitted. A stream error terminates

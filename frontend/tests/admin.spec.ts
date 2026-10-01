@@ -73,6 +73,9 @@ const overview = {
       client_bytes: 8_388_608,
       telegram_bytes: 8_400_000,
       telegram_retries: 1,
+      prefetch_window_max: 3,
+      prefetch_window_final: 2,
+      accounts: [{ account_id: 'primary', chunks: 3, telegram_bytes: 8_400_000, telegram_retries: 1, telegram_us: 3_200_000 }],
       first_chunk_us: 1_250_000,
       telegram_us: 3_200_000,
       retry_wait_us: 50_000,
@@ -86,7 +89,8 @@ const overview = {
     session_state: 'authorized',
     connection_state: 'connected',
     detail: 'mock storage chat reachable',
-    storage_chat_id: '-1001234567890'
+    storage_chat_id: '-1001234567890',
+    accounts: [{ id: 'primary', label: 'Primary account', state: 'connected', detail: 'mock storage chat reachable', connected: true, download_enabled: true }]
   },
   checks: [
     { label: 'Telegram storage', ok: true, detail: 'mock storage chat reachable' },
@@ -154,7 +158,8 @@ async function mockAdminApi(
         request_id: 99, surface: 'diagnostic-test', started_at: '2026-01-01T00:00:00Z', status: 'completed',
         chunks: 1, client_bytes: 1_048_576, telegram_bytes: 1_050_000, telegram_retries: 0,
         first_chunk_us: 2_000_000, telegram_us: 1_800_000, retry_wait_us: 0, decrypt_us: 1_100,
-        verify_us: 2_100, total_us: 3_900_000, error: null
+        verify_us: 2_100, total_us: 3_900_000, prefetch_window_max: 2, prefetch_window_final: 1,
+        accounts: [{ account_id: 'primary', chunks: 1, telegram_bytes: 1_050_000, telegram_retries: 0, telegram_us: 1_800_000 }], error: null
       };
       return route.fulfill({ json: { ok: true, sample: stageTestSample } });
     }
@@ -433,10 +438,13 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
   await expect(page.getByRole('heading', { name: 'Download stage metrics' })).toBeVisible();
   await expect(page.getByRole('table', { name: 'Recent download stage timings' })).toBeVisible();
   await expect(page.getByRole('table', { name: 'Recent download stage timings' })).toContainText('8.0 MiB');
+  await expect(page.getByRole('table', { name: 'Recent download stage timings' })).toContainText('Primary account');
   const stageTestRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/_admin/api/stage-metrics/test' && request.method() === 'POST');
   await page.getByRole('button', { name: 'Run test' }).click();
   await stageTestRequest;
   await expect(page.getByLabel('Last diagnostic stage test')).toContainText('diagnostic test');
+  await expect(page.getByLabel('Last diagnostic stage test')).toContainText('Prefetch');
+  await expect(page.getByLabel('Diagnostic Telegram account usage')).toContainText('Primary account');
   await expect(page.getByText('public', { exact: true })).toBeVisible();
   await expect(page.getByText('1.3s', { exact: true })).toBeVisible();
   await page.getByRole('tab', { name: 'Total' }).click();
