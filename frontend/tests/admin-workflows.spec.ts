@@ -51,6 +51,7 @@ const overview = {
 
 type MockOptions = {
   shareFailure?: boolean;
+  objectDetailsFailure?: boolean;
   storageFailure?: boolean;
   recoveryIssue?: Record<string, unknown>;
   activeUpload?: boolean;
@@ -80,7 +81,8 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
   const shareLinksByKey = new Map([
     ['readme.txt', [
       { id: 'share-1', url: '/_public/mock-share-token-1', description: 'Team handoff', created_at: '2026-01-01T00:00:00Z', expires_at: '2026-02-01T00:00:00Z', status: 'active' },
-      { id: 'share-2', url: '/_public/mock-share-token-2', description: 'External reviewer', created_at: '2026-01-02T00:00:00Z', expires_at: null, status: 'active' }
+      { id: 'share-2', url: '/_public/mock-share-token-2', description: 'External reviewer', created_at: '2026-01-02T00:00:00Z', expires_at: null, status: 'active' },
+      { id: 'share-3', url: '/_public/mock-share-token-3', description: 'Mobile preview', created_at: '2026-01-03T00:00:00Z', expires_at: null, status: 'active' }
     ]],
     ['archive.bin', []]
   ]);
@@ -192,6 +194,40 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
           ];
       return route.fulfill({ json: { prefix, folders: prefix ? [] : [...createdFolders].filter((folder) => !deletedKeys.has(`${folder}/`)), objects: objects.filter((object) => !deletedKeys.has(object.key)) } });
     }
+    if (path === '/objects/details' && request.method() === 'GET') {
+      if (options.objectDetailsFailure) return route.fulfill({ status: 503, json: { error: 'object details are temporarily unavailable' } });
+      const query = new URL(request.url()).searchParams;
+      return route.fulfill({ json: {
+        name: query.get('key') === 'readme.txt' ? 'readme.txt' : 'archive.bin',
+        bucket: query.get('bucket') ?? 'release-test',
+        key: query.get('key') ?? 'readme.txt',
+        object_id: 'object-readme-1',
+        schema_version: 2,
+        commit_state: 'committed',
+        version_id: 'version-readme-1',
+        size: 12 * 1024 * 1024,
+        content_type: 'text/plain',
+        last_modified: '2026-01-01T00:00:00Z',
+        expires_at: null,
+        etag: 'etag-readme',
+        checksum_algorithm: 'sha256',
+        encryption_enabled: true,
+        encryption_format: 'aes-gcm',
+        encryption_key_id: 'key-1',
+        user_metadata: { 'x-amz-meta-owner': 'release-team' },
+        tags: { environment: 'test' },
+        shared_links: 3,
+        replica_accounts: 2,
+        access_accounts: 1,
+        replica_chunk_size_mismatch: false,
+        rechunking: false,
+        telegram: { peer_id: '-1001234567890', message_id: 100, document_id: 'manifest-doc-1' },
+        chunks: [
+          { order: 0, offset: 0, size: 8 * 1024 * 1024, checksum: 'chunk-checksum-1', telegram: { peer_id: '-1001234567890', message_id: 101, document_id: 'chunk-doc-1' }, source_object_id: null, source_chunk_order: null, replicas: [{ account_id: 'account-2', mode: 'replica', chunk_size: 8 * 1024 * 1024, telegram: { peer_id: '-1001234567891', message_id: 201, document_id: 'chunk-doc-replica-1' } }] },
+          { order: 1, offset: 8 * 1024 * 1024, size: 4 * 1024 * 1024, checksum: 'chunk-checksum-2', telegram: { peer_id: '-1001234567890', message_id: 102, document_id: 'chunk-doc-2' }, source_object_id: null, source_chunk_order: null, replicas: [] }
+        ]
+      } });
+    }
     if (path === '/objects/share' && request.method() === 'POST') {
       if (options.shareFailure) return route.fulfill({ status: 400, json: { error: 'share creation failed for this test' } });
       const body = request.postDataJSON() as { bucket: string; key: string; expires_in_seconds?: number; description?: string };
@@ -302,6 +338,23 @@ async function openBucket(page: Page) {
   await expect(page.getByRole('heading', { name: 'Bucket / release-test' })).toBeVisible();
 }
 
+async function openObjectActions(page: Page, name: string) {
+  const row = page.locator('.kv-table tbody tr').filter({ hasText: name }).last();
+  await row.getByRole('button', { name: `Actions for ${name}` }).click();
+  return page.getByRole('menu', { name: `Actions for ${name}` });
+}
+
+async function clickObjectAction(page: Page, name: string, action: string) {
+  const menu = await openObjectActions(page, name);
+  await menu.getByRole('menuitem', { name: action, exact: true }).click();
+}
+
+async function clickFolderAction(page: Page, name: string, action: string) {
+  const row = page.locator('.kv-table tbody tr').filter({ hasText: `${name}/` }).first();
+  await row.getByRole('button', { name: `Actions for folder ${name}` }).click();
+  await page.getByRole('menu', { name: `Actions for folder ${name}` }).getByRole('menuitem', { name: action, exact: true }).click();
+}
+
 test('bucket browser shows S3 uploads with part progress while they are in flight', async ({ page }) => {
   await mockAdminApi(page, { activeUpload: true });
   await signIn(page);
@@ -379,9 +432,9 @@ test('share modal uses an expiry preset, sends the correct payload, displays, an
   await signIn(page);
   await openBucket(page);
 
-  const shareButton = page.getByRole('button', { name: 'Share readme.txt' });
-  await expect(shareButton).toHaveAttribute('title', 'Share readme.txt');
-  await shareButton.click();
+  const shareMenu = await openObjectActions(page, 'readme.txt');
+  await expect(shareMenu.getByRole('menuitem', { name: 'Share', exact: true })).toBeVisible();
+  await shareMenu.getByRole('menuitem', { name: 'Share', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Share readme.txt' })).toBeVisible();
   await page.getByRole('button', { name: '1 day', exact: true }).click();
   await expect(page.getByLabel('Link lifetime')).toHaveValue('86400');
@@ -408,12 +461,48 @@ test('share modal uses an expiry preset, sends the correct payload, displays, an
   await publicPage.close();
 });
 
+test('object information action loads the complete manifest and chunk layout on demand', async ({ page }) => {
+  await mockAdminApi(page);
+  await signIn(page);
+  await openBucket(page);
+
+  const menu = await openObjectActions(page, 'readme.txt');
+  const detailsRequest = page.waitForRequest((candidate) => candidate.url().includes('/_admin/api/objects/details?') && candidate.method() === 'GET');
+  await menu.getByRole('menuitem', { name: 'Information', exact: true }).click();
+  const request = await detailsRequest;
+  const query = new URL(request.url()).searchParams;
+  expect(query.get('bucket')).toBe('release-test');
+  expect(query.get('key')).toBe('readme.txt');
+
+  await expect(page.getByText('Object information')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'readme.txt' })).toBeVisible();
+  await expect(page.getByText('12 MiB')).toBeVisible();
+  await expect(page.getByText('2 stored chunks')).toBeVisible();
+  await expect(page.getByText('text/plain')).toBeVisible();
+  await expect(page.getByText('x-amz-meta-owner')).toBeVisible();
+  await expect(page.getByText('chunk-checksum-1')).toBeVisible();
+  await expect(page.getByText(/manifest-doc-1/)).toBeVisible();
+  await page.getByRole('button', { name: 'Close object information' }).click();
+  await expect(page.getByText('Object information')).toBeHidden();
+});
+
+test('object information action keeps the row menu usable when manifest details fail', async ({ page }) => {
+  await mockAdminApi(page, { objectDetailsFailure: true });
+  await signIn(page);
+  await openBucket(page);
+  await clickObjectAction(page, 'archive.bin', 'Information');
+  await expect(page.getByRole('alert')).toContainText('object details are temporarily unavailable');
+  await expect(page.getByRole('button', { name: 'Close object information' })).toBeVisible();
+  await page.getByRole('button', { name: 'Close object information' }).click();
+  await expect(page.getByText('Object information')).toBeHidden();
+});
+
 for (const seconds of [10, 30]) {
   test(`share modal accepts an arbitrary ${seconds}-second lifetime`, async ({ page }) => {
     await mockAdminApi(page);
     await signIn(page);
     await openBucket(page);
-    await page.getByRole('button', { name: 'Share readme.txt' }).click();
+    await clickObjectAction(page, 'readme.txt', 'Share');
     await expect(page.locator('.duration-unit')).toHaveText('seconds');
     await page.getByLabel('Link lifetime').fill(String(seconds));
 
@@ -430,7 +519,7 @@ test('share modal supports a never-expire link and surfaces creation errors', as
   await mockAdminApi(page, { shareFailure: true });
   await signIn(page);
   await openBucket(page);
-  await page.getByRole('button', { name: 'Share archive.bin' }).click();
+  await clickObjectAction(page, 'archive.bin', 'Share');
   await page.getByRole('button', { name: 'Never', exact: true }).click();
   const request = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/share') && candidate.method() === 'POST');
   await page.getByRole('button', { name: 'Create share link' }).click();
@@ -444,14 +533,20 @@ test('shared-link manager lists links, updates expiry, copies, and revokes', asy
   await signIn(page);
   await openBucket(page);
 
-  const manageButton = page.getByRole('button', { name: 'Manage shared links for readme.txt' });
-  await expect(manageButton.locator('.action-badge')).toHaveText('2');
+  const managerRow = page.locator('.kv-table tbody tr').filter({ hasText: 'readme.txt' }).last();
+  const manageButton = managerRow.getByRole('button', { name: 'Actions for readme.txt' });
   await manageButton.click();
+  const linksMenu = page.getByRole('menu', { name: 'Actions for readme.txt' });
+  await expect(linksMenu.getByRole('menuitem', { name: /Manage shared links/ })).toContainText('(3)');
+  await linksMenu.getByRole('menuitem', { name: /Manage shared links/ }).click();
   await expect(page.getByRole('heading', { name: 'Shared links' })).toBeVisible();
   await expect(page.getByText('Team handoff')).toBeVisible();
   await expect(page.getByText('External reviewer')).toBeVisible();
+  await expect(page.getByText('Mobile preview')).toBeVisible();
+  await expect(page.locator('.link-card')).toHaveCount(3);
   await expect(page.getByLabel('Shared URL Team handoff')).toHaveValue(/mock-share-token-1$/);
 
+  await page.locator('.link-card').filter({ hasText: 'Team handoff' }).getByRole('button', { name: /Change expiry/ }).click();
   const firstExpiry = page.getByLabel('Change expiry for Team handoff');
   const updateRequest = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/shares/share-1') && candidate.method() === 'PATCH');
   await firstExpiry.selectOption('custom');
@@ -469,7 +564,9 @@ test('shared-link manager lists links, updates expiry, copies, and revokes', asy
   await page.getByRole('button', { name: 'Revoke', exact: true }).click();
   await revokeRequest;
   await expect(page.getByText('Team handoff')).toBeHidden();
-  await expect(manageButton.locator('.action-badge')).toHaveText('1');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await manageButton.click();
+  await expect(page.getByRole('menu', { name: 'Actions for readme.txt' }).getByRole('menuitem', { name: /Manage shared links/ })).toContainText('(2)');
 });
 
 test('object deletion hides the item, while non-empty folder deletion is rejected', async ({ page }) => {
@@ -477,31 +574,31 @@ test('object deletion hides the item, while non-empty folder deletion is rejecte
   await signIn(page);
   await openBucket(page);
 
-  const folderDeleteAction = await page.getByRole('button', { name: 'Delete folder docs' }).boundingBox();
-  const objectDeleteAction = await page.getByRole('button', { name: 'Delete readme.txt' }).boundingBox();
+  const folderDeleteAction = await page.getByRole('button', { name: 'Actions for folder docs' }).boundingBox();
+  const objectDeleteAction = await page.getByRole('button', { name: 'Actions for readme.txt' }).boundingBox();
   expect(folderDeleteAction).not.toBeNull();
   expect(objectDeleteAction).not.toBeNull();
   if (!folderDeleteAction || !objectDeleteAction) throw new Error('delete actions were not rendered');
   expect(Math.abs((folderDeleteAction.x + folderDeleteAction.width) - (objectDeleteAction.x + objectDeleteAction.width))).toBeLessThan(2);
 
-  await page.getByRole('button', { name: 'Delete readme.txt' }).click();
+  await clickObjectAction(page, 'readme.txt', 'Delete');
   await expect(page.getByRole('heading', { name: 'Delete object?' })).toBeVisible();
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(page.getByText('readme.txt')).toBeVisible();
 
   const objectDelete = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/delete') && candidate.method() === 'POST');
-  await page.getByRole('button', { name: 'Delete readme.txt' }).click();
+  await clickObjectAction(page, 'readme.txt', 'Delete');
   await page.locator('.compact-modal').getByRole('button', { name: 'Delete', exact: true }).click();
   expect((await objectDelete).postDataJSON()).toMatchObject({ bucket: 'release-test', key: 'readme.txt' });
   await expect(page.getByText('readme.txt')).toBeHidden();
 
   const folderDelete = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/delete') && candidate.method() === 'POST');
-  await page.getByRole('button', { name: 'Delete folder docs' }).click();
+  await clickFolderAction(page, 'docs', 'Delete folder');
   await expect(page.getByRole('heading', { name: 'Delete folder?' })).toBeVisible();
   await page.locator('.compact-modal').getByRole('button', { name: 'Delete', exact: true }).click();
   expect((await folderDelete).postDataJSON()).toMatchObject({ bucket: 'release-test', key: 'docs/' });
   await expect(page.getByRole('alert')).toContainText('folder not empty: docs/');
-  await expect(page.getByRole('button', { name: 'Delete folder docs' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Actions for folder docs' })).toBeVisible();
 });
 
 test('nested object deletion does not duplicate the folder prefix', async ({ page }) => {
@@ -514,7 +611,7 @@ test('nested object deletion does not duplicate the folder prefix', async ({ pag
   await expect(page.getByText('Hoomaan - Khatere (SPOTISAVER).mp3')).toBeVisible();
 
   const deletion = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/objects/delete') && candidate.method() === 'POST');
-  await page.getByRole('button', { name: 'Delete Hoomaan - Khatere (SPOTISAVER).mp3' }).click();
+  await clickObjectAction(page, 'Hoomaan - Khatere (SPOTISAVER).mp3', 'Delete');
   await page.locator('.compact-modal').getByRole('button', { name: 'Delete', exact: true }).click();
   expect((await deletion).postDataJSON()).toMatchObject({ bucket: 'release-test', key });
 });
@@ -570,7 +667,8 @@ test('bucket creation, bucket deletion, and multi-selection deletion use guarded
   await expect(page.getByRole('button', { name: /^new-bucket created/ })).toBeVisible();
 
   const bucketDelete = page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/buckets/new-bucket') && candidate.method() === 'DELETE');
-  await page.getByRole('button', { name: 'Delete bucket new-bucket' }).click();
+  await page.getByRole('button', { name: 'Actions for bucket new-bucket' }).click();
+  await page.getByRole('menu', { name: 'Actions for bucket new-bucket' }).getByRole('menuitem', { name: 'Delete bucket', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Delete bucket?' })).toBeVisible();
   await expect(page.getByText('The bucket must already be empty.')).toBeVisible();
   await page.locator('.compact-modal').getByRole('button', { name: 'Delete', exact: true }).click();

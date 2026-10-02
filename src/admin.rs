@@ -18,7 +18,7 @@ use crate::auth::{self, AuthError, LoginLimiter};
 use crate::config::{
     AppConfig, normalize_telegram_storage_chat_id, validate_telegram_bootstrap_settings,
 };
-use crate::manifest::ObjectManifest;
+use crate::manifest::{ObjectManifest, ReplicaMode, TelegramLocation};
 use crate::metadata::{
     MetadataStore, RecoveryAck, RecoveryAcknowledgements, TelegramBootstrapSettings,
 };
@@ -44,6 +44,7 @@ use ring::hmac;
 use s3s::Body;
 use s3s::dto::StreamingBlob;
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, SocketAddr};
 use std::panic::AssertUnwindSafe;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -58,6 +59,35 @@ const ADMIN_SESSION_COOKIE: &str = "telegram_s3_admin_session";
 const ADMIN_COOKIE_PATH: &str = "/_admin";
 const ADMIN_SESSION_TTL_SECONDS: i64 = 8 * 60 * 60;
 const ADMIN_CSRF_HEADER: &str = "x-csrf-token";
+
+/// Peer address attached by the TCP accept loop. Reverse proxies normally
+/// provide the real client address through X-Forwarded-For or X-Real-IP.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ClientSocketAddr(pub(crate) SocketAddr);
+
+/// Identify the client for per-object download fairness. This is a scheduling
+/// key, not an authentication boundary; proxy-provided addresses are accepted
+/// because the public/admin listeners are deployed behind the configured proxy.
+pub(crate) fn client_download_identity<T>(request: &Request<T>) -> String {
+    for header_name in ["x-forwarded-for", "x-real-ip"] {
+        if let Some(value) = request
+            .headers()
+            .get(header_name)
+            .and_then(|value| value.to_str().ok())
+        {
+            for candidate in value.split(',').map(str::trim) {
+                if let Ok(address) = candidate.parse::<IpAddr>() {
+                    return address.to_string();
+                }
+            }
+        }
+    }
+    request
+        .extensions()
+        .get::<ClientSocketAddr>()
+        .map(|address| address.0.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
 #[derive(Clone)]
 pub struct AdminUiState {
@@ -317,6 +347,66 @@ struct ObjectEntryWire {
     access_accounts: u64,
     replica_chunk_size_mismatch: bool,
     rechunking: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct TelegramLocationWire {
+    peer_id: String,
+    message_id: i64,
+    document_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct ObjectChunkReplicaWire {
+    account_id: String,
+    mode: String,
+    chunk_size: u64,
+    telegram: TelegramLocationWire,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct ObjectChunkWire {
+    order: u32,
+    offset: u64,
+    size: u64,
+    checksum: String,
+    telegram: TelegramLocationWire,
+    source_object_id: Option<String>,
+    source_chunk_order: Option<u32>,
+    replicas: Vec<ObjectChunkReplicaWire>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct ObjectDetailsWire {
+    name: String,
+    bucket: String,
+    key: String,
+    object_id: String,
+    schema_version: u16,
+    commit_state: String,
+    version_id: Option<String>,
+    size: u64,
+    content_type: String,
+    last_modified: String,
+    expires_at: Option<String>,
+    etag: String,
+    checksum_algorithm: String,
+    encryption_enabled: bool,
+    encryption_format: String,
+    encryption_key_id: Option<String>,
+    user_metadata: std::collections::BTreeMap<String, String>,
+    tags: std::collections::BTreeMap<String, String>,
+    shared_links: u64,
+    replica_accounts: u64,
+    access_accounts: u64,
+    replica_chunk_size_mismatch: bool,
+    rechunking: bool,
+    telegram: TelegramLocationWire,
+    chunks: Vec<ObjectChunkWire>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -599,6 +689,7 @@ impl AdminUiState {
             (Method::DELETE, p) if p.starts_with("buckets/") => self.handle_delete_bucket(p),
             (Method::GET, "search") => self.handle_search(request),
             (Method::GET, "objects") => self.handle_list_objects(request),
+            (Method::GET, "objects/details") => self.handle_object_details(request),
             (Method::POST, "objects/folder") => {
                 self.handle_create_folder(request, &principal).await
             }
@@ -1657,6 +1748,42 @@ impl AdminUiState {
         )
     }
 
+    fn handle_object_details(&self, request: Request<Incoming>) -> Response<Body> {
+        let query = parse_list_params(request.uri().query().unwrap_or(""));
+        let bucket = match query.get("bucket") {
+            Some(value) if !value.is_empty() => value,
+            _ => return json_error(StatusCode::BAD_REQUEST, "bucket is required"),
+        };
+        let key = match query.get("key") {
+            Some(value) if !value.is_empty() => value,
+            _ => return json_error(StatusCode::BAD_REQUEST, "key is required"),
+        };
+        if !is_safe_object_key(key) {
+            return json_error(StatusCode::BAD_REQUEST, "invalid object key");
+        }
+        let manifest = match self.object_format.get_active_manifest(bucket, key) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => return json_error(StatusCode::NOT_FOUND, "object not found"),
+            Err(error) => return json_error(StatusCode::CONFLICT, &error.to_string()),
+        };
+        let shared_links = match self.store().share_link_count(bucket, key) {
+            Ok(count) => count,
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        };
+        let (replica_accounts, access_accounts) = self.object_replica_summary(manifest.object_id);
+        let details = object_details_to_wire(
+            &manifest,
+            shared_links,
+            replica_accounts,
+            access_accounts,
+            self.replica_chunk_size_mismatch(&manifest),
+            self.store()
+                .object_rechunk_locked(manifest.object_id)
+                .unwrap_or(false),
+        );
+        json_response(StatusCode::OK, details)
+    }
+
     async fn handle_create_folder(
         &self,
         request: Request<Incoming>,
@@ -2119,6 +2246,7 @@ impl AdminUiState {
         _principal: &ResolvedPrincipal,
         is_head: bool,
     ) -> Response<Body> {
+        let client_identity = client_download_identity(&request);
         let params = parse_list_params(request.uri().query().unwrap_or(""));
         let bucket = match params.get("bucket") {
             Some(value) if !value.is_empty() => value.clone(),
@@ -2174,11 +2302,12 @@ impl AdminUiState {
         let mut response = if is_head || spans.is_empty() {
             Response::new(Body::empty())
         } else {
-            let stream = ObjectFormatService::read_spans_to_stream(
+            let stream = ObjectFormatService::read_spans_to_stream_for_client(
                 Arc::clone(&self.object_format),
                 &manifest,
                 spans,
                 "admin",
+                Some(client_identity),
             );
             Response::new(Body::http_body_unsync(StreamBody::new(
                 stream.map(|chunk| chunk.map(Frame::data)),
@@ -3606,6 +3735,88 @@ fn object_to_wire(
         access_accounts: 0,
         replica_chunk_size_mismatch: false,
         rechunking: false,
+    }
+}
+
+fn telegram_location_to_wire(location: &TelegramLocation) -> TelegramLocationWire {
+    TelegramLocationWire {
+        peer_id: location.peer_id.clone(),
+        message_id: location.message_id,
+        document_id: location.document_id.clone(),
+    }
+}
+
+fn object_details_to_wire(
+    manifest: &ObjectManifest,
+    shared_links: u64,
+    replica_accounts: u64,
+    access_accounts: u64,
+    replica_chunk_size_mismatch: bool,
+    rechunking: bool,
+) -> ObjectDetailsWire {
+    ObjectDetailsWire {
+        name: basename_key(&manifest.key),
+        bucket: manifest.bucket.clone(),
+        key: manifest.key.clone(),
+        object_id: manifest.object_id.to_string(),
+        schema_version: manifest.schema_version,
+        commit_state: manifest.commit_state.as_str().to_string(),
+        version_id: manifest.version_id.clone(),
+        size: manifest.content_length,
+        content_type: manifest.content_type.clone(),
+        last_modified: rfc3339(manifest.created_at),
+        expires_at: manifest.expires_at.and_then(|value| {
+            value
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        }),
+        etag: manifest.checksum.whole_object.clone(),
+        checksum_algorithm: manifest.checksum.algorithm.clone(),
+        encryption_enabled: manifest.encryption.enabled,
+        encryption_format: manifest.encryption.format.clone(),
+        encryption_key_id: manifest.encryption.key_id.clone(),
+        user_metadata: manifest.user_metadata.clone(),
+        tags: manifest.tags.clone(),
+        shared_links,
+        replica_accounts,
+        access_accounts,
+        replica_chunk_size_mismatch,
+        rechunking,
+        telegram: telegram_location_to_wire(&manifest.telegram),
+        chunks: manifest
+            .chunks
+            .iter()
+            .map(|chunk| ObjectChunkWire {
+                order: chunk.order,
+                offset: chunk.offset,
+                size: chunk.size,
+                checksum: chunk.checksum.clone(),
+                telegram: TelegramLocationWire {
+                    peer_id: chunk.telegram_peer_id.clone(),
+                    message_id: chunk.telegram_message_id,
+                    document_id: chunk.telegram_document_id.clone(),
+                },
+                source_object_id: chunk.source_object_id.map(|value| value.to_string()),
+                source_chunk_order: chunk.source_chunk_order,
+                replicas: chunk
+                    .replicas
+                    .iter()
+                    .map(|replica| ObjectChunkReplicaWire {
+                        account_id: replica.account_id.clone(),
+                        mode: match replica.mode {
+                            ReplicaMode::Replica => "replica".to_string(),
+                            ReplicaMode::Access => "access".to_string(),
+                        },
+                        chunk_size: replica.chunk_size,
+                        telegram: TelegramLocationWire {
+                            peer_id: replica.telegram_peer_id.clone(),
+                            message_id: replica.telegram_message_id,
+                            document_id: replica.telegram_document_id.clone(),
+                        },
+                    })
+                    .collect(),
+            })
+            .collect(),
     }
 }
 

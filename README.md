@@ -57,6 +57,10 @@ staging, and recovery artifacts, not committed payloads.
   new account. Transient Telegram reads are retried per chunk using the same
   bounded policy before a download fails. A client stream remains open for up
   to 120 seconds while a transient Telegram/proxy read is recovering.
+  Public-share and authenticated-admin range requests are additionally
+  serialized per client IP and object, so segmented download tools cannot turn
+  one object into several simultaneous Telegram reads; different objects remain
+  independent.
 - **Bounded memory everywhere** — uploads and downloads stream chunk-by-chunk;
   no whole-object RAM buffering (an explicit project invariant).
 - **Download stage diagnostics** — the authenticated Overview keeps a bounded,
@@ -91,9 +95,14 @@ staging, and recovery artifacts, not committed payloads.
   folder transitions that keep the last listing visible while the next folder
   loads. The browser also supports server-paginated bucket/folder listings,
   bucket and recursive object search, result locations with direct parent-folder
-  navigation, sortable bucket and object columns across paginated results, and
-  the existing download/share/link/delete actions on found
-  objects. The path-style bucket names `_public` and `_admin` are reserved for
+   navigation, sortable bucket and object columns across paginated results, and
+   compact per-row **Actions** menus that expose the applicable move, replicate,
+   re-chunk, share, link-management, and delete operations alongside the fixed
+   bulk-selection actions. Shared-link management uses a per-link expandable
+   expiry editor so larger link sets remain usable on narrow screens. Each file
+   also has an on-demand **Information** panel with its manifest, chunk layout,
+   checksums, metadata, and replica locations. The path-
+  style bucket names `_public` and `_admin` are reserved for
   the public-link and admin routes and are rejected by both the S3 and admin
   creation paths. The Telegram setup wizard is also available in the same
   console.
@@ -405,8 +414,10 @@ extra chunks; in sequential mode this is the maximum ordered look-ahead, while
 adaptive mode uses it as a parallel ceiling. The maximum account-connection
 policy accepts `1–5` accounts and is capped per file by the prefetch window and
 the enabled replica accounts that have locations for that file. The reader
-keeps at most one active Telegram payload read per account, and live status
-stays in process memory rather than SQLite. Telegram
+keeps at most one active Telegram payload read per account. Public and admin
+range requests also allow only one active Telegram payload read per client IP
+and object; sibling ranges wait rather than creating parallel backend work.
+Live status stays in process memory rather than SQLite. Telegram
 API IDs and storage chat IDs are validated as numeric values
 before persistence; connection refresh failures are returned as JSON warnings
 from the admin API rather than as proxy-level failures.

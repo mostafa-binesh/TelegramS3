@@ -1,4 +1,4 @@
-use crate::admin::AdminUiState;
+use crate::admin::{AdminUiState, ClientSocketAddr, client_download_identity};
 use crate::config::AppConfig;
 use crate::durable::TransferWriteConditionals;
 use crate::multipart::MultipartPartPlan;
@@ -352,12 +352,13 @@ impl S3Server {
         loop {
             tokio::select! {
                 accepted = listener.accept() => {
-                    let Ok((stream, _)) = accepted else { break };
+                    let Ok((stream, peer_addr)) = accepted else { break };
                     let service = service.clone();
                     let admin_ui_state = Arc::clone(&admin_ui_state);
                     let object_format = Arc::clone(&object_format);
                     connections.spawn(async move {
-                        let handler = service_fn(move |request| {
+                        let handler = service_fn(move |mut request| {
+                            request.extensions_mut().insert(ClientSocketAddr(peer_addr));
                             handle_request(request, service.clone(), Arc::clone(&admin_ui_state), Arc::clone(&object_format), request_timeout, transfer_timeout)
                         });
                         let mut connection = http1::Builder::new();
@@ -366,10 +367,13 @@ impl S3Server {
                     });
                 }
                 accepted = admin_listener.accept() => {
-                    let Ok((stream, _)) = accepted else { break };
+                    let Ok((stream, peer_addr)) = accepted else { break };
                     let admin_state = admin_state.clone();
                     connections.spawn(async move {
-                        let handler = service_fn(move |request| handle_admin_request(request, admin_state.clone()));
+                        let handler = service_fn(move |mut request| {
+                            request.extensions_mut().insert(ClientSocketAddr(peer_addr));
+                            handle_admin_request(request, admin_state.clone())
+                        });
                         let mut connection = http1::Builder::new();
                         connection.keep_alive(false).timer(TokioTimer::new());
                         let _ = connection.serve_connection(TokioIo::new(stream), handler).await;
@@ -537,6 +541,7 @@ async fn handle_share_request(
         }
     };
     let is_head = request.method() == Method::HEAD;
+    let client_identity = client_download_identity(&request);
     let spans = match ObjectFormatService::plan_read(&manifest, range.clone()) {
         Ok(plan) => plan.chunks,
         Err(_) => {
@@ -555,11 +560,12 @@ async fn handle_share_request(
     let mut response = if is_head || spans.is_empty() {
         hyper::Response::new(Body::empty())
     } else {
-        let stream = ObjectFormatService::read_spans_to_stream(
+        let stream = ObjectFormatService::read_spans_to_stream_for_client(
             Arc::clone(&object_format),
             &manifest,
             spans,
             "public",
+            Some(client_identity),
         );
         hyper::Response::new(Body::http_body_unsync(StreamBody::new(
             stream.map(|chunk| chunk.map(Frame::data)),

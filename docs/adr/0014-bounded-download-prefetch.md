@@ -44,6 +44,13 @@ always serial. This prevents a file with many replicas from creating an
 unbounded fan-out while still allowing independent accounts to contribute
 parallel capacity.
 
+Public-share and authenticated-admin range requests additionally use a
+process-local semaphore keyed by client IP and object ID with capacity one.
+This specifically handles segmented clients such as IDM: ranges beginning at
+different offsets of one object queue at the Telegram-read boundary, while
+different objects from the same client remain independent. The key is a
+scheduling fairness boundary, not an authentication or authorization control.
+
 Every prefetched result must complete remote download, decryption, and checksum
 verification before it enters the output stream. Client traffic counters are
 incremented only when a verified result is emitted. A stream error terminates
@@ -62,5 +69,7 @@ recovery semantics.
 - Higher values can improve client smoothness but increase parallel Telegram
   traffic and transient per-stream memory, bounded by four extra chunks and
   the account-connection policy.
+- Segmented ranges for one client IP and object do not multiply that object's
+  Telegram reads; they wait behind the single active payload read.
 - A missing, corrupt, or permanently unavailable chunk remains an integrity
   failure; prefetching does not hide or repair it.

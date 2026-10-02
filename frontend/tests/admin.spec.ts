@@ -621,14 +621,19 @@ test('bucket and object search supports pagination and direct folder navigation'
   await expect(page.getByRole('searchbox', { name: 'Search objects and folders' })).toBeVisible();
   await page.getByRole('searchbox', { name: 'Search objects and folders' }).fill('final-report');
   await expect(page.getByText('final-report.txt')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Go to folder archive/reports/' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Download final-report.txt' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Share final-report.txt' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Manage shared links for final-report.txt' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Delete final-report.txt' })).toBeVisible();
+  const resultRow = page.locator('.kv-table tbody tr').filter({ hasText: 'final-report.txt' }).last();
+  await resultRow.getByRole('button', { name: 'Actions for final-report.txt' }).click();
+  const resultMenu = page.getByRole('menu', { name: 'Actions for final-report.txt' });
+  await expect(resultMenu.getByRole('menuitem', { name: 'Share', exact: true })).toBeVisible();
+  await expect(resultMenu.getByRole('menuitem', { name: /Manage shared links/ })).toBeVisible();
+  await expect(resultMenu.getByRole('menuitem', { name: 'Delete', exact: true })).toBeVisible();
+  await expect(resultMenu.getByRole('menuitem', { name: 'Re-chunk', exact: true })).toBeVisible();
+  await expect(resultMenu.getByRole('menuitem', { name: 'Move', exact: true })).toBeVisible();
+  await expect(resultMenu.getByRole('menuitem', { name: 'Open location', exact: true })).toBeVisible();
   await expect.poll(() => objectRequests.at(-1) ?? '').toContain('search=final-report');
   expect(objectRequests.at(-1)).not.toContain('delimiter=1');
-  await page.getByRole('button', { name: 'Go to folder archive/reports/' }).click();
+  await resultMenu.getByRole('menuitem', { name: 'Open location', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Bucket / archive-26 / archive / reports' })).toBeVisible();
 });
 

@@ -158,6 +158,19 @@ browser can sort bucket columns and folder object columns; the server sorts the
 complete metadata set before pagination, so this presentation feature does not
 change recovery ordering or object visibility.
 
+Row-level Actions menus use the same durable server operations as bulk actions.
+Selecting **Move** still publishes destination manifests and schedules source
+cleanup without routing object bytes through the browser; selecting **Re-chunk**
+creates the same durable lock and worker job for only that row. The UI keeps the
+row target separate from any pre-existing bulk selection. Shared-link expiry
+disclosures only change how the authenticated control is presented and do not
+alter link tokens, object manifests, or cleanup evidence.
+
+The object Information panel is a read-only inspection surface. It fetches the
+active committed manifest on demand and shows the object identity, checksums,
+encryption policy, chunk offsets, and alternate Telegram locations. Opening it
+does not download object bytes, change recovery state, or acknowledge an issue.
+
 The path-style names `_public` and `_admin` are reserved at bucket creation
 because requests using those first path segments belong to the public-share and
 admin routers. Recovery and index rebuild do not delete or rename any legacy
@@ -187,6 +200,13 @@ smallest of that policy, the prefetch window, and the enabled replica accounts
 with locations for the object. Sequential mode remains one remote read at a
 time. These settings are runtime policies and do not change the manifest or
 recovery boundary.
+
+Public and authenticated-admin segmented downloads also use a process-local
+per-client/object gate with capacity one at the Telegram-read stage. Multiple
+range requests from one client IP for different offsets of the same object wait
+behind the active chunk rather than creating parallel Telegram reads. The gate
+does not change manifests, cleanup ownership, recovery state, or the behavior
+of different objects.
 
 Operators may choose sequential nearest-chunk mode in the same policy page.
 After the first requested chunk, it fetches the next chunks strictly in

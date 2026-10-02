@@ -55,6 +55,58 @@ export interface ObjectEntry {
   rechunking?: boolean;
 }
 
+export interface ObjectLocation {
+  peer_id: string;
+  message_id: number;
+  document_id?: string | null;
+}
+
+export interface ObjectChunkReplica {
+  account_id: string;
+  mode: 'replica' | 'access' | string;
+  chunk_size: number;
+  telegram: ObjectLocation;
+}
+
+export interface ObjectChunkDetails {
+  order: number;
+  offset: number;
+  size: number;
+  checksum: string;
+  telegram: ObjectLocation;
+  source_object_id?: string | null;
+  source_chunk_order?: number | null;
+  replicas: ObjectChunkReplica[];
+}
+
+export interface ObjectDetails {
+  name: string;
+  bucket: string;
+  key: string;
+  object_id: string;
+  schema_version: number;
+  commit_state: string;
+  version_id?: string | null;
+  size: number;
+  content_type: string;
+  last_modified: string;
+  expires_at?: string | null;
+  etag: string;
+  checksum_algorithm: string;
+  encryption_enabled: boolean;
+  encryption_format: string;
+  encryption_key_id?: string | null;
+  user_metadata: Record<string, string>;
+  tags: Record<string, string>;
+  shared_links: number;
+  replica_accounts: number;
+  access_accounts: number;
+  replica_chunk_size_mismatch: boolean;
+  rechunking: boolean;
+  telegram: ObjectLocation;
+  chunks: ObjectChunkDetails[];
+}
+
 export type SortDirection = 'asc' | 'desc';
 export type BucketSortKey = 'name' | 'created_at' | 'accounts';
 export type ObjectSortKey = 'name' | 'size' | 'last_modified';

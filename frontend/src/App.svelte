@@ -21,6 +21,7 @@
     searchObjects as searchAllObjects,
     listMultipartUploads,
     listObjects,
+    getObjectDetails,
     listUsers,
     login,
     logout,
@@ -55,7 +56,8 @@
     ReplicaInfo,
     BucketSortKey,
     ObjectSortKey,
-    SortDirection
+    SortDirection,
+    ObjectDetails
   } from './lib/types';
   import TopProgress from './components/TopProgress.svelte';
   import Toasts from './components/Toasts.svelte';
@@ -79,6 +81,7 @@
   let OverviewPanelComponent: any = null;
   let BucketsPanelComponent: any = null;
   let AdminModalsComponent: any = null;
+  let ObjectInfoModalComponent: any = null;
   let routeLoadKey = '';
   let loadedRouteKey = '';
   let routeLoadError = '';
@@ -94,6 +97,7 @@
   async function loadOverviewPanel() { OverviewPanelComponent ??= (await import('./components/OverviewPanel.svelte')).default; }
   async function loadBucketsPanel() { BucketsPanelComponent ??= (await import('./components/BucketsPanel.svelte')).default; }
   async function loadAdminModals() { AdminModalsComponent ??= (await import('./components/AdminModals.svelte')).default; }
+  async function loadObjectInfoModal() { ObjectInfoModalComponent ??= (await import('./components/ObjectInfoModal.svelte')).default; }
 
   let username = '';
   let password = '';
@@ -157,6 +161,11 @@
   let sharedLinks: SharedLink[] = [];
   let sharedLinksBusy = false;
   let sharedLinksError = '';
+  let showObjectInfoModal = false;
+  let objectInfoTarget: ObjectEntry | null = null;
+  let objectInfo: ObjectDetails | null = null;
+  let objectInfoBusy = false;
+  let objectInfoError = '';
   let deleteTarget: { type: 'bucket' | 'bucket-selection' | 'object' | 'folder' | 'selection' | 'operator'; name: string; key?: string } | null = null;
   let selectedBuckets: string[] = [];
   let selectedKeys: string[] = [];
@@ -173,6 +182,8 @@
   let stageTestBusy = false;
   let showRechunkModal = false;
   let rechunkScope: 'objects' | 'buckets' = 'objects';
+  let rechunkKeys: string[] = [];
+  let rechunkBuckets: string[] = [];
   let newChunkSizeMiB = '8';
   let applyRechunkToReplicas = true;
   let moveBucket = '';
@@ -604,16 +615,19 @@
     }
   }
 
-  async function openRechunkModal() {
-    if (!selectedKeys.length || !selectedBucket) return;
+  async function openRechunkModal(keys = selectedKeys) {
+    if (!keys.length || !selectedBucket) return;
     await loadAdminModals();
+    rechunkKeys = [...keys];
     rechunkScope = 'objects';
     showRechunkModal = true;
   }
 
-  async function openBucketRechunkModal() {
-    if (!selectedBuckets.length) return;
+  async function openBucketRechunkModal(names = selectedBuckets) {
+    if (!names.length) return;
     await loadAdminModals();
+    rechunkBuckets = [...names];
+    rechunkKeys = [];
     rechunkScope = 'buckets';
     showRechunkModal = true;
   }
@@ -636,7 +650,7 @@
     try {
       const newChunkSize = Math.round(size * 1048576);
       if (rechunkScope === 'buckets') {
-        const bucketsToRechunk = [...selectedBuckets];
+        const bucketsToRechunk = [...rechunkBuckets];
         let objectCount = 0;
         for (const bucket of bucketsToRechunk) {
           const keys = await listAllBucketObjectKeys(bucket);
@@ -645,6 +659,7 @@
           objectCount += keys.length;
         }
         selectedBuckets = [];
+        rechunkBuckets = [];
         showRechunkModal = false;
         notifySuccess(objectCount
           ? `Re-chunking queued for ${objectCount} object${objectCount === 1 ? '' : 's'} across ${bucketsToRechunk.length} bucket${bucketsToRechunk.length === 1 ? '' : 's'}.`
@@ -652,8 +667,9 @@
         await refreshBuckets();
         return;
       }
-      await queueRechunk(session?.csrf_token, { bucket: selectedBucket, keys: [...selectedKeys], new_chunk_size: newChunkSize, apply_to_replicas: applyRechunkToReplicas });
+      await queueRechunk(session?.csrf_token, { bucket: selectedBucket, keys: [...rechunkKeys], new_chunk_size: newChunkSize, apply_to_replicas: applyRechunkToReplicas });
       selectedKeys = [];
+      rechunkKeys = [];
       showRechunkModal = false;
       notifySuccess('Re-chunking queued. The selected objects stay unavailable until each job completes.');
       await refreshObjects();
@@ -1261,6 +1277,30 @@
     sharedLinksError = '';
   }
 
+  async function openObjectInfo(obj: ObjectEntry) {
+    objectInfoTarget = obj;
+    objectInfo = null;
+    objectInfoError = '';
+    showObjectInfoModal = true;
+    objectInfoBusy = true;
+    try {
+      await loadObjectInfoModal();
+      objectInfo = await getObjectDetails(session?.csrf_token, selectedBucket, obj.key);
+    } catch (cause) {
+      objectInfoError = normalizeError(cause);
+    } finally {
+      objectInfoBusy = false;
+    }
+  }
+
+  function closeObjectInfoModal() {
+    if (objectInfoBusy) return;
+    showObjectInfoModal = false;
+    objectInfoTarget = null;
+    objectInfo = null;
+    objectInfoError = '';
+  }
+
   function selectRecoveryTab(tab: 'issues' | 'transfers') {
     navigate({ view: 'recovery', recoveryTab: tab });
   }
@@ -1290,6 +1330,12 @@
     moveBucket = selectedBucket;
     movePrefix = currentPrefix;
     showMoveModal = true;
+  }
+
+  function openMoveForSelection(keys: string[], folders: string[] = []) {
+    selectedKeys = [...keys];
+    selectedFolders = [...folders];
+    void openMoveModal();
   }
 
   async function refreshRecovery() {
@@ -1418,7 +1464,7 @@
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')} onStageMetricsTest={runStageMetricsDiagnostic} stageTestBusy={stageTestBusy}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}
-      {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedBuckets} {selectedKeys} {selectedFolders} {bucketSearch} {bucketPage} {bucketTotal} {bucketSortKey} {bucketSortDirection} globalSearchResults={globalSearchResults} globalSearchPage={globalSearchPage} globalSearchTotal={globalSearchTotal} globalSearchLoading={globalSearchLoading} globalSearchError={globalSearchError} {objectSearch} {objectPage} {objectTotal} {objectSortKey} {objectSortDirection} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onBucketSort={sortBuckets} onGlobalSearchPage={goToGlobalSearchPage} onOpenSearchResult={openGlobalSearchResult} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onObjectSort={sortObjects} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBucketPage()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleBucket={toggleBucket} onToggleAllBuckets={toggleAllBuckets} onRemoveSelectedBuckets={removeSelectedBuckets} onRechunkSelectedBuckets={openBucketRechunkModal} onToggleKey={toggleKey} onToggleFolder={toggleFolder} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onRechunkSelected={openRechunkModal} onOpenReplicas={openReplicaDetails} onOpenBulkReplication={() => openReplicaDetails(selectedBucket, undefined, [...selectedKeys])} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
+       {#if BucketsPanelComponent}<svelte:component this={BucketsPanelComponent} buckets={buckets} selectedBucket={selectedBucket} currentPrefix={currentPrefix} {listing} {bucketsLoading} {objectsLoading} {bucketsError} {objectsError} {busy} {selectedBuckets} {selectedKeys} {selectedFolders} {bucketSearch} {bucketPage} {bucketTotal} {bucketSortKey} {bucketSortDirection} globalSearchResults={globalSearchResults} globalSearchPage={globalSearchPage} globalSearchTotal={globalSearchTotal} globalSearchLoading={globalSearchLoading} globalSearchError={globalSearchError} {objectSearch} {objectPage} {objectTotal} {objectSortKey} {objectSortDirection} onBucketSearch={searchBuckets} onBucketPage={goToBucketPage} onBucketSort={sortBuckets} onGlobalSearchPage={goToGlobalSearchPage} onOpenSearchResult={openGlobalSearchResult} onObjectSearch={searchObjects} onObjectPage={goToObjectPage} onObjectSort={sortObjects} onGoToFolder={goToSearchResultFolder} onCreateBucket={openBucketModal} onRefresh={() => selectedBucket ? refreshObjects() : refreshBucketPage()} onUpload={openUploadModal} onOpenBucket={openBucket} onBack={goBackFolder} onEnterFolder={enterFolder} onOpenFolder={openFolderModal} onToggleBucket={toggleBucket} onToggleAllBuckets={toggleAllBuckets} onRemoveSelectedBuckets={removeSelectedBuckets} onRechunkSelectedBuckets={openBucketRechunkModal} onRechunkBucket={(name: string) => openBucketRechunkModal([name])} onToggleKey={toggleKey} onToggleFolder={toggleFolder} onToggleAll={() => selectedKeys = selectedKeys.length ? [] : (listing?.objects.filter((obj) => !obj.uploading).map((obj) => obj.key) ?? [])} onRemoveKey={(item: ObjectEntry | string) => requestDelete(typeof item === 'string' ? { type: 'folder', name: item } : { type: 'object', name: item.name, key: item.key })} onRemoveSelected={removeSelected} onRemoveBucket={(name: string) => requestDelete({ type: 'bucket', name })} onOpenMove={openMoveModal} onOpenMoveSelection={openMoveForSelection} onRechunkSelected={openRechunkModal} onRechunkObject={(key: string) => openRechunkModal([key])} onOpenReplicas={openReplicaDetails} onOpenBulkReplication={() => openReplicaDetails(selectedBucket, undefined, [...selectedKeys])} onShare={openShareModal} onOpenShareLinks={openSharedLinksModal} onOpenInfo={openObjectInfo}/>{:else if routeLoadError}<LoadError title="Could not load bucket browsing" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'accounts'}
       {#if AccountsPanelComponent}<svelte:component this={AccountsPanelComponent} csrf={session?.csrf_token} buckets={buckets} {accountsTab} onTabChange={(tab: AccountsTab) => navigate({ view: 'accounts', accountsTab: tab })} overview={overview} {session} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose} onRemoveConnection={removeCurrentConnection}/>{:else if routeLoadError}<LoadError title="Could not load accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'users'}
@@ -1429,8 +1475,9 @@
   {#if AdminModalsComponent}<svelte:component this={AdminModalsComponent} bind:showBucket={showBucketModal} bind:showFolder={showFolderModal} bind:showUpload={showUploadModal} bind:showOperator={showOperatorModal} bind:showMove={showMoveModal} bind:showShare={showShareModal} bind:showDelete={showDeleteModal} bind:showRechunk={showRechunkModal} bind:newBucket bind:newFolder bind:newUsername bind:newDisplay bind:newPassword bind:newRole bind:moveBucket bind:movePrefix bind:shareExpiry bind:shareDescription bind:shareUrl bind:newChunkSizeMiB bind:applyRechunkToReplicas rechunkScope={rechunkScope} selectedBucket={selectedBucket} currentPrefix={currentPrefix} shareTarget={shareTarget} shareError={shareError} shareBusy={shareBusy} deleteTarget={deleteTarget} {busy} uploadComponent={UploadBoxComponent} csrf={session?.csrf_token} onCreateBucket={makeBucket} onCreateFolder={makeFolder} onCreateOperator={makeUser} onCreateShare={createShareFromModal} onConfirmDelete={confirmDelete} onMove={moveSelected} onRechunk={queueSelectedRechunk} onUploaded={refreshObjects}/>{/if}
   <SharedLinksModal open={showSharedLinksModal} target={sharedLinksTarget} links={sharedLinks} busy={sharedLinksBusy} error={sharedLinksError} onClose={closeSharedLinksModal} onUpdateExpiry={changeSharedLinkExpiry} onRevoke={revokeSharedLink}/>
 
-  <ReplicaDetailsModal bind:open={showReplicaModal} title={replicaTitle} items={replicaItems} loading={replicaLoading} error={replicaError} csrf={session?.csrf_token} bucket={replicaBucket} scopeKeys={replicaScopeKeys} scopeLabel={replicaScopeLabel}/>
-  <Toasts />
+   <ReplicaDetailsModal bind:open={showReplicaModal} title={replicaTitle} items={replicaItems} loading={replicaLoading} error={replicaError} csrf={session?.csrf_token} bucket={replicaBucket} scopeKeys={replicaScopeKeys} scopeLabel={replicaScopeLabel}/>
+   {#if ObjectInfoModalComponent}<svelte:component this={ObjectInfoModalComponent} open={showObjectInfoModal} target={objectInfoTarget} details={objectInfo} busy={objectInfoBusy} error={objectInfoError} onClose={closeObjectInfoModal}/>{/if}
+   <Toasts />
 </main>
 
 <style>

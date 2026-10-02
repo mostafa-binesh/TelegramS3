@@ -267,6 +267,9 @@ Completed in this increment:
   Telegram-byte, retry, and server/client chunk progress without per-chunk
   SQLite writes, including the effective account-connection limit and eligible
   replica-account count
+- public-share and authenticated-admin segmented range requests serialize
+  Telegram payload reads per client IP and object, preventing IDM-style range
+  fan-out while keeping different objects independent
 - the Overview caches manifest-derived object counts and unique Telegram
   payload size for five seconds; its five-second refresh uses the cheap
   `/overview/live` endpoint for transfer, traffic, stage, and connection
@@ -374,6 +377,15 @@ Multi-user boundary for the next increment:
 - [x] Added visible-bucket checkbox selection, select-all-visible behavior, and
   fixed-bottom bulk deletion/re-chunk actions; bucket re-chunking expands to
   every committed object while object-row re-chunking remains supported.
+- [x] Added responsive per-row Actions menus with parity for applicable bulk
+   operations, including server-side move, replication, re-chunking, and guarded
+   deletion; single-row maintenance targets no longer overwrite another bulk
+   selection.
+- [x] Added an on-demand object Information panel and authenticated details
+   endpoint for manifest identity, object policy, checksums, chunk layout, and
+   replica locations, with successful and error-path browser coverage.
+- [x] Reworked the shared-link manager's expiry controls into per-link
+  expandable disclosures with coverage for link sets larger than two entries.
 - [x] Added an isolated additional-account onboarding wizard that carries its
   account ID through every Telegram login step and leaves primary settings
   untouched.

@@ -296,6 +296,10 @@ to the smaller of this policy, the prefetch window, and the enabled account
 locations present across the object's chunks. The existing per-account
 semaphore still allows only one active payload read for any individual account.
 Sequential reads keep one remote read active regardless of this setting.
+Public-share and authenticated-admin requests also acquire a per-client/object
+semaphore with capacity one. This is keyed by the client IP and object ID, so
+IDM-style ranges from different starting offsets queue behind one active
+Telegram chunk, while separate objects from that client remain independent.
 The authenticated Overview exposes a bounded, process-local testing snapshot
 for recent reads: surface, chunk and payload counts, first-chunk latency,
 Telegram and retry-wait time, decrypt time, checksum-verification time, and
@@ -491,6 +495,17 @@ is applied to the complete metadata result before the requested page is sliced.
 Folder entries remain name-ordered when an object-only column such as size or
 modified time is selected because folders have no object size or modification
 timestamp.
+
+The bucket browser's per-row Actions menu and expandable shared-link expiry
+editor are presentation-layer controls. They reuse the existing object,
+replication, re-chunk, move, share, and link-management endpoints and introduce
+no new Telegram message or manifest format.
+
+The object Information action uses the authenticated details endpoint to render
+the existing manifest fields on demand: object identity and policy, checksums,
+metadata/tags, the manifest Telegram location, and each canonical chunk with
+its replica locations. This is an inspection view only; it does not add a
+second metadata record or alter the manifest/chunk format.
 
 Bucket creation also protects the HTTP namespace: exact names `_public` and
 `_admin` are reserved for public share links and the authenticated admin

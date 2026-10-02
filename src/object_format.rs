@@ -33,7 +33,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration as StdDuration, Instant as StdInstant};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
@@ -77,6 +77,11 @@ const TELEGRAM_STREAM_RECOVERY_WINDOW: StdDuration =
 /// still overlap different replicated accounts, but it cannot turn one
 /// account's rate limit into several competing reads.
 const TELEGRAM_ACCOUNT_DOWNLOAD_CONCURRENCY: usize = 1;
+/// Keep one active Telegram payload read per client/object pair. This prevents
+/// segmented download clients from multiplying the same object's backend work
+/// while allowing different objects from the same client to proceed normally.
+const CLIENT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 1;
+const CLIENT_OBJECT_LIMITER_MAX_KEYS: usize = 4096;
 pub const RESERVED_BUCKET_NAMES: [&str; 2] = ["_public", "_admin"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -487,6 +492,33 @@ pub struct ObjectFormatService {
     download_stage_metrics: Arc<DownloadStageMetricsStore>,
     account_managers: Arc<Mutex<HashMap<String, Arc<TelegramTransportManager>>>>,
     account_download_limits: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    client_object_download_limits: Arc<ClientObjectDownloadLimiter>,
+}
+
+/// Per-client/object gates prevent segmented HTTP clients from turning one
+/// object read into several simultaneous Telegram payload reads. Weak entries
+/// avoid retaining every historical client/object key forever.
+#[derive(Default)]
+struct ClientObjectDownloadLimiter {
+    limits: Mutex<HashMap<String, Weak<Semaphore>>>,
+}
+
+impl ClientObjectDownloadLimiter {
+    fn semaphore(&self, key: &str) -> Arc<Semaphore> {
+        let mut limits = self
+            .limits
+            .lock()
+            .expect("client/object download limiter mutex");
+        if limits.len() >= CLIENT_OBJECT_LIMITER_MAX_KEYS {
+            limits.retain(|_, semaphore| semaphore.strong_count() > 0);
+        }
+        if let Some(semaphore) = limits.get(key).and_then(Weak::upgrade) {
+            return semaphore;
+        }
+        let semaphore = Arc::new(Semaphore::new(CLIENT_OBJECT_DOWNLOAD_CONCURRENCY));
+        limits.insert(key.to_string(), Arc::downgrade(&semaphore));
+        semaphore
+    }
 }
 
 /// Payload counters displayed by the operator overview.
@@ -1014,6 +1046,7 @@ struct ReadPipeline {
     mode: String,
     live: DownloadStageLive,
     account_connection_permits: Arc<Semaphore>,
+    client_object_permits: Option<Arc<Semaphore>>,
 }
 
 enum ReadPipelineTail {
@@ -1022,6 +1055,7 @@ enum ReadPipelineTail {
 }
 
 impl ReadPipeline {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         object_format: Arc<ObjectFormatService>,
         manifest: ObjectManifest,
@@ -1030,18 +1064,21 @@ impl ReadPipeline {
         mode: &str,
         live: DownloadStageLive,
         account_connection_permits: Arc<Semaphore>,
+        client_object_permits: Option<Arc<Semaphore>>,
     ) -> Self {
         let first = spans.first().cloned().map(|span| {
             let object_format = Arc::clone(&object_format);
             let manifest = manifest.clone();
             let first_live = live.clone();
             let first_account_connection_permits = Arc::clone(&account_connection_permits);
+            let first_client_object_permits = client_object_permits.clone();
             Box::pin(async move {
                 let result = read_stream_span(
                     object_format,
                     manifest,
                     span,
                     first_account_connection_permits,
+                    first_client_object_permits,
                 )
                 .await;
                 first_live.record_fetched(&result);
@@ -1058,6 +1095,7 @@ impl ReadPipeline {
             mode: mode.to_string(),
             live,
             account_connection_permits,
+            client_object_permits,
         }
     }
 
@@ -1075,6 +1113,7 @@ impl ReadPipeline {
                             self.max_window,
                             self.live.clone(),
                             Arc::clone(&self.account_connection_permits),
+                            self.client_object_permits.clone(),
                         ))
                     } else {
                         ReadPipelineTail::Adaptive(AdaptiveReadWindow::new(
@@ -1084,6 +1123,7 @@ impl ReadPipeline {
                             self.max_window,
                             self.live.clone(),
                             Arc::clone(&self.account_connection_permits),
+                            self.client_object_permits.clone(),
                         ))
                     },
                 );
@@ -1119,6 +1159,7 @@ struct AdaptiveReadWindow {
     throughput_ewma: Option<f64>,
     live: DownloadStageLive,
     account_connection_permits: Arc<Semaphore>,
+    client_object_permits: Option<Arc<Semaphore>>,
 }
 
 impl AdaptiveReadWindow {
@@ -1129,6 +1170,7 @@ impl AdaptiveReadWindow {
         max_window: usize,
         live: DownloadStageLive,
         account_connection_permits: Arc<Semaphore>,
+        client_object_permits: Option<Arc<Semaphore>>,
     ) -> Self {
         Self {
             object_format,
@@ -1144,6 +1186,7 @@ impl AdaptiveReadWindow {
             throughput_ewma: None,
             live,
             account_connection_permits,
+            client_object_permits,
         }
     }
 
@@ -1161,10 +1204,16 @@ impl AdaptiveReadWindow {
             let manifest = self.manifest.clone();
             let live = self.live.clone();
             let account_connection_permits = Arc::clone(&self.account_connection_permits);
+            let client_object_permits = self.client_object_permits.clone();
             self.pending.push(Box::pin(async move {
-                let result =
-                    read_stream_span(object_format, manifest, span, account_connection_permits)
-                        .await;
+                let result = read_stream_span(
+                    object_format,
+                    manifest,
+                    span,
+                    account_connection_permits,
+                    client_object_permits,
+                )
+                .await;
                 live.record_fetched(&result);
                 (sequence, result)
             }));
@@ -1237,6 +1286,7 @@ struct SequentialReadAhead {
     window: usize,
     live: DownloadStageLive,
     account_connection_permits: Arc<Semaphore>,
+    client_object_permits: Option<Arc<Semaphore>>,
 }
 
 impl SequentialReadAhead {
@@ -1247,6 +1297,7 @@ impl SequentialReadAhead {
         max_window: usize,
         live: DownloadStageLive,
         account_connection_permits: Arc<Semaphore>,
+        client_object_permits: Option<Arc<Semaphore>>,
     ) -> Self {
         let prefetch = max_window.saturating_sub(1);
         if prefetch == 0 {
@@ -1259,6 +1310,7 @@ impl SequentialReadAhead {
                 window: 1,
                 live,
                 account_connection_permits,
+                client_object_permits,
             };
         }
         let (sender, receiver) = tokio::sync::mpsc::channel(prefetch);
@@ -1266,6 +1318,7 @@ impl SequentialReadAhead {
         let worker_manifest = manifest.clone();
         let worker_live = live.clone();
         let worker_account_connection_permits = Arc::clone(&account_connection_permits);
+        let worker_client_object_permits = client_object_permits.clone();
         tokio::spawn(async move {
             for span in spans {
                 let result = read_stream_span(
@@ -1273,6 +1326,7 @@ impl SequentialReadAhead {
                     worker_manifest.clone(),
                     span,
                     Arc::clone(&worker_account_connection_permits),
+                    worker_client_object_permits.clone(),
                 )
                 .await;
                 worker_live.record_fetched(&result);
@@ -1291,6 +1345,7 @@ impl SequentialReadAhead {
             window: max_window,
             live,
             account_connection_permits,
+            client_object_permits,
         }
     }
 
@@ -1309,6 +1364,7 @@ impl SequentialReadAhead {
             self.manifest.clone(),
             span,
             Arc::clone(&self.account_connection_permits),
+            self.client_object_permits.clone(),
         )
         .await;
         self.live.record_fetched(&result);
@@ -1496,6 +1552,7 @@ impl ObjectFormatService {
             download_stage_metrics: Arc::new(DownloadStageMetricsStore::default()),
             account_managers: Arc::new(Mutex::new(HashMap::new())),
             account_download_limits: Arc::new(Mutex::new(HashMap::new())),
+            client_object_download_limits: Arc::new(ClientObjectDownloadLimiter::default()),
         })
     }
 
@@ -3433,6 +3490,21 @@ impl ObjectFormatService {
         spans: Vec<ReadSpan>,
         surface: &'static str,
     ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + 'static + use<> {
+        Self::read_spans_to_stream_for_client(this, manifest, spans, surface, None)
+    }
+
+    /// Stream an object while optionally serializing Telegram reads for one
+    /// client/object pair. The limiter is intentionally narrower than the
+    /// object-wide reader: different objects from the same client may still
+    /// download concurrently, while segmented ranges for one object queue
+    /// behind one active Telegram chunk.
+    pub fn read_spans_to_stream_for_client(
+        this: Arc<Self>,
+        manifest: &ObjectManifest,
+        spans: Vec<ReadSpan>,
+        surface: &'static str,
+        client_identity: Option<String>,
+    ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + 'static + use<> {
         let pin = this.pin_object(manifest.object_id);
         let expected_client_bytes = spans.iter().map(|span| span.length).sum();
         let max_window = usize::try_from(this.download_prefetch_chunks().saturating_add(1))
@@ -3451,6 +3523,10 @@ impl ObjectFormatService {
             )
         };
         let account_connection_permits = Arc::new(Semaphore::new(account_connections_limit));
+        let client_object_permits = client_identity.map(|identity| {
+            let key = format!("{identity}\0{}", manifest.object_id);
+            this.client_object_download_limits.semaphore(&key)
+        });
         let stage = this.download_stage_metrics.start(
             surface,
             format!("{}/{}", manifest.bucket, manifest.key),
@@ -3472,6 +3548,7 @@ impl ObjectFormatService {
             &mode,
             live,
             account_connection_permits,
+            client_object_permits,
         );
         futures::stream::unfold(
             (pipeline, this, pin, stage, false),
@@ -4805,6 +4882,7 @@ async fn read_stream_span(
     manifest: ObjectManifest,
     span: ReadSpan,
     account_connection_permits: Arc<Semaphore>,
+    client_object_permits: Option<Arc<Semaphore>>,
 ) -> Result<ReadSpanResult, io::Error> {
     let chunk = manifest.chunks.get(span.order as usize).ok_or_else(|| {
         io::Error::new(
@@ -4868,6 +4946,15 @@ async fn read_stream_span(
             "no Telegram account enabled for downloading this object",
         ));
     }
+    let _client_object_permit = match client_object_permits {
+        Some(permits) => Some(
+            permits
+                .acquire_owned()
+                .await
+                .map_err(|_| io::Error::other("client/object download limiter closed"))?,
+        ),
+        None => None,
+    };
     let _account_connection_permit = account_connection_permits
         .acquire_owned()
         .await
@@ -5278,6 +5365,34 @@ mod tests {
         .expect("second permit");
     }
 
+    #[tokio::test]
+    async fn client_object_download_limiter_serializes_segmented_ranges() {
+        let limiter = ClientObjectDownloadLimiter::default();
+        let first = limiter.semaphore("198.51.100.7\0object-a");
+        let second = limiter.semaphore("198.51.100.7\0object-a");
+        assert!(Arc::ptr_eq(&first, &second));
+        let first_permit = first.acquire_owned().await.expect("first permit");
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            Arc::clone(&second).acquire_owned(),
+        )
+        .await;
+        assert!(blocked.is_err(), "same client/object ranges must queue");
+        drop(first_permit);
+        let _second_permit = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            Arc::clone(&second).acquire_owned(),
+        )
+        .await
+        .expect("released client/object permit")
+        .expect("second permit");
+
+        let other_object = limiter.semaphore("198.51.100.7\0object-b");
+        let _other_permit = other_object
+            .try_acquire()
+            .expect("different objects must remain independent");
+    }
+
     #[test]
     fn effective_download_connection_limit_uses_all_runtime_caps() {
         assert_eq!(effective_download_connection_limit(5, 3, 4), 3);
@@ -5311,6 +5426,7 @@ mod tests {
             4,
             live,
             Arc::new(Semaphore::new(4)),
+            None,
         );
         assert_eq!(window.window(), 2);
         let clean = |telegram_us, telegram_retries| ReadSpanResult {

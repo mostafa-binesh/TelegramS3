@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.7.6-rc.26 - 2026-10-02
+
+### On-demand object information panel
+
+- Added an **Information** action to every committed object row. It loads the
+  complete manifest only when requested, keeping ordinary bucket listings
+  bounded and fast.
+- The responsive panel shows object identity, size, content type, version,
+  expiry, checksum, encryption format/key identifier, metadata, tags, shared
+  links, availability, Telegram manifest placement, every chunk's offset/size
+  and checksum, and alternate replica locations.
+- Added authenticated `GET /_admin/api/objects/details?bucket&key`, plus
+  Playwright coverage for the successful and unavailable-details paths.
+
+### Compact bucket-row actions and resilient shared-link expiry editor
+
+- Consolidated lower-priority object, folder, and bucket operations into an
+  accessible per-row **Actions** menu while keeping the primary download and
+  replica/access status visible. Row menus now expose the same applicable
+  replicate, move, re-chunk, share, link-management, and delete operations as
+  the fixed bulk-selection bar.
+- Added isolated single-row move and re-chunk targets so row actions do not
+  accidentally submit a different existing bulk selection.
+- Reworked shared-link expiry controls into per-link expandable disclosures;
+  the link library remains usable with three or more links without controls
+  overlapping or forcing a wide modal.
+- Added Playwright coverage for row-action parity and a three-link expiry,
+  update, copy, revoke, and responsive-modal workflow.
+
+### Single Telegram read per segmented client download
+
+- Public-share and authenticated-admin streams now serialize Telegram payload
+  reads per client IP and object, so IDM-style range requests for different
+  starting offsets queue behind one active chunk instead of multiplying the
+  object's Telegram traffic.
+- Different objects remain independent, and the existing per-account,
+  per-download, retry, checksum, and 120-second recovery policies remain in
+  effect.
+- Added Rust concurrency coverage and documented the client/object fairness
+  boundary.
+
 ## 0.7.6-rc.25 - 2026-10-02
 
 ### Per-download account connection limits

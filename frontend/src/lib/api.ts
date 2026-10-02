@@ -12,7 +12,7 @@ import type {
   TelegramSettingsState,
   UsersState,
   WizardState
-  ,AccountInfo, ReplicationJob, RechunkJob, ReplicaInfo
+   ,AccountInfo, ReplicationJob, RechunkJob, ReplicaInfo, ObjectDetails
 } from './types';
 
 const API_PREFIX = '/_admin/api';
@@ -327,6 +327,15 @@ export function listObjects(
   if (options.sort) qp.set('sort', options.sort);
   if (options.order) qp.set('order', options.order);
   return requestJson<ObjectsState>(`/objects?${qp.toString()}`, csrf);
+}
+
+export function getObjectDetails(
+  csrf: string | null | undefined,
+  bucket: string,
+  key: string
+) {
+  const qp = new URLSearchParams({ bucket, key });
+  return requestJson<ObjectDetails>(`/objects/details?${qp.toString()}`, csrf);
 }
 
 export function createFolder(csrf?: string | null, bucket = '', path = '') {

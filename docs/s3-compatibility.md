@@ -18,7 +18,7 @@ features, so they are documented separately.
 | Head bucket | implemented | cargo test | Reflects bucket metadata from the local store | Telegram metadata is indirect | 4 |
 | Put object | implemented | cargo test / release-test.ps1 | Chunk upload plus manifest commit through the Telegram-backed object-format service; ambiguous sends are token-reconciled before safe retry, including restart recovery for stale sending attempts | 2 GiB Telegram file limit and bounded recovery scan | 4 |
 | Per-object expiry (extension) | implemented | cargo test | PUT and multipart initiation accept `x-amz-meta-telegram-s3-expires-at` (RFC3339) or `x-amz-meta-telegram-s3-expires-in` (seconds); expired objects are hidden from reads and listings, then swept into tombstone cleanup | Background expiry sweep runs with the cleanup worker; remote deletion remains evidence-first and retention-aware | 11 |
-| Get object | implemented | cargo test | Streams from Telegram-backed manifest and chunk references with checksum verification; transient Telegram reads retry per chunk while keeping the response open for up to 120 seconds; a bounded `0–4` prefetch policy supports adaptive parallel or sequential nearest-chunk scheduling without reordering output; an account-connection policy caps adaptive per-download concurrency by the enabled replica accounts and prefetch window, while one active payload read remains allowed per account | Requires chunk fetch and verification; clients should resume with a byte range after an exhausted stream; higher prefetch, account limits, or failover retries can use more Telegram traffic | 4 |
+| Get object | implemented | cargo test | Streams from Telegram-backed manifest and chunk references with checksum verification; transient Telegram reads retry per chunk while keeping the response open for up to 120 seconds; a bounded `0–4` prefetch policy supports adaptive parallel or sequential nearest-chunk scheduling without reordering output; an account-connection policy caps adaptive per-download concurrency by the enabled replica accounts and prefetch window, while one active payload read remains allowed per account; public/admin segmented ranges are serialized per client IP and object | Requires chunk fetch and verification; clients should resume with a byte range after an exhausted stream; higher prefetch, account limits, or failover retries can use more Telegram traffic | 4 |
 | Head object | implemented | cargo test | Returns committed metadata only | Manifest rebuild may be needed | 4 |
 | Delete object | implemented | cargo test | Tombstones before evidence-first cleanup | Telegram removal is asynchronous but due immediately | 4 |
 | List objects v1 | implemented | cargo test | Uses the same ordered local manifest index and delimiter grouping as v2 so older clients can interoperate | Remote reconciliation lag exists | 4 |
@@ -83,6 +83,11 @@ v24, default `5`, range `1–5`). For each object, the effective limit is the
 smallest of the configured limit, the prefetch window, and the enabled account
 locations recorded for that object. Sequential mode remains serial regardless
 of the account limit.
+Public-share and authenticated-admin streams add a narrower fairness gate: for
+one client IP and one object, only one Telegram payload read is active at a
+time. IDM-style ranges with different starting offsets therefore wait for the
+current chunk instead of multiplying Telegram traffic; different objects are
+not coupled.
 The Overview aggregates account health as connected when all configured
 accounts are connected, partial when only some are connected, and disconnected
 when none are connected; individual account indicators expose the account
@@ -163,6 +168,17 @@ while transient account/network failures remain retryable.
   pagination so page changes preserve the global order. These are
   operator-console features;
   S3 `ListObjects` and `ListObjectsV2` semantics are unchanged.
+- Object, folder, and bucket rows expose applicable maintenance and destructive
+   operations through a responsive Actions menu, while the fixed bulk bar keeps
+   its multi-selection actions. A row-level re-chunk or move carries an isolated
+   target scope and does not reuse an unrelated selection. Shared-link expiry
+   editing is a per-link expandable control; it changes presentation only and
+   still uses the existing authenticated link-management API.
+- Each object row also exposes an on-demand Information panel. The authenticated
+   `GET /_admin/api/objects/details?bucket&key` endpoint returns the committed
+   manifest summary, checksum/encryption policy, user metadata and tags, and
+   bounded chunk/replica placement details; it is not fetched during ordinary
+   bucket listing.
 - Path-style bucket names `_public` and `_admin` are reserved because those
   paths dispatch to the public-share and authenticated-admin HTTP surfaces.
   `CreateBucket` rejects either exact name with the standard
@@ -214,6 +230,8 @@ while transient account/network failures remain retryable.
   and keeps a bounded number of additional verified chunks ready in order
   while keeping the response open for up to 120 seconds. Missing messages,
   decryption failures, and checksum failures are not retried.
+  Segmented ranges for the same client IP and object are serialized at the
+  Telegram-read stage, while range responses remain resumable and ordered.
 - Public `audio/*` and `video/*` share responses use inline content disposition
   with the stored media type, which lets HTTP media players probe and play the
   link. Other public objects remain attachment downloads; this does not alter

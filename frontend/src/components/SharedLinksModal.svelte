@@ -13,9 +13,24 @@
 
   let confirmingId = '';
   let editingId = '';
+  let expandedExpiryId = '';
+  let lastTargetKey = '';
   let customSeconds = '';
   let copiedId = '';
   let selectedId = '';
+
+  $: if ((target?.key ?? '') !== lastTargetKey) {
+    lastTargetKey = target?.key ?? '';
+    expandedExpiryId = '';
+    editingId = '';
+    customSeconds = '';
+  }
+
+  function toggleExpiry(link: SharedLink) {
+    expandedExpiryId = expandedExpiryId === link.id ? '' : link.id;
+    editingId = '';
+    customSeconds = '';
+  }
 
   function selectExpiry(link: SharedLink, value: string) {
     editingId = link.id;
@@ -96,22 +111,30 @@
                 <p class="legacy-note">This older link cannot be reconstructed because its bearer token was not stored. Revoke it here and create a new link to manage its URL.</p>
               {/if}
               <div class="link-controls">
-                <label class="expiry-control">
-                  <span>Change expiry</span>
-                  <select aria-label={`Change expiry for ${link.description}`} on:change={(event) => selectExpiry(link, event.currentTarget.value)} disabled={busy}>
-                    <option value="">Choose a lifetime…</option>
-                    <option value="900">15 minutes</option>
-                    <option value="3600">1 hour</option>
-                    <option value="86400">1 day</option>
-                    <option value="604800">7 days</option>
-                    <option value="never">Never (limited by file)</option>
-                    <option value="custom">Custom seconds…</option>
-                  </select>
-                </label>
-                {#if editingId === link.id}
-                  <div class="custom-expiry">
-                    <input type="number" min="1" step="1" bind:value={customSeconds} aria-label={`Custom expiry seconds for ${link.description}`} placeholder="Seconds" />
-                    <button class="primary small-button" type="button" on:click={() => saveCustomExpiry(link)} disabled={busy}>Save</button>
+                <button class="expiry-toggle" type="button" aria-expanded={expandedExpiryId === link.id} aria-controls={`expiry-editor-${link.id}`} on:click={() => toggleExpiry(link)} disabled={busy}>
+                  <span class="expiry-toggle-copy"><span class="expiry-toggle-label">Change expiry</span><span>{expandedExpiryId === link.id ? 'Hide options' : 'Set a new lifetime'}</span></span>
+                  <span class="expiry-toggle-chevron" aria-hidden="true">{expandedExpiryId === link.id ? '⌃' : '⌄'}</span>
+                </button>
+                {#if expandedExpiryId === link.id}
+                  <div id={`expiry-editor-${link.id}`} class="expiry-editor">
+                    <label class="expiry-control">
+                      <span>New lifetime</span>
+                      <select aria-label={`Change expiry for ${link.description}`} on:change={(event) => selectExpiry(link, event.currentTarget.value)} disabled={busy}>
+                        <option value="">Choose a lifetime…</option>
+                        <option value="900">15 minutes</option>
+                        <option value="3600">1 hour</option>
+                        <option value="86400">1 day</option>
+                        <option value="604800">7 days</option>
+                        <option value="never">Never (limited by file)</option>
+                        <option value="custom">Custom seconds…</option>
+                      </select>
+                    </label>
+                    {#if editingId === link.id}
+                      <div class="custom-expiry">
+                        <input type="number" min="1" step="1" bind:value={customSeconds} aria-label={`Custom expiry seconds for ${link.description}`} placeholder="Seconds" />
+                        <button class="primary small-button" type="button" on:click={() => saveCustomExpiry(link)} disabled={busy}>Save</button>
+                      </div>
+                    {/if}
                   </div>
                 {/if}
                 {#if confirmingId === link.id}
@@ -155,7 +178,15 @@
   .url-row input { min-width: 0; font-size: .78rem; background: #f8fbfd; }
   .copy-button, .small-button { min-height: 40px; padding: .55rem .8rem; white-space: nowrap; }
   .copy-button { background: var(--text); }
-  .link-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; padding-top: 2px; }
+  .link-controls { display: grid; gap: 10px; padding-top: 2px; }
+  .expiry-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 8px 0 2px; border: 0; border-top: 1px solid #e6eef3; background: transparent; color: #537087; text-align: left; cursor: pointer; }
+  .expiry-toggle:hover:not(:disabled) { color: var(--accent); }
+  .expiry-toggle:focus-visible { outline: 3px solid rgba(43,130,197,.18); outline-offset: 3px; border-radius: 8px; }
+  .expiry-toggle-copy { display: grid; gap: 2px; }
+  .expiry-toggle-label { color: var(--accent); font-size: .7rem; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+  .expiry-toggle-copy > span:last-child { color: var(--muted); font-size: .72rem; }
+  .expiry-toggle-chevron { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: #edf6fb; color: var(--accent); font-size: 1rem; font-weight: 850; }
+  .expiry-editor { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; padding: 10px; border: 1px solid #dbeaf2; border-radius: 11px; background: #f8fcfe; }
   .expiry-control { display: grid; gap: 5px; flex: 1 1 220px; }
   .expiry-control span { color: var(--muted); font-size: .72rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
   .expiry-control select { min-height: 40px; padding-top: .55rem; padding-bottom: .55rem; }
@@ -169,5 +200,5 @@
   .empty-links p { max-width: 42ch; margin: 0; line-height: 1.5; font-size: .86rem; }
   .empty-orbit { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 1.5rem; font-weight: 800; }
   .shared-footer { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding-top: 2px; color: var(--muted); font-size: .76rem; }
-  @media(max-width:600px) { .shared-hero { grid-template-columns: auto minmax(0,1fr); } .shared-hero > .icon-button { grid-column: 2; grid-row: 1; justify-self: end; } .url-row { align-items: stretch; flex-direction: column; } .shared-footer { align-items: stretch; flex-direction: column; } .shared-footer button { width: 100%; } }
+  @media(max-width:600px) { .shared-hero { grid-template-columns: auto minmax(0,1fr); } .shared-hero > .icon-button { grid-column: 2; grid-row: 1; justify-self: end; } .url-row { align-items: stretch; flex-direction: column; } .shared-footer { align-items: stretch; flex-direction: column; } .shared-footer button { width: 100%; } .expiry-editor { align-items: stretch; flex-direction: column; } .expiry-control, .custom-expiry { flex-basis: auto; } .custom-expiry input { flex: 1 1 auto; } }
 </style>
