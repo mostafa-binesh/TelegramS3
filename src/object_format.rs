@@ -39,7 +39,7 @@ use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tokio::fs as async_fs;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -1048,6 +1048,29 @@ struct ReadPipeline {
     live: DownloadStageLive,
     account_connection_permits: Arc<Semaphore>,
     client_object_permits: Option<Arc<Semaphore>>,
+}
+
+struct PendingDownloadStream {
+    object_format: Arc<ObjectFormatService>,
+    manifest: ObjectManifest,
+    spans: Vec<ReadSpan>,
+    surface: &'static str,
+    client_object_gate: Option<Arc<Semaphore>>,
+}
+
+struct ActiveDownloadStream {
+    pipeline: ReadPipeline,
+    object_format: Arc<ObjectFormatService>,
+    _pin: ReadPinGuard,
+    stage: DownloadStageGuard,
+    _client_object_permit: Option<OwnedSemaphorePermit>,
+    done: bool,
+}
+
+enum DownloadStreamState {
+    Pending(Box<PendingDownloadStream>),
+    Active(Box<ActiveDownloadStream>),
+    Failed,
 }
 
 enum ReadPipelineTail {
@@ -3496,11 +3519,15 @@ impl ObjectFormatService {
         Self::read_spans_to_stream_for_client(this, manifest, spans, surface, None)
     }
 
-    /// Stream an object while optionally serializing Telegram reads for one
-    /// client/object pair. The limiter is intentionally narrower than the
-    /// object-wide reader: different objects from the same client may still
-    /// download concurrently, while segmented ranges for one object queue
-    /// behind one active Telegram chunk.
+    /// Stream an object while optionally admitting only one active download
+    /// pipeline for one client/object pair. Different objects from the same
+    /// client may still download concurrently, while segmented ranges for one
+    /// object wait before creating a stage or starting any Telegram work.
+    ///
+    /// HTTP cannot prevent a client from opening several TCP connections, but
+    /// the admission gate keeps those connections from multiplying backend
+    /// reads. The gate is held for the lifetime of the admitted stream and is
+    /// released when the response completes or the client disconnects.
     pub fn read_spans_to_stream_for_client(
         this: Arc<Self>,
         manifest: &ObjectManifest,
@@ -3508,63 +3535,112 @@ impl ObjectFormatService {
         surface: &'static str,
         client_identity: Option<String>,
     ) -> impl futures::Stream<Item = Result<Bytes, io::Error>> + Send + 'static + use<> {
-        let pin = this.pin_object(manifest.object_id);
-        let expected_client_bytes = spans.iter().map(|span| span.length).sum();
-        let max_window = usize::try_from(this.download_prefetch_chunks().saturating_add(1))
-            .unwrap_or(usize::MAX)
-            .max(1);
-        let mode = this.download_prefetch_mode();
-        let eligible_accounts = this.eligible_download_account_count(manifest);
-        let account_connections_limit = if mode == crate::config::DOWNLOAD_PREFETCH_MODE_SEQUENTIAL
-        {
-            1
-        } else {
-            effective_download_connection_limit(
-                this.download_account_connections(),
-                max_window,
-                eligible_accounts,
-            )
-        };
-        let account_connection_permits = Arc::new(Semaphore::new(account_connections_limit));
-        let client_object_permits = client_identity.map(|identity| {
+        let client_object_gate = client_identity.map(|identity| {
             let key = format!("{identity}\0{}", manifest.object_id);
             this.client_object_download_limits.semaphore(&key)
         });
-        let stage = this.download_stage_metrics.start(
-            surface,
-            format!("{}/{}", manifest.bucket, manifest.key),
-            &mode,
-            expected_client_bytes,
-            manifest.chunks.len() as u64,
-            max_window as u64,
-            account_connections_limit as u64,
-            eligible_accounts as u64,
-        );
-        let live = stage
-            .live()
-            .expect("download stage live state should exist");
-        let pipeline = ReadPipeline::new(
-            Arc::clone(&this),
-            manifest.clone(),
-            spans,
-            max_window,
-            &mode,
-            live,
-            account_connection_permits,
-            client_object_permits,
-        );
+
         futures::stream::unfold(
-            (pipeline, this, pin, stage, false),
-            |(mut pipeline, object_format, pin, mut stage, done)| async move {
-                if done {
-                    stage.finish("cancelled", None);
+            DownloadStreamState::Pending(Box::new(PendingDownloadStream {
+                object_format: this,
+                manifest: manifest.clone(),
+                spans,
+                surface,
+                client_object_gate,
+            })),
+            |state| async move {
+                let mut active = match state {
+                    DownloadStreamState::Pending(pending) => {
+                        let pending = *pending;
+                        let client_object_permit = match pending.client_object_gate {
+                            Some(gate) => match gate.acquire_owned().await {
+                                Ok(permit) => Some(permit),
+                                Err(_) => {
+                                    return Some((
+                                        Err(io::Error::other(
+                                            "client/object download limiter closed",
+                                        )),
+                                        DownloadStreamState::Failed,
+                                    ));
+                                }
+                            },
+                            None => None,
+                        };
+                        let object_format = pending.object_format;
+                        let pin = object_format.pin_object(pending.manifest.object_id);
+                        let expected_client_bytes =
+                            pending.spans.iter().map(|span| span.length).sum();
+                        let max_window = usize::try_from(
+                            object_format.download_prefetch_chunks().saturating_add(1),
+                        )
+                        .unwrap_or(usize::MAX)
+                        .max(1);
+                        let mode = object_format.download_prefetch_mode();
+                        let eligible_accounts =
+                            object_format.eligible_download_account_count(&pending.manifest);
+                        let account_connections_limit =
+                            if mode == crate::config::DOWNLOAD_PREFETCH_MODE_SEQUENTIAL {
+                                1
+                            } else {
+                                effective_download_connection_limit(
+                                    object_format.download_account_connections(),
+                                    max_window,
+                                    eligible_accounts,
+                                )
+                            };
+                        let account_connection_permits =
+                            Arc::new(Semaphore::new(account_connections_limit));
+                        let stage = object_format.download_stage_metrics.start(
+                            pending.surface,
+                            format!("{}/{}", pending.manifest.bucket, pending.manifest.key),
+                            &mode,
+                            expected_client_bytes,
+                            pending.manifest.chunks.len() as u64,
+                            max_window as u64,
+                            account_connections_limit as u64,
+                            eligible_accounts as u64,
+                        );
+                        let live = stage
+                            .live()
+                            .expect("download stage live state should exist");
+                        let pipeline = ReadPipeline::new(
+                            Arc::clone(&object_format),
+                            pending.manifest,
+                            pending.spans,
+                            max_window,
+                            &mode,
+                            live,
+                            account_connection_permits,
+                            // The outer admission permit is held for the whole
+                            // stream, so acquiring the same gate per chunk
+                            // would deadlock the admitted request.
+                            None,
+                        );
+                        Box::new(ActiveDownloadStream {
+                            pipeline,
+                            object_format,
+                            _pin: pin,
+                            stage,
+                            _client_object_permit: client_object_permit,
+                            done: false,
+                        })
+                    }
+                    DownloadStreamState::Active(active) => active,
+                    DownloadStreamState::Failed => return None,
+                };
+
+                if active.done {
+                    active.stage.finish("cancelled", None);
                     return None;
                 }
-                match pipeline.next().await {
+
+                match active.pipeline.next().await {
                     Some(Ok(result)) => {
                         let length = result.length;
-                        stage.record_prefetch_window(pipeline.current_window());
-                        let complete = stage.record_emitted(length);
+                        active
+                            .stage
+                            .record_prefetch_window(active.pipeline.current_window());
+                        let complete = active.stage.record_emitted(length);
                         if complete {
                             // Some HTTP consumers drop the body immediately
                             // after receiving the final bytes instead of
@@ -3572,25 +3648,30 @@ impl ObjectFormatService {
                             // Mark the sample complete before yielding those
                             // bytes so a successful download is not reported
                             // as cancelled by the guard's Drop implementation.
-                            stage.finish("completed", None);
+                            active.stage.finish("completed", None);
                         }
                         let bytes = result.bytes;
                         Some((
                             Ok({
-                                object_format.add_client_download_bytes(length);
+                                active.object_format.add_client_download_bytes(length);
                                 bytes
                             }),
-                            (pipeline, object_format, pin, stage, false),
+                            DownloadStreamState::Active(active),
                         ))
                     }
                     Some(Err(error)) => {
-                        stage.record_prefetch_window(pipeline.current_window());
-                        stage.finish("failed", Some(error.to_string()));
-                        Some((Err(error), (pipeline, object_format, pin, stage, true)))
+                        active
+                            .stage
+                            .record_prefetch_window(active.pipeline.current_window());
+                        active.stage.finish("failed", Some(error.to_string()));
+                        active.done = true;
+                        Some((Err(error), DownloadStreamState::Active(active)))
                     }
                     None => {
-                        stage.record_prefetch_window(pipeline.current_window());
-                        stage.finish("completed", None);
+                        active
+                            .stage
+                            .record_prefetch_window(active.pipeline.current_window());
+                        active.stage.finish("completed", None);
                         None
                     }
                 }
@@ -5316,6 +5397,7 @@ mod tests {
         TelegramConnectionHealth, TelegramConnectionState, TelegramTransportManager,
     };
     use bytes::Bytes;
+    use futures::StreamExt;
     use std::env;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
@@ -5435,6 +5517,62 @@ mod tests {
         let _other_permit = other_object
             .try_acquire()
             .expect("different objects must remain independent");
+    }
+
+    #[tokio::test]
+    async fn client_object_admission_waits_before_starting_a_second_stage() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = Arc::new(sample_service(&tempdir).await);
+        service.set_chunk_size(1024).expect("small chunks");
+        let manifest = service
+            .put_bytes(
+                "bucket",
+                "single-pipeline.bin",
+                "application/octet-stream",
+                &[3; 4096],
+            )
+            .await
+            .expect("put");
+        let spans = ObjectFormatService::plan_read(&manifest, 0..manifest.content_length)
+            .expect("read plan")
+            .chunks;
+        let mut first = Box::pin(ObjectFormatService::read_spans_to_stream_for_client(
+            Arc::clone(&service),
+            &manifest,
+            spans.clone(),
+            "test",
+            Some("198.51.100.7".to_string()),
+        ));
+        assert!(first.as_mut().next().await.expect("first item").is_ok());
+
+        let mut second = Box::pin(ObjectFormatService::read_spans_to_stream_for_client(
+            Arc::clone(&service),
+            &manifest,
+            spans,
+            "test",
+            Some("198.51.100.7".to_string()),
+        ));
+        let blocked =
+            tokio::time::timeout(std::time::Duration::from_millis(20), second.as_mut().next())
+                .await;
+        assert!(blocked.is_err(), "a second range must wait for admission");
+        assert_eq!(
+            service.download_stage_metrics().active_requests,
+            1,
+            "waiting range must not create a second active stage"
+        );
+
+        drop(first);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                second.as_mut().next(),
+            )
+            .await
+            .expect("second range admitted")
+            .expect("second item")
+            .is_ok()
+        );
     }
 
     #[test]

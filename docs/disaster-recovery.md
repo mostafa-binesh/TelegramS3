@@ -206,12 +206,14 @@ with locations for the object. Sequential mode remains one remote read at a
 time. These settings are runtime policies and do not change the manifest or
 recovery boundary.
 
-Public and authenticated-admin segmented downloads also use a process-local
-per-client/object gate with capacity one at the Telegram-read stage. Multiple
-range requests from one client IP for different offsets of the same object wait
-behind the active chunk rather than creating parallel Telegram reads. The gate
-does not change manifests, cleanup ownership, recovery state, or the behavior
-of different objects.
+S3, public, and authenticated-admin segmented downloads also use a
+process-local per-client/object gate with capacity one before the download
+stage is created. Multiple range requests from one client IP for different
+offsets of the same object wait behind the admitted response rather than
+creating parallel stages, prefetch workers, or Telegram reads. The gate does
+not change manifests, cleanup ownership, recovery state, or the behavior of
+different objects. It serializes server work but cannot force a client to use
+one TCP socket.
 
 Operators may choose sequential nearest-chunk mode in the same policy page.
 After the first requested chunk, it fetches the next chunks strictly in

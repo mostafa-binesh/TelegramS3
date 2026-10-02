@@ -302,10 +302,13 @@ to the smaller of this policy, the prefetch window, and the enabled account
 locations present across the object's chunks. The existing per-account
 semaphore still allows only one active payload read for any individual account.
 Sequential reads keep one remote read active regardless of this setting.
-Public-share and authenticated-admin requests also acquire a per-client/object
-semaphore with capacity one. This is keyed by the client IP and object ID, so
-IDM-style ranges from different starting offsets queue behind one active
-Telegram chunk, while separate objects from that client remain independent.
+S3, public-share, and authenticated-admin requests also acquire a
+per-client/object semaphore with capacity one before creating the download
+stage. This is keyed by the client IP and object ID, so IDM-style ranges from
+different starting offsets queue behind one admitted response and do not start
+their own prefetch workers or Telegram reads. Separate objects from that
+client remain independent. The server cannot force the client to use one TCP
+socket; it can only serialize the backend pipeline behind those sockets.
 The authenticated Overview exposes a bounded, process-local testing snapshot
 for recent reads: surface, chunk and payload counts, first-chunk latency,
 Telegram and retry-wait time, decrypt time, checksum-verification time, and

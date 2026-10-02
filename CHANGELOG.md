@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.6-rc.28 - 2026-10-03
+
+### Single backend pipeline for segmented client downloads
+
+- Added a per-client/object admission gate for S3, public-link, and
+  authenticated-admin downloads.
+- IDM-style or browser range requests for the same object now wait before
+  creating a download stage, prefetch worker, or Telegram read; only one
+  backend pipeline serves that object for that client at a time.
+- The gate is held for the full response and is released on completion or
+  client disconnect, while different objects remain independent.
+- Added regression coverage proving a waiting range does not create a second
+  active stage and is admitted after the first stream releases the gate.
+- Documented that this serializes server-side work but cannot literally force a
+  browser or download manager to use only one TCP socket.
+
 ## 0.7.6-rc.27 - 2026-10-02
 
 ### Access-replica downloads across shared chats

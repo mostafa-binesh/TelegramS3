@@ -57,10 +57,11 @@ staging, and recovery artifacts, not committed payloads.
   new account. Transient Telegram reads are retried per chunk using the same
   bounded policy before a download fails. A client stream remains open for up
   to 120 seconds while a transient Telegram/proxy read is recovering.
-  Public-share and authenticated-admin range requests are additionally
-  serialized per client IP and object, so segmented download tools cannot turn
-  one object into several simultaneous Telegram reads; different objects remain
-  independent.
+  S3, public-share, and authenticated-admin streams are additionally admitted
+  through a per-client/object gate. A segmented client may still open extra
+  HTTP/TCP connections, but those requests wait before creating a download
+  stage, prefetch worker, or Telegram read; only one backend pipeline serves
+  that object for that client at a time. Different objects remain independent.
 - **Bounded memory everywhere** — uploads and downloads stream chunk-by-chunk;
   no whole-object RAM buffering (an explicit project invariant).
 - **Download stage diagnostics** — the authenticated Overview keeps a bounded,
@@ -419,9 +420,11 @@ extra chunks; in sequential mode this is the maximum ordered look-ahead, while
 adaptive mode uses it as a parallel ceiling. The maximum account-connection
 policy accepts `1–5` accounts and is capped per file by the prefetch window and
 the enabled replica accounts that have locations for that file. The reader
-keeps at most one active Telegram payload read per account. Public and admin
-range requests also allow only one active Telegram payload read per client IP
-and object; sibling ranges wait rather than creating parallel backend work.
+keeps at most one active Telegram payload read per account. S3, public, and
+admin range requests also hold one admission permit per client IP and object
+for the full response; sibling ranges wait before backend work starts rather
+than creating parallel download pipelines. This controls server work but
+cannot literally force a browser or download manager to use one TCP socket.
 Live status stays in process memory rather than SQLite. Telegram
 API IDs and storage chat IDs are validated as numeric values
 before persistence; connection refresh failures are returned as JSON warnings

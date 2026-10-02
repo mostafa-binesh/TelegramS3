@@ -18,7 +18,7 @@ features, so they are documented separately.
 | Head bucket | implemented | cargo test | Reflects bucket metadata from the local store | Telegram metadata is indirect | 4 |
 | Put object | implemented | cargo test / release-test.ps1 | Chunk upload plus manifest commit through the Telegram-backed object-format service; ambiguous sends are token-reconciled before safe retry, including restart recovery for stale sending attempts | 2 GiB Telegram file limit and bounded recovery scan | 4 |
 | Per-object expiry (extension) | implemented | cargo test | PUT and multipart initiation accept `x-amz-meta-telegram-s3-expires-at` (RFC3339) or `x-amz-meta-telegram-s3-expires-in` (seconds); expired objects are hidden from reads and listings, then swept into tombstone cleanup | Background expiry sweep runs with the cleanup worker; remote deletion remains evidence-first and retention-aware | 11 |
-| Get object | implemented | cargo test | Streams from Telegram-backed manifest and chunk references with checksum verification; transient Telegram reads retry per chunk while keeping the response open for up to 120 seconds; a bounded `0–4` prefetch policy supports adaptive parallel or sequential nearest-chunk scheduling without reordering output; an account-connection policy caps adaptive per-download concurrency by the enabled replica accounts and prefetch window, while one active payload read remains allowed per account; public/admin segmented ranges are serialized per client IP and object | Requires chunk fetch and verification; clients should resume with a byte range after an exhausted stream; higher prefetch, account limits, or failover retries can use more Telegram traffic | 4 |
+| Get object | implemented | cargo test | Streams from Telegram-backed manifest and chunk references with checksum verification; transient Telegram reads retry per chunk while keeping the response open for up to 120 seconds; a bounded `0–4` prefetch policy supports adaptive parallel or sequential nearest-chunk scheduling without reordering output; an account-connection policy caps adaptive per-download concurrency by the enabled replica accounts and prefetch window, while one active payload read remains allowed per account; S3/admin/public segmented requests for one client IP and object share one full-response admission gate, so extra HTTP connections wait before creating backend stages or Telegram reads | Requires chunk fetch and verification; clients should resume with a byte range after an exhausted stream; higher prefetch, account limits, or failover retries can use more Telegram traffic; HTTP cannot force a client to open only one TCP socket | 4 |
 | Head object | implemented | cargo test | Returns committed metadata only | Manifest rebuild may be needed | 4 |
 | Delete object | implemented | cargo test | Tombstones before evidence-first cleanup | Telegram removal is asynchronous but due immediately | 4 |
 | List objects v1 | implemented | cargo test | Uses the same ordered local manifest index and delimiter grouping as v2 so older clients can interoperate | Remote reconciliation lag exists | 4 |
@@ -85,11 +85,12 @@ v24, default `5`, range `1–5`). For each object, the effective limit is the
 smallest of the configured limit, the prefetch window, and the enabled account
 locations recorded for that object. Sequential mode remains serial regardless
 of the account limit.
-Public-share and authenticated-admin streams add a narrower fairness gate: for
-one client IP and one object, only one Telegram payload read is active at a
-time. IDM-style ranges with different starting offsets therefore wait for the
-current chunk instead of multiplying Telegram traffic; different objects are
-not coupled.
+S3, public-share, and authenticated-admin streams add a narrower fairness
+gate: for one client IP and one object, only one full download pipeline is
+admitted at a time. IDM-style ranges with different starting offsets therefore
+wait before creating a stage or prefetch worker instead of multiplying
+Telegram traffic; different objects are not coupled. This limits backend
+work, not the client's literal TCP socket count.
 The Overview aggregates account health as connected when all configured
 accounts are connected, partial when only some are connected, and disconnected
 when none are connected; individual account indicators expose the account

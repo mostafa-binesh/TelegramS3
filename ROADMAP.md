@@ -267,9 +267,11 @@ Completed in this increment:
   Telegram-byte, retry, and server/client chunk progress without per-chunk
   SQLite writes, including the effective account-connection limit and eligible
   replica-account count
-- public-share and authenticated-admin segmented range requests serialize
-  Telegram payload reads per client IP and object, preventing IDM-style range
-  fan-out while keeping different objects independent
+- S3, public-share, and authenticated-admin segmented range requests use a
+  per-client/object admission gate held for the full response, preventing
+  IDM-style range fan-out from creating parallel stages or Telegram reads
+  while keeping different objects independent; extra client sockets may wait
+  because HTTP cannot force the client to open only one socket
 - the Overview caches manifest-derived object counts and unique Telegram
   payload size for five seconds; its five-second refresh uses the cheap
   `/overview/live` endpoint for transfer, traffic, stage, and connection
