@@ -181,7 +181,12 @@ cancelled when the client stream ends. The adaptive scheduler starts small,
 ramps up after clean reads, and backs off after retries or measured throughput
 drops. A per-account limiter allows at most one active Telegram payload read per
 account, while enabled physical replicas can still serve different chunks in
-parallel.
+parallel. The persisted account-connection policy (schema v24, default `5`,
+range `1–5`) caps each adaptive download further; the effective limit is the
+smallest of that policy, the prefetch window, and the enabled replica accounts
+with locations for the object. Sequential mode remains one remote read at a
+time. These settings are runtime policies and do not change the manifest or
+recovery boundary.
 
 Operators may choose sequential nearest-chunk mode in the same policy page.
 After the first requested chunk, it fetches the next chunks strictly in
@@ -198,7 +203,8 @@ total durations, plus retry and byte counts. These samples are diagnostic only
 and disappear on restart; they are not recovery evidence or durable transfer
 state. Active reads additionally expose the object, mode, current chunk,
 client-delivered bytes, Telegram-read bytes, retries, and server/client chunk
-counts from process memory only.
+counts, effective account limit, and eligible replica-account count from
+process memory only.
 
 Public and admin responses advertise `Accept-Ranges: bytes`. If the recovery
 window is exhausted after earlier bytes were sent, a capable client can resume

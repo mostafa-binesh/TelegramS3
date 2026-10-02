@@ -290,6 +290,12 @@ chunk references, and checksums are unchanged.
 The first requested span is intentionally fetched on its own before the
 speculative window is opened. This first-chunk priority improves time to first
 byte while preserving manifest order and the same bounded concurrency limit.
+Schema v24 adds `telegram_download_account_connections` (default `5`, range
+`1–5`). For adaptive reads, one per-download semaphore caps remote chunk reads
+to the smaller of this policy, the prefetch window, and the enabled account
+locations present across the object's chunks. The existing per-account
+semaphore still allows only one active payload read for any individual account.
+Sequential reads keep one remote read active regardless of this setting.
 The authenticated Overview exposes a bounded, process-local testing snapshot
 for recent reads: surface, chunk and payload counts, first-chunk latency,
 Telegram and retry-wait time, decrypt time, checksum-verification time, and
@@ -298,7 +304,8 @@ chunk, byte, retry, and duration totals. The snapshot retains only the latest 20
 part of the manifest, metadata journal, recovery state, or traffic totals. Active
 reads are held in process memory and report object, mode, current chunk,
 client-delivered bytes, Telegram-read bytes, retries, and server/client chunk
-counts without adding per-chunk SQLite writes.
+counts, effective account-connection limit, and eligible account count without
+adding per-chunk SQLite writes.
 
 The Overview keeps manifest-derived object counts and unique committed Telegram
 payload size in a five-second cache. Its five-second background refresh reads

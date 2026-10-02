@@ -29,7 +29,7 @@ initial or explicit/full Overview refresh.
 
 ## Schema Version
 
-- Current schema version: `19`
+- Current schema version: `24`
 - Version contract: migrations are applied on startup and are also available
   through the `telegram-s3 db migrate` command.
 - Startup behavior: the store opens the configured SQLite file and connection
@@ -47,6 +47,11 @@ active transfer boundaries.
 Schema v23 adds the database-backed `telegram_download_prefetch_mode` setting.
 Existing databases are migrated with `adaptive`, preserving all object and
 transfer metadata. The setting changes only runtime download scheduling.
+
+Schema v24 adds the database-backed
+`telegram_download_account_connections` setting. Existing databases are
+migrated with `5`; it limits adaptive per-download Telegram concurrency without
+changing manifests, replicas, or transfer boundaries.
 
 ## Tables
 

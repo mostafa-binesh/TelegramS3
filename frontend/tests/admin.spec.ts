@@ -125,6 +125,7 @@ async function mockAdminApi(
   let chunkSize = 1_048_576;
   let downloadPrefetchChunks = 1;
   let downloadPrefetchMode = 'adaptive';
+  let downloadAccountConnections = 5;
   const deletedKeys = new Set<string>();
   const buckets = options.browserBuckets ?? [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }];
   const users = [user];
@@ -224,15 +225,16 @@ async function mockAdminApi(
       });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'GET') {
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_prefetch_mode: downloadPrefetchMode, download_prefetch_modes: ['adaptive', 'sequential'], recovery_verify_enabled: true, recovery_verify_startup: true, recovery_verify_interval_secs: 300, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: 1, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: 43200, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_prefetch_mode: downloadPrefetchMode, download_prefetch_modes: ['adaptive', 'sequential'], download_account_connections: downloadAccountConnections, min_download_account_connections: 1, max_download_account_connections: 5, recovery_verify_enabled: true, recovery_verify_startup: true, recovery_verify_interval_secs: 300, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: 1, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: 43200, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'POST') {
       if (options.storageSettingsFailure) return route.fulfill({ status: 400, json: { error: 'storage settings rejected for this test' } });
-      const body = request.postDataJSON() as { chunk_size: number; download_prefetch_chunks: number; download_prefetch_mode?: string };
+      const body = request.postDataJSON() as { chunk_size: number; download_prefetch_chunks: number; download_prefetch_mode?: string; download_account_connections?: number };
       chunkSize = body.chunk_size;
       downloadPrefetchChunks = body.download_prefetch_chunks;
       downloadPrefetchMode = body.download_prefetch_mode ?? downloadPrefetchMode;
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_prefetch_mode: downloadPrefetchMode, download_prefetch_modes: ['adaptive', 'sequential'], recovery_verify_enabled: true, recovery_verify_startup: true, recovery_verify_interval_secs: 300, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: 1, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: 43200, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
+      downloadAccountConnections = body.download_account_connections ?? downloadAccountConnections;
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_prefetch_mode: downloadPrefetchMode, download_prefetch_modes: ['adaptive', 'sequential'], download_account_connections: downloadAccountConnections, min_download_account_connections: 1, max_download_account_connections: 5, recovery_verify_enabled: true, recovery_verify_startup: true, recovery_verify_interval_secs: 300, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: 1, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: 43200, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
     }
     if (path === '/telegram/wizard/begin' && request.method() === 'POST') {
       return route.fulfill({ json: { phase: 'code', message: null } });

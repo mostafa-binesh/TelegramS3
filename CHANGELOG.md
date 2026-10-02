@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.6-rc.25 - 2026-10-02
+
+### Per-download account connection limits
+
+- Added a persisted `1–5` maximum Telegram-account connection policy for
+  adaptive downloads, defaulting to `5` for existing behavior.
+- Each download now caps its effective parallel reads by the configured limit,
+  prefetch window, and enabled replica accounts that have locations for that
+  object; each account still permits only one active payload read.
+- Added schema v24 migration, Telegram settings controls, live diagnostics for
+  the effective limit and eligible account count, and Rust/Playwright coverage.
+- Updated storage, recovery, compatibility, configuration, roadmap, metadata,
+  and prefetch ADR documentation.
+
 ## 0.7.6-rc.24 - 2026-10-02
 
 ### Sequential nearest-chunk downloads and live status

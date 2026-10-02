@@ -16,6 +16,9 @@ pub const DEFAULT_DOWNLOAD_PREFETCH_CHUNKS: u64 = 1;
 pub const DOWNLOAD_PREFETCH_MODE_ADAPTIVE: &str = "adaptive";
 pub const DOWNLOAD_PREFETCH_MODE_SEQUENTIAL: &str = "sequential";
 pub const DEFAULT_DOWNLOAD_PREFETCH_MODE: &str = DOWNLOAD_PREFETCH_MODE_ADAPTIVE;
+pub const MIN_DOWNLOAD_ACCOUNT_CONNECTIONS: u64 = 1;
+pub const MAX_DOWNLOAD_ACCOUNT_CONNECTIONS: u64 = 5;
+pub const DEFAULT_DOWNLOAD_ACCOUNT_CONNECTIONS: u64 = MAX_DOWNLOAD_ACCOUNT_CONNECTIONS;
 pub const MIN_DOWNLOAD_FAILOVER_RETRIES: u64 = 0;
 pub const MAX_DOWNLOAD_FAILOVER_RETRIES: u64 = 8;
 pub const DEFAULT_DOWNLOAD_FAILOVER_RETRIES: u64 = 1;
@@ -175,6 +178,15 @@ impl AppConfig {
             return Err(ConfigError::Invalid("TELEGRAM_DOWNLOAD_PREFETCH_MODE"));
         }
         Ok(())
+    }
+
+    pub fn validate_download_account_connections(value: u64) -> Result<u64, ConfigError> {
+        if !(MIN_DOWNLOAD_ACCOUNT_CONNECTIONS..=MAX_DOWNLOAD_ACCOUNT_CONNECTIONS).contains(&value) {
+            return Err(ConfigError::Invalid(
+                "TELEGRAM_DOWNLOAD_ACCOUNT_CONNECTIONS",
+            ));
+        }
+        Ok(value)
     }
 
     pub fn validate_download_failover_retries(value: u64) -> Result<u64, ConfigError> {
@@ -727,6 +739,22 @@ mod tests {
             AppConfig::validate_download_prefetch_mode(DOWNLOAD_PREFETCH_MODE_SEQUENTIAL).is_ok()
         );
         assert!(AppConfig::validate_download_prefetch_mode("burst").is_err());
+    }
+
+    #[test]
+    fn download_account_connections_are_bounded() {
+        assert!(
+            AppConfig::validate_download_account_connections(MIN_DOWNLOAD_ACCOUNT_CONNECTIONS)
+                .is_ok()
+        );
+        assert!(
+            AppConfig::validate_download_account_connections(MAX_DOWNLOAD_ACCOUNT_CONNECTIONS)
+                .is_ok()
+        );
+        assert!(
+            AppConfig::validate_download_account_connections(MAX_DOWNLOAD_ACCOUNT_CONNECTIONS + 1)
+                .is_err()
+        );
     }
 
     #[test]

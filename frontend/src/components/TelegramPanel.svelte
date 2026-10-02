@@ -32,6 +32,9 @@
   export let downloadPrefetchChunksMin = 0;
   export let downloadPrefetchChunksMax = 4;
   export let downloadPrefetchMode: 'adaptive' | 'sequential' | string = 'adaptive';
+  export let downloadAccountConnections = 5;
+  export let downloadAccountConnectionsMin = 1;
+  export let downloadAccountConnectionsMax = 5;
   export let downloadFailoverRetries = 1;
   export let downloadFailoverRetriesMin = 0;
   export let downloadFailoverRetriesMax = 8;
@@ -86,6 +89,9 @@
     && Number(downloadPrefetchChunks) >= downloadPrefetchChunksMin
     && Number(downloadPrefetchChunks) <= downloadPrefetchChunksMax;
   $: downloadPrefetchModeValid = ['adaptive', 'sequential'].includes(downloadPrefetchMode);
+  $: downloadAccountConnectionsValid = Number.isInteger(Number(downloadAccountConnections))
+    && Number(downloadAccountConnections) >= downloadAccountConnectionsMin
+    && Number(downloadAccountConnections) <= downloadAccountConnectionsMax;
   $: downloadFailoverRetriesValid = Number.isInteger(Number(downloadFailoverRetries))
     && Number(downloadFailoverRetries) >= downloadFailoverRetriesMin
     && Number(downloadFailoverRetries) <= downloadFailoverRetriesMax;
@@ -98,7 +104,7 @@
   $: cleanupRetentionValid = Number.isInteger(Number(cleanupRetentionSecs))
     && Number(cleanupRetentionSecs) >= cleanupRetentionMin
     && Number(cleanupRetentionSecs) <= cleanupRetentionMax;
-  $: recoverySettingsValid = downloadPrefetchChunksValid && downloadPrefetchModeValid && downloadFailoverRetriesValid && recoveryVerifyIntervalValid && recoveryVerifyChunksValid && cleanupRetentionValid;
+  $: recoverySettingsValid = downloadPrefetchChunksValid && downloadPrefetchModeValid && downloadAccountConnectionsValid && downloadFailoverRetriesValid && recoveryVerifyIntervalValid && recoveryVerifyChunksValid && cleanupRetentionValid;
   $: phoneConfirmationMatches = Boolean(telegramAccountPhone)
     && phoneConfirmation.trim() === telegramAccountPhone.trim();
 
@@ -205,6 +211,13 @@
           {#each [{label: 'Off', value: 0}, {label: '1 ahead', value: 1}, {label: '2 ahead', value: 2}, {label: '4 ahead', value: 4}] as preset}<button class:chosen={Number(downloadPrefetchChunks) === preset.value} type="button" on:click={() => downloadPrefetchChunks = preset.value}>{preset.label}</button>{/each}
         </div>
         <p id="download-prefetch-help" class="range-help">Allowed range: {downloadPrefetchChunksMin}–{downloadPrefetchChunksMax} extra chunks. {downloadPrefetchMode === 'sequential' ? 'Sequential mode reads the nearest chunk first and preloads the allowed look-ahead one chunk at a time.' : 'Adaptive mode can use parallel reads across enabled accounts and backs off when Telegram slows.'}</p>
+        <div class="verification-heading"><div><span class="eyebrow">Replica connections</span><h3>Connection limit</h3></div><span class="policy-badge">Up to {downloadAccountConnections}</span></div>
+        <p class="policy-description">Limit how many Telegram accounts may serve one download at once. The server automatically caps this by the prefetch window and the eligible replica accounts for that file.</p>
+        <label class="chunk-input-label"><span>Maximum account connections</span><div class="chunk-input-wrap"><input bind:value={downloadAccountConnections} aria-label="Maximum Telegram account connections" type="number" min={downloadAccountConnectionsMin} max={downloadAccountConnectionsMax} step="1" inputmode="numeric" aria-describedby="download-account-connections-help" /><span>accounts</span></div></label>
+        <div class="preset-grid verification-presets" aria-label="Account connection presets">
+          {#each [1, 2, 3, 4, 5].filter((preset) => preset >= downloadAccountConnectionsMin && preset <= downloadAccountConnectionsMax) as preset}<button class:chosen={Number(downloadAccountConnections) === preset} type="button" on:click={() => downloadAccountConnections = preset}>{preset}</button>{/each}
+        </div>
+        <p id="download-account-connections-help" class="range-help">Allowed range: {downloadAccountConnectionsMin}–{downloadAccountConnectionsMax}. A file with fewer eligible replica accounts automatically uses fewer connections.</p>
         <div class="verification-heading"><div><span class="eyebrow">Account failover</span><h3>Retry before switching</h3></div><span class="policy-badge">{downloadFailoverRetries} retry{Number(downloadFailoverRetries) === 1 ? '' : 'ies'}</span></div>
         <p class="policy-description">If a selected Telegram account cannot provide a chunk, retry the complete read before moving to the next enabled replica account. Each attempt still uses the normal Telegram retry and recovery window.</p>
         <label class="chunk-input-label"><span>Retries before account failover</span><div class="chunk-input-wrap"><input bind:value={downloadFailoverRetries} aria-label="Retries before account failover" type="number" min={downloadFailoverRetriesMin} max={downloadFailoverRetriesMax} step="1" inputmode="numeric" aria-describedby="download-failover-help" /><span>retries</span></div></label>
@@ -236,7 +249,7 @@
         <div class="manual-verifier-row"><div><strong>Manual integrity scan</strong><small>Run the same random verifier now. The configured interval starts over after this scan completes.</small></div><button class="secondary" type="button" disabled={!recoveryVerifyEnabled || recoveryRunBusy} on:click={() => void runRecoveryVerification()}>{recoveryRunBusy ? 'Starting…' : 'Run integrity check now'}</button></div>
         {#if storageSettingsError}<p class="storage-message message-error" role="alert">{storageSettingsError}</p>{/if}
         {#if storageSettingsMessage}<p class="storage-message" role="status">✓ {storageSettingsMessage}</p>{/if}
-        <div class="policy-actions"><span class:valid={draftChunkSizeValid && recoverySettingsValid} class="draft-preview">{draftChunkSizeValid && recoverySettingsValid ? `${downloadPrefetchMode === 'sequential' ? 'Sequential' : 'Adaptive parallel'} · ${downloadPrefetchChunks === 0 ? 'no look-ahead' : `${downloadPrefetchChunks} chunk${Number(downloadPrefetchChunks) === 1 ? '' : 's'} ahead`} · ${downloadFailoverRetries} failover retr${Number(downloadFailoverRetries) === 1 ? 'y' : 'ies'} · cleanup retained ${cleanupRetentionSecs}s · ${recoveryVerifyEnabled ? `checks ${recoveryVerifyChunks} random chunk${Number(recoveryVerifyChunks) === 1 ? '' : 's'} every ${recoveryVerifyIntervalSecs}s` : 'verification disabled'}` : 'Enter values in the allowed ranges'}</span><button class="primary" type="submit" disabled={storageSettingsBusy || !draftChunkSizeValid || !recoverySettingsValid}>{storageSettingsBusy ? 'Applying…' : 'Apply storage policy'}</button></div>
+        <div class="policy-actions"><span class:valid={draftChunkSizeValid && recoverySettingsValid} class="draft-preview">{draftChunkSizeValid && recoverySettingsValid ? `${downloadPrefetchMode === 'sequential' ? 'Sequential' : 'Adaptive parallel'} · ${downloadPrefetchChunks === 0 ? 'no look-ahead' : `${downloadPrefetchChunks} chunk${Number(downloadPrefetchChunks) === 1 ? '' : 's'} ahead`} · up to ${downloadAccountConnections} account${Number(downloadAccountConnections) === 1 ? '' : 's'} · ${downloadFailoverRetries} failover retr${Number(downloadFailoverRetries) === 1 ? 'y' : 'ies'} · cleanup retained ${cleanupRetentionSecs}s · ${recoveryVerifyEnabled ? `checks ${recoveryVerifyChunks} random chunk${Number(recoveryVerifyChunks) === 1 ? '' : 's'} every ${recoveryVerifyIntervalSecs}s` : 'verification disabled'}` : 'Enter values in the allowed ranges'}</span><button class="primary" type="submit" disabled={storageSettingsBusy || !draftChunkSizeValid || !recoverySettingsValid}>{storageSettingsBusy ? 'Applying…' : 'Apply storage policy'}</button></div>
       </form>
 
       <aside class="policy-card policy-impact">

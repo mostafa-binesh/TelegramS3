@@ -160,6 +160,14 @@ parallel pressure. Existing objects and their chunk layout are unchanged.
 Live active-download status is kept in process memory and is not persisted as
 per-chunk SQLite state.
 
+The `telegram_download_account_connections` setting was introduced by schema
+v24 and defaults to `5`, with an allowed range of `1–5`. In adaptive mode it
+limits the number of Telegram chunk reads that one client download may have
+active at once. The effective value is automatically reduced to the smaller of
+the configured limit, the prefetch window, and the enabled replica/access
+accounts that have a location for the object. Sequential mode still performs
+one remote read at a time. Each account retains its separate one-read limiter.
+
 The same page controls `telegram_download_failover_retries`, introduced by
 schema v19. It is the number of additional complete attempts made on the
 currently selected eligible Telegram account before the reader rotates to the

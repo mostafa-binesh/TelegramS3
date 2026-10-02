@@ -152,6 +152,8 @@ export interface DownloadStageSample {
   prefetch_mode?: string;
   prefetch_window_max?: number;
   prefetch_window_final?: number;
+  account_connections_limit?: number;
+  eligible_accounts?: number;
   accounts?: DownloadAccountStageSample[];
   first_chunk_us?: number | null;
   telegram_us: number;
@@ -176,6 +178,8 @@ export interface DownloadStageActive {
   telegram_retries: number;
   prefetch_window_max: number;
   prefetch_window_final: number;
+  account_connections_limit?: number;
+  eligible_accounts?: number;
 }
 
 export interface DownloadAccountStageSample {
@@ -310,6 +314,9 @@ export interface StorageSettings {
   max_download_prefetch_chunks: number;
   download_prefetch_mode: 'adaptive' | 'sequential' | string;
   download_prefetch_modes?: string[];
+  download_account_connections: number;
+  min_download_account_connections: number;
+  max_download_account_connections: number;
   download_failover_retries: number;
   min_download_failover_retries: number;
   max_download_failover_retries: number;

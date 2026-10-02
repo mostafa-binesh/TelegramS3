@@ -18,7 +18,7 @@ features, so they are documented separately.
 | Head bucket | implemented | cargo test | Reflects bucket metadata from the local store | Telegram metadata is indirect | 4 |
 | Put object | implemented | cargo test / release-test.ps1 | Chunk upload plus manifest commit through the Telegram-backed object-format service; ambiguous sends are token-reconciled before safe retry, including restart recovery for stale sending attempts | 2 GiB Telegram file limit and bounded recovery scan | 4 |
 | Per-object expiry (extension) | implemented | cargo test | PUT and multipart initiation accept `x-amz-meta-telegram-s3-expires-at` (RFC3339) or `x-amz-meta-telegram-s3-expires-in` (seconds); expired objects are hidden from reads and listings, then swept into tombstone cleanup | Background expiry sweep runs with the cleanup worker; remote deletion remains evidence-first and retention-aware | 11 |
-| Get object | implemented | cargo test | Streams from Telegram-backed manifest and chunk references with checksum verification; transient Telegram reads retry per chunk while keeping the response open for up to 120 seconds; a bounded `0–4` prefetch policy supports adaptive parallel or sequential nearest-chunk scheduling without reordering output; one active payload read is allowed per account, while enabled replicas can provide parallel capacity | Requires chunk fetch and verification; clients should resume with a byte range after an exhausted stream; higher prefetch or failover retries can use more Telegram traffic | 4 |
+| Get object | implemented | cargo test | Streams from Telegram-backed manifest and chunk references with checksum verification; transient Telegram reads retry per chunk while keeping the response open for up to 120 seconds; a bounded `0–4` prefetch policy supports adaptive parallel or sequential nearest-chunk scheduling without reordering output; an account-connection policy caps adaptive per-download concurrency by the enabled replica accounts and prefetch window, while one active payload read remains allowed per account | Requires chunk fetch and verification; clients should resume with a byte range after an exhausted stream; higher prefetch, account limits, or failover retries can use more Telegram traffic | 4 |
 | Head object | implemented | cargo test | Returns committed metadata only | Manifest rebuild may be needed | 4 |
 | Delete object | implemented | cargo test | Tombstones before evidence-first cleanup | Telegram removal is asynchronous but due immediately | 4 |
 | List objects v1 | implemented | cargo test | Uses the same ordered local manifest index and delimiter grouping as v2 so older clients can interoperate | Remote reconciliation lag exists | 4 |
@@ -78,6 +78,11 @@ locations per chunk. A failed selected account is retried according to the
 `telegram_download_failover_retries` database setting before the next eligible
 account is attempted; each attempt still uses the normal Telegram retry and
 120-second stream-recovery policy.
+Adaptive downloads also honor `telegram_download_account_connections` (schema
+v24, default `5`, range `1–5`). For each object, the effective limit is the
+smallest of the configured limit, the prefetch window, and the enabled account
+locations recorded for that object. Sequential mode remains serial regardless
+of the account limit.
 The Overview aggregates account health as connected when all configured
 accounts are connected, partial when only some are connected, and disconnected
 when none are connected; individual account indicators expose the account

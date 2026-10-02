@@ -8,6 +8,8 @@ use uuid::Uuid;
 const CHUNK_SIZE_SETTING: &str = "telegram_chunk_size";
 pub(crate) const DOWNLOAD_PREFETCH_CHUNKS_SETTING: &str = "telegram_download_prefetch_chunks";
 pub(crate) const DOWNLOAD_PREFETCH_MODE_SETTING: &str = "telegram_download_prefetch_mode";
+pub(crate) const DOWNLOAD_ACCOUNT_CONNECTIONS_SETTING: &str =
+    "telegram_download_account_connections";
 pub(crate) const DOWNLOAD_FAILOVER_RETRIES_SETTING: &str = "telegram_download_failover_retries";
 const RECOVERY_VERIFY_ENABLED_SETTING: &str = "telegram_recovery_verify_enabled";
 const RECOVERY_VERIFY_STARTUP_SETTING: &str = "telegram_recovery_verify_startup";
@@ -119,6 +121,17 @@ impl MetadataStore {
 
     pub fn set_telegram_download_prefetch_mode(&self, mode: &str) -> Result<(), MetadataError> {
         self.set_text_setting(DOWNLOAD_PREFETCH_MODE_SETTING, mode)
+    }
+
+    pub fn telegram_download_account_connections(&self) -> Result<Option<u64>, MetadataError> {
+        self.read_numeric_setting(DOWNLOAD_ACCOUNT_CONNECTIONS_SETTING)
+    }
+
+    pub fn set_telegram_download_account_connections(
+        &self,
+        connections: u64,
+    ) -> Result<(), MetadataError> {
+        self.set_numeric_setting(DOWNLOAD_ACCOUNT_CONNECTIONS_SETTING, connections)
     }
 
     pub fn telegram_download_failover_retries(&self) -> Result<Option<u64>, MetadataError> {

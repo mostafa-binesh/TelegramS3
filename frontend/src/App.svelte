@@ -224,6 +224,9 @@
   let downloadPrefetchChunksMin = 0;
   let downloadPrefetchChunksMax = 4;
   let downloadPrefetchMode: 'adaptive' | 'sequential' | string = 'adaptive';
+  let downloadAccountConnections = 5;
+  let downloadAccountConnectionsMin = 1;
+  let downloadAccountConnectionsMax = 5;
   let downloadFailoverRetries = 1;
   let downloadFailoverRetriesMin = 0;
   let downloadFailoverRetriesMax = 8;
@@ -457,6 +460,9 @@
     max_download_prefetch_chunks?: number;
     download_prefetch_mode?: 'adaptive' | 'sequential' | string;
     download_prefetch_modes?: string[];
+    download_account_connections?: number;
+    min_download_account_connections?: number;
+    max_download_account_connections?: number;
     download_failover_retries?: number;
     min_download_failover_retries?: number;
     max_download_failover_retries?: number;
@@ -480,6 +486,9 @@
     downloadPrefetchChunksMin = settings.min_download_prefetch_chunks ?? 0;
     downloadPrefetchChunksMax = settings.max_download_prefetch_chunks ?? 4;
     downloadPrefetchMode = settings.download_prefetch_mode ?? 'adaptive';
+    downloadAccountConnections = settings.download_account_connections ?? 5;
+    downloadAccountConnectionsMin = settings.min_download_account_connections ?? 1;
+    downloadAccountConnectionsMax = settings.max_download_account_connections ?? 5;
     downloadFailoverRetries = settings.download_failover_retries ?? 1;
     downloadFailoverRetriesMin = settings.min_download_failover_retries ?? 0;
     downloadFailoverRetriesMax = settings.max_download_failover_retries ?? 8;
@@ -508,6 +517,7 @@
         chunk_size: bytes,
         download_prefetch_chunks: Number(downloadPrefetchChunks),
         download_prefetch_mode: downloadPrefetchMode,
+        download_account_connections: Number(downloadAccountConnections),
         download_failover_retries: Number(downloadFailoverRetries),
         recovery_verify_enabled: recoveryVerifyEnabled,
         recovery_verify_startup: recoveryVerifyStartup,
@@ -1404,7 +1414,7 @@
         {#if TransfersComponent}<svelte:component this={TransfersComponent} csrf={session?.csrf_token} recoveryOnly/>{:else if routeLoadError}<LoadError title="Could not load interrupted transfers" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:180px"></div></section>{/if}
       {/if}
     {:else if view === 'telegram'}
-      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab="storage" hideTabs {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} bind:downloadPrefetchChunks {downloadPrefetchChunksMin} {downloadPrefetchChunksMax} bind:downloadPrefetchMode bind:downloadFailoverRetries {downloadFailoverRetriesMin} {downloadFailoverRetriesMax} bind:recoveryVerifyEnabled bind:recoveryVerifyStartup bind:recoveryVerifyIntervalSecs {recoveryVerifyIntervalMin} {recoveryVerifyIntervalMax} bind:recoveryVerifyChunks {recoveryVerifyChunksMin} {recoveryVerifyChunksMax} bind:cleanupRetentionSecs {cleanupRetentionMin} {cleanupRetentionMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm} onRunRecoveryVerification={runRecoveryVerificationNowFromSettings} onRunEligibleCleanup={runEligibleCleanupNowFromSettings}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Storage settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
+      {#if TelegramPanelComponent}<svelte:component this={TelegramPanelComponent} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone overview={overview} {session} telegramTab="storage" hideTabs {storageChunkSizeBytes} bind:storageChunkSizeMiB {storageChunkSizeMin} {storageChunkSizeMax} bind:downloadPrefetchChunks {downloadPrefetchChunksMin} {downloadPrefetchChunksMax} bind:downloadPrefetchMode bind:downloadAccountConnections {downloadAccountConnectionsMin} {downloadAccountConnectionsMax} bind:downloadFailoverRetries {downloadFailoverRetriesMin} {downloadFailoverRetriesMax} bind:recoveryVerifyEnabled bind:recoveryVerifyStartup bind:recoveryVerifyIntervalSecs {recoveryVerifyIntervalMin} {recoveryVerifyIntervalMax} bind:recoveryVerifyChunks {recoveryVerifyChunksMin} {recoveryVerifyChunksMax} bind:cleanupRetentionSecs {cleanupRetentionMin} {cleanupRetentionMax} storageSettingsBusy={storageSettingsBusy} storageSettingsError={storageSettingsError} storageSettingsMessage={storageSettingsMessage} onSaveStorageSettings={saveStorageSettingsForm} onRunRecoveryVerification={runRecoveryVerificationNowFromSettings} onRunEligibleCleanup={runEligibleCleanupNowFromSettings}/>{:else if routeLoadError}<section class="card surface"><p class="card-label">Storage settings unavailable</p><p class="error-hint">{routeLoadError}</p><button class="primary" type="button" on:click={retryRouteLoad}>Retry</button></section>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'overview'}
       {#if OverviewPanelComponent}<svelte:component this={OverviewPanelComponent} overview={overview} loading={overviewLoading} error={overviewError} {corruptedCount} {acknowledgedCount} onRefresh={() => refreshOverview()} onRecovery={() => switchView('recovery')} onStageMetricsTest={runStageMetricsDiagnostic} stageTestBusy={stageTestBusy}/>{:else if routeLoadError}<LoadError title="Could not load the overview" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:280px"></div></section>{/if}
     {:else if view === 'buckets'}

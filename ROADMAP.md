@@ -253,6 +253,10 @@ Completed in this increment:
 - the shared download reader now delivers the first requested chunk before
   opening speculative prefetch, reducing time to first byte without changing
   the ordered `0–4` concurrency bound
+- storage policy now limits adaptive parallel downloads to a configurable
+  `1–5` account connections, automatically capped by each file's enabled
+  replica locations and prefetch window; one active payload read remains
+  allowed per account
 - the Overview includes a bounded Download stage metrics testing section for
   recent public/admin/S3 reads, exposing first-chunk, Telegram, retry-wait,
   decrypt, checksum-verify, and total timings without adding per-read SQLite
@@ -261,7 +265,8 @@ Completed in this increment:
   final-byte delivery as completed when a response consumer closes early
 - active reads expose process-local object, mode, chunk, client-byte,
   Telegram-byte, retry, and server/client chunk progress without per-chunk
-  SQLite writes
+  SQLite writes, including the effective account-connection limit and eligible
+  replica-account count
 - the Overview caches manifest-derived object counts and unique Telegram
   payload size for five seconds; its five-second refresh uses the cheap
   `/overview/live` endpoint for transfer, traffic, stage, and connection

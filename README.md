@@ -390,7 +390,7 @@ cargo build --release
 ## Configuration
 
 Runtime configuration is mostly environment-driven, but Telegram bootstrap
-settings, download prefetch and account-failover policies, upload chunk policy,
+settings, download prefetch, account-connection, and account-failover policies, upload chunk policy,
 and recovery-verifier policy are managed from the authenticated admin panel and persisted in
 `metadata.sqlite`.
 `TELEGRAM_CHUNK_SIZE` is imported when no database policy exists; after that,
@@ -402,9 +402,11 @@ setting. Download scheduling defaults to adaptive parallel mode. The alternate
 sequential nearest-chunk mode fetches the first requested chunk first and then
 preloads later chunks one at a time in manifest order. Both modes accept `0–4`
 extra chunks; in sequential mode this is the maximum ordered look-ahead, while
-adaptive mode uses it as a parallel ceiling. The reader keeps at most one
-active Telegram payload read per account, and live status stays in process
-memory rather than SQLite. Telegram
+adaptive mode uses it as a parallel ceiling. The maximum account-connection
+policy accepts `1–5` accounts and is capped per file by the prefetch window and
+the enabled replica accounts that have locations for that file. The reader
+keeps at most one active Telegram payload read per account, and live status
+stays in process memory rather than SQLite. Telegram
 API IDs and storage chat IDs are validated as numeric values
 before persistence; connection refresh failures are returned as JSON warnings
 from the admin API rather than as proxy-level failures.

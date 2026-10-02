@@ -2,9 +2,9 @@ use super::pool::DEFAULT_CONNECTION_POOL_SIZE;
 use super::rows::{count_rows, parse_rfc3339_timestamp, timestamp_now};
 use super::{MetadataError, MetadataStatus, MetadataStore, SCHEMA_VERSION};
 use crate::config::{
-    DEFAULT_CLEANUP_RETENTION_SECS, DEFAULT_DOWNLOAD_FAILOVER_RETRIES,
-    DEFAULT_DOWNLOAD_PREFETCH_CHUNKS, DEFAULT_DOWNLOAD_PREFETCH_MODE,
-    DEFAULT_RECOVERY_VERIFY_STARTUP,
+    DEFAULT_CLEANUP_RETENTION_SECS, DEFAULT_DOWNLOAD_ACCOUNT_CONNECTIONS,
+    DEFAULT_DOWNLOAD_FAILOVER_RETRIES, DEFAULT_DOWNLOAD_PREFETCH_CHUNKS,
+    DEFAULT_DOWNLOAD_PREFETCH_MODE, DEFAULT_RECOVERY_VERIFY_STARTUP,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -94,6 +94,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_share_schema(connection)?;
         ensure_download_prefetch_setting(connection)?;
         ensure_download_prefetch_mode_setting(connection)?;
+        ensure_download_account_connections_setting(connection)?;
         ensure_download_failover_setting(connection)?;
         ensure_traffic_totals_schema(connection)?;
         ensure_multi_account_schema(connection)?;
@@ -372,6 +373,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_share_schema(connection)?;
     ensure_download_prefetch_setting(connection)?;
     ensure_download_prefetch_mode_setting(connection)?;
+    ensure_download_account_connections_setting(connection)?;
     ensure_download_failover_setting(connection)?;
     ensure_traffic_totals_schema(connection)?;
     ensure_multi_account_schema(connection)?;
@@ -627,6 +629,20 @@ fn ensure_download_prefetch_mode_setting(connection: &mut Connection) -> Result<
         params![
             super::settings::DOWNLOAD_PREFETCH_MODE_SETTING,
             DEFAULT_DOWNLOAD_PREFETCH_MODE,
+            timestamp_now()?
+        ],
+    )?;
+    Ok(())
+}
+
+fn ensure_download_account_connections_setting(
+    connection: &mut Connection,
+) -> Result<(), MetadataError> {
+    connection.execute(
+        "INSERT OR IGNORE INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)",
+        params![
+            super::settings::DOWNLOAD_ACCOUNT_CONNECTIONS_SETTING,
+            DEFAULT_DOWNLOAD_ACCOUNT_CONNECTIONS.to_string(),
             timestamp_now()?
         ],
     )?;
@@ -1422,6 +1438,37 @@ mod tests {
                 .telegram_download_prefetch_mode()
                 .expect("prefetch mode"),
             Some(DEFAULT_DOWNLOAD_PREFETCH_MODE.to_string())
+        );
+    }
+
+    #[test]
+    fn migration_from_version_twenty_three_adds_account_connection_limit() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("metadata.sqlite");
+        {
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE schema_version (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        version INTEGER NOT NULL,
+                        applied_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_version (id, version, applied_at)
+                    VALUES (1, 23, '2026-10-02T00:00:00Z');
+                    "#,
+                )
+                .expect("seed");
+        }
+
+        let store = MetadataStore::open(&path).expect("migrate");
+        assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+        assert_eq!(
+            store
+                .telegram_download_account_connections()
+                .expect("account connection limit"),
+            Some(DEFAULT_DOWNLOAD_ACCOUNT_CONNECTIONS)
         );
     }
 

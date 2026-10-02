@@ -2684,6 +2684,7 @@ impl AdminUiState {
             chunk_size,
             download_prefetch_chunks,
             download_prefetch_mode,
+            download_account_connections,
             download_failover_retries,
             recovery_verify_enabled,
             recovery_verify_startup,
@@ -2710,6 +2711,11 @@ impl AdminUiState {
         let prefetch_mode =
             download_prefetch_mode.unwrap_or_else(|| self.object_format.download_prefetch_mode());
         if let Err(error) = AppConfig::validate_download_prefetch_mode(&prefetch_mode) {
+            return json_error(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+        let account_connections = download_account_connections
+            .unwrap_or_else(|| self.object_format.download_account_connections());
+        if let Err(error) = AppConfig::validate_download_account_connections(account_connections) {
             return json_error(StatusCode::BAD_REQUEST, &error.to_string());
         }
         let failover_retries = download_failover_retries
@@ -2768,6 +2774,18 @@ impl AdminUiState {
         if let Err(error) = self
             .object_format
             .set_download_prefetch_mode(&prefetch_mode)
+        {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self
+            .store()
+            .set_telegram_download_account_connections(account_connections)
+        {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        if let Err(error) = self
+            .object_format
+            .set_download_account_connections(account_connections)
         {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
         }
@@ -2836,6 +2854,9 @@ impl AdminUiState {
                 crate::config::DOWNLOAD_PREFETCH_MODE_ADAPTIVE.to_string(),
                 crate::config::DOWNLOAD_PREFETCH_MODE_SEQUENTIAL.to_string(),
             ],
+            download_account_connections: self.object_format.download_account_connections(),
+            min_download_account_connections: crate::config::MIN_DOWNLOAD_ACCOUNT_CONNECTIONS,
+            max_download_account_connections: crate::config::MAX_DOWNLOAD_ACCOUNT_CONNECTIONS,
             download_failover_retries: self.object_format.download_failover_retries(),
             min_download_failover_retries: crate::config::MIN_DOWNLOAD_FAILOVER_RETRIES,
             max_download_failover_retries: crate::config::MAX_DOWNLOAD_FAILOVER_RETRIES,
@@ -4018,6 +4039,7 @@ struct StorageSettingsRequest {
     chunk_size: Option<u64>,
     download_prefetch_chunks: Option<u64>,
     download_prefetch_mode: Option<String>,
+    download_account_connections: Option<u64>,
     download_failover_retries: Option<u64>,
     recovery_verify_enabled: Option<bool>,
     recovery_verify_startup: Option<bool>,
@@ -4037,6 +4059,9 @@ struct StorageSettingsWire {
     max_download_prefetch_chunks: u64,
     download_prefetch_mode: String,
     download_prefetch_modes: Vec<String>,
+    download_account_connections: u64,
+    min_download_account_connections: u64,
+    max_download_account_connections: u64,
     download_failover_retries: u64,
     min_download_failover_retries: u64,
     max_download_failover_retries: u64,

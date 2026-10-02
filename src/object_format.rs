@@ -25,7 +25,7 @@ use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use s3s::dto::StreamingBlob;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::{self, File};
 use std::future::Future;
 use std::io::{self, Read, Write};
@@ -468,6 +468,7 @@ pub struct ObjectFormatService {
     chunk_size: Arc<RwLock<u64>>,
     download_prefetch_chunks: Arc<RwLock<u64>>,
     download_prefetch_mode: Arc<RwLock<String>>,
+    download_account_connections: Arc<RwLock<u64>>,
     download_failover_retries: Arc<RwLock<u64>>,
     recovery_verify_enabled: Arc<RwLock<bool>>,
     recovery_verify_startup: Arc<RwLock<bool>>,
@@ -532,6 +533,8 @@ pub struct DownloadStageActive {
     pub telegram_retries: u64,
     pub prefetch_window_max: u64,
     pub prefetch_window_final: u64,
+    pub account_connections_limit: u64,
+    pub eligible_accounts: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -547,6 +550,8 @@ pub struct DownloadStageSample {
     pub prefetch_mode: String,
     pub prefetch_window_max: u64,
     pub prefetch_window_final: u64,
+    pub account_connections_limit: u64,
+    pub eligible_accounts: u64,
     pub accounts: Vec<DownloadAccountStageSample>,
     pub first_chunk_us: Option<u64>,
     pub telegram_us: u64,
@@ -612,6 +617,8 @@ struct DownloadStageLiveState {
     telegram_retries: u64,
     prefetch_window_max: u64,
     prefetch_window_final: u64,
+    account_connections_limit: u64,
+    eligible_accounts: u64,
     accounts: BTreeMap<String, DownloadAccountStageAccumulator>,
     first_chunk_us: Option<u64>,
     telegram_us: u64,
@@ -626,6 +633,7 @@ struct DownloadStageGuard {
 }
 
 impl DownloadStageLive {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         request_id: u64,
         surface: &'static str,
@@ -634,6 +642,8 @@ impl DownloadStageLive {
         expected_client_bytes: u64,
         total_chunks: u64,
         prefetch_window_max: u64,
+        account_connections_limit: u64,
+        eligible_accounts: u64,
     ) -> Self {
         Self(Arc::new(Mutex::new(DownloadStageLiveState {
             request_id,
@@ -654,6 +664,8 @@ impl DownloadStageLive {
             telegram_retries: 0,
             prefetch_window_max,
             prefetch_window_final: 1,
+            account_connections_limit,
+            eligible_accounts,
             accounts: BTreeMap::new(),
             first_chunk_us: None,
             telegram_us: 0,
@@ -726,11 +738,14 @@ impl DownloadStageLive {
             telegram_retries: state.telegram_retries,
             prefetch_window_max: state.prefetch_window_max,
             prefetch_window_final: state.prefetch_window_final,
+            account_connections_limit: state.account_connections_limit,
+            eligible_accounts: state.eligible_accounts,
         })
     }
 }
 
 impl DownloadStageMetricsStore {
+    #[allow(clippy::too_many_arguments)]
     fn start(
         self: &Arc<Self>,
         surface: &'static str,
@@ -739,6 +754,8 @@ impl DownloadStageMetricsStore {
         expected_client_bytes: u64,
         total_chunks: u64,
         prefetch_window_max: u64,
+        account_connections_limit: u64,
+        eligible_accounts: u64,
     ) -> DownloadStageGuard {
         self.active_requests.fetch_add(1, Ordering::Relaxed);
         if surface == "diagnostic-test" {
@@ -753,6 +770,8 @@ impl DownloadStageMetricsStore {
             expected_client_bytes,
             total_chunks,
             prefetch_window_max,
+            account_connections_limit,
+            eligible_accounts,
         );
         if let Ok(mut active) = self.active.lock() {
             active.insert(request_id, live.clone());
@@ -819,6 +838,8 @@ impl DownloadStageMetricsStore {
             prefetch_mode: live.mode.clone(),
             prefetch_window_max: live.prefetch_window_max,
             prefetch_window_final: live.prefetch_window_final,
+            account_connections_limit: live.account_connections_limit,
+            eligible_accounts: live.eligible_accounts,
             accounts: live
                 .accounts
                 .clone()
@@ -992,6 +1013,7 @@ struct ReadPipeline {
     max_window: usize,
     mode: String,
     live: DownloadStageLive,
+    account_connection_permits: Arc<Semaphore>,
 }
 
 enum ReadPipelineTail {
@@ -1007,13 +1029,21 @@ impl ReadPipeline {
         max_window: usize,
         mode: &str,
         live: DownloadStageLive,
+        account_connection_permits: Arc<Semaphore>,
     ) -> Self {
         let first = spans.first().cloned().map(|span| {
             let object_format = Arc::clone(&object_format);
             let manifest = manifest.clone();
             let first_live = live.clone();
+            let first_account_connection_permits = Arc::clone(&account_connection_permits);
             Box::pin(async move {
-                let result = read_stream_span(object_format, manifest, span).await;
+                let result = read_stream_span(
+                    object_format,
+                    manifest,
+                    span,
+                    first_account_connection_permits,
+                )
+                .await;
                 first_live.record_fetched(&result);
                 result
             }) as ReadSpanFuture
@@ -1027,6 +1057,7 @@ impl ReadPipeline {
             max_window,
             mode: mode.to_string(),
             live,
+            account_connection_permits,
         }
     }
 
@@ -1043,6 +1074,7 @@ impl ReadPipeline {
                             remaining,
                             self.max_window,
                             self.live.clone(),
+                            Arc::clone(&self.account_connection_permits),
                         ))
                     } else {
                         ReadPipelineTail::Adaptive(AdaptiveReadWindow::new(
@@ -1051,6 +1083,7 @@ impl ReadPipeline {
                             remaining,
                             self.max_window,
                             self.live.clone(),
+                            Arc::clone(&self.account_connection_permits),
                         ))
                     },
                 );
@@ -1085,6 +1118,7 @@ struct AdaptiveReadWindow {
     clean_streak: u8,
     throughput_ewma: Option<f64>,
     live: DownloadStageLive,
+    account_connection_permits: Arc<Semaphore>,
 }
 
 impl AdaptiveReadWindow {
@@ -1094,6 +1128,7 @@ impl AdaptiveReadWindow {
         spans: Vec<ReadSpan>,
         max_window: usize,
         live: DownloadStageLive,
+        account_connection_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
             object_format,
@@ -1108,6 +1143,7 @@ impl AdaptiveReadWindow {
             clean_streak: 0,
             throughput_ewma: None,
             live,
+            account_connection_permits,
         }
     }
 
@@ -1124,8 +1160,11 @@ impl AdaptiveReadWindow {
             let object_format = Arc::clone(&self.object_format);
             let manifest = self.manifest.clone();
             let live = self.live.clone();
+            let account_connection_permits = Arc::clone(&self.account_connection_permits);
             self.pending.push(Box::pin(async move {
-                let result = read_stream_span(object_format, manifest, span).await;
+                let result =
+                    read_stream_span(object_format, manifest, span, account_connection_permits)
+                        .await;
                 live.record_fetched(&result);
                 (sequence, result)
             }));
@@ -1197,6 +1236,7 @@ struct SequentialReadAhead {
     receiver: Option<tokio::sync::mpsc::Receiver<Result<ReadSpanResult, io::Error>>>,
     window: usize,
     live: DownloadStageLive,
+    account_connection_permits: Arc<Semaphore>,
 }
 
 impl SequentialReadAhead {
@@ -1206,6 +1246,7 @@ impl SequentialReadAhead {
         spans: Vec<ReadSpan>,
         max_window: usize,
         live: DownloadStageLive,
+        account_connection_permits: Arc<Semaphore>,
     ) -> Self {
         let prefetch = max_window.saturating_sub(1);
         if prefetch == 0 {
@@ -1217,18 +1258,21 @@ impl SequentialReadAhead {
                 receiver: None,
                 window: 1,
                 live,
+                account_connection_permits,
             };
         }
         let (sender, receiver) = tokio::sync::mpsc::channel(prefetch);
         let worker_object_format = Arc::clone(&object_format);
         let worker_manifest = manifest.clone();
         let worker_live = live.clone();
+        let worker_account_connection_permits = Arc::clone(&account_connection_permits);
         tokio::spawn(async move {
             for span in spans {
                 let result = read_stream_span(
                     Arc::clone(&worker_object_format),
                     worker_manifest.clone(),
                     span,
+                    Arc::clone(&worker_account_connection_permits),
                 )
                 .await;
                 worker_live.record_fetched(&result);
@@ -1246,6 +1290,7 @@ impl SequentialReadAhead {
             receiver: Some(receiver),
             window: max_window,
             live,
+            account_connection_permits,
         }
     }
 
@@ -1259,8 +1304,13 @@ impl SequentialReadAhead {
         }
         let span = self.spans.get(self.next_to_read)?.clone();
         self.next_to_read += 1;
-        let result =
-            read_stream_span(Arc::clone(&self.object_format), self.manifest.clone(), span).await;
+        let result = read_stream_span(
+            Arc::clone(&self.object_format),
+            self.manifest.clone(),
+            span,
+            Arc::clone(&self.account_connection_permits),
+        )
+        .await;
         self.live.record_fetched(&result);
         Some(result)
     }
@@ -1314,6 +1364,14 @@ impl ObjectFormatService {
                 value
             }
         };
+        let download_account_connections = match metadata.telegram_download_account_connections()? {
+            Some(value) => AppConfig::validate_download_account_connections(value)?,
+            None => {
+                let value = crate::config::DEFAULT_DOWNLOAD_ACCOUNT_CONNECTIONS;
+                metadata.set_telegram_download_account_connections(value)?;
+                value
+            }
+        };
         let download_failover_retries = match metadata.telegram_download_failover_retries()? {
             Some(value) => AppConfig::validate_download_failover_retries(value)?,
             None => {
@@ -1362,6 +1420,7 @@ impl ObjectFormatService {
             chunk_size,
             download_prefetch_chunks,
             download_prefetch_mode,
+            download_account_connections,
             download_failover_retries,
             storage_chat_id,
             ObjectEncryption::from_master_key(&master_key),
@@ -1385,6 +1444,7 @@ impl ObjectFormatService {
         chunk_size: u64,
         download_prefetch_chunks: u64,
         download_prefetch_mode: String,
+        download_account_connections: u64,
         download_failover_retries: u64,
         storage_chat_id: String,
         encryption: ObjectEncryption,
@@ -1405,6 +1465,7 @@ impl ObjectFormatService {
             chunk_size: Arc::new(RwLock::new(chunk_size)),
             download_prefetch_chunks: Arc::new(RwLock::new(download_prefetch_chunks)),
             download_prefetch_mode: Arc::new(RwLock::new(download_prefetch_mode)),
+            download_account_connections: Arc::new(RwLock::new(download_account_connections)),
             download_failover_retries: Arc::new(RwLock::new(download_failover_retries)),
             recovery_verify_enabled: Arc::new(RwLock::new(
                 crate::config::DEFAULT_RECOVERY_VERIFY_ENABLED,
@@ -1646,6 +1707,26 @@ impl ObjectFormatService {
             .download_prefetch_mode
             .write()
             .expect("download prefetch mode lock") = mode.to_string();
+        Ok(())
+    }
+
+    pub fn download_account_connections(&self) -> u64 {
+        *self
+            .download_account_connections
+            .read()
+            .expect("download account connections lock")
+    }
+
+    pub fn set_download_account_connections(
+        &self,
+        connections: u64,
+    ) -> Result<(), ObjectFormatError> {
+        AppConfig::validate_download_account_connections(connections)
+            .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+        *self
+            .download_account_connections
+            .write()
+            .expect("download account connections lock") = connections;
         Ok(())
     }
 
@@ -3358,6 +3439,18 @@ impl ObjectFormatService {
             .unwrap_or(usize::MAX)
             .max(1);
         let mode = this.download_prefetch_mode();
+        let eligible_accounts = this.eligible_download_account_count(manifest);
+        let account_connections_limit = if mode == crate::config::DOWNLOAD_PREFETCH_MODE_SEQUENTIAL
+        {
+            1
+        } else {
+            effective_download_connection_limit(
+                this.download_account_connections(),
+                max_window,
+                eligible_accounts,
+            )
+        };
+        let account_connection_permits = Arc::new(Semaphore::new(account_connections_limit));
         let stage = this.download_stage_metrics.start(
             surface,
             format!("{}/{}", manifest.bucket, manifest.key),
@@ -3365,6 +3458,8 @@ impl ObjectFormatService {
             expected_client_bytes,
             manifest.chunks.len() as u64,
             max_window as u64,
+            account_connections_limit as u64,
+            eligible_accounts as u64,
         );
         let live = stage
             .live()
@@ -3376,6 +3471,7 @@ impl ObjectFormatService {
             max_window,
             &mode,
             live,
+            account_connection_permits,
         );
         futures::stream::unfold(
             (pipeline, this, pin, stage, false),
@@ -3420,6 +3516,37 @@ impl ObjectFormatService {
                 }
             },
         )
+    }
+
+    fn eligible_download_account_count(&self, manifest: &ObjectManifest) -> usize {
+        let mut accounts = BTreeSet::new();
+        match self.metadata.active_connection_id() {
+            Ok(Some(account_id)) => {
+                if self
+                    .metadata
+                    .telegram_account_download_enabled(&account_id)
+                    .unwrap_or(false)
+                {
+                    accounts.insert(account_id);
+                }
+            }
+            Ok(None) => {
+                accounts.insert("primary".to_string());
+            }
+            Err(_) => {}
+        }
+        for chunk in &manifest.chunks {
+            for replica in &chunk.replicas {
+                if self
+                    .metadata
+                    .telegram_account_download_enabled(&replica.account_id)
+                    .unwrap_or(false)
+                {
+                    accounts.insert(replica.account_id.clone());
+                }
+            }
+        }
+        accounts.len().max(1)
     }
 
     fn pin_object(&self, object_id: Uuid) -> ReadPinGuard {
@@ -4677,6 +4804,7 @@ async fn read_stream_span(
     object_format: Arc<ObjectFormatService>,
     manifest: ObjectManifest,
     span: ReadSpan,
+    account_connection_permits: Arc<Semaphore>,
 ) -> Result<ReadSpanResult, io::Error> {
     let chunk = manifest.chunks.get(span.order as usize).ok_or_else(|| {
         io::Error::new(
@@ -4740,6 +4868,10 @@ async fn read_stream_span(
             "no Telegram account enabled for downloading this object",
         ));
     }
+    let _account_connection_permit = account_connection_permits
+        .acquire_owned()
+        .await
+        .map_err(|_| io::Error::other("download account connection limiter closed"))?;
     let selected = (span.order as usize) % candidate_count;
     // The configured value is the number of complete read attempts allowed
     // for the selected account before moving to the next eligible account.
@@ -4881,6 +5013,18 @@ fn account_failover_candidate_index(
     attempt: usize,
 ) -> usize {
     (selected + attempt / attempts_per_account.max(1)) % candidate_count
+}
+
+fn effective_download_connection_limit(
+    configured: u64,
+    prefetch_window: usize,
+    eligible_accounts: usize,
+) -> usize {
+    usize::try_from(configured)
+        .unwrap_or(usize::MAX)
+        .max(1)
+        .min(prefetch_window.max(1))
+        .min(eligible_accounts.max(1))
 }
 
 struct ReadSpanResult {
@@ -5134,6 +5278,14 @@ mod tests {
         .expect("second permit");
     }
 
+    #[test]
+    fn effective_download_connection_limit_uses_all_runtime_caps() {
+        assert_eq!(effective_download_connection_limit(5, 3, 4), 3);
+        assert_eq!(effective_download_connection_limit(5, 5, 2), 2);
+        assert_eq!(effective_download_connection_limit(2, 5, 4), 2);
+        assert_eq!(effective_download_connection_limit(0, 0, 0), 1);
+    }
+
     #[tokio::test]
     async fn adaptive_prefetch_ramps_up_and_backs_off_on_slow_or_retrying_reads() {
         let tempdir = TempDir::new().expect("tempdir");
@@ -5150,8 +5302,16 @@ mod tests {
         let spans = ObjectFormatService::plan_read(&manifest, 0..4096)
             .expect("read plan")
             .chunks;
-        let live = DownloadStageLive::new(1, "test", "test/object".into(), "adaptive", 0, 4, 4);
-        let mut window = AdaptiveReadWindow::new(Arc::clone(&service), manifest, spans, 4, live);
+        let live =
+            DownloadStageLive::new(1, "test", "test/object".into(), "adaptive", 0, 4, 4, 4, 4);
+        let mut window = AdaptiveReadWindow::new(
+            Arc::clone(&service),
+            manifest,
+            spans,
+            4,
+            live,
+            Arc::new(Semaphore::new(4)),
+        );
         assert_eq!(window.window(), 2);
         let clean = |telegram_us, telegram_retries| ReadSpanResult {
             account_id: "same-account".to_string(),

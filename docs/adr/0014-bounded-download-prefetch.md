@@ -35,6 +35,15 @@ using the prefetch setting only as a bounded ordered look-ahead queue. Active
 download status is process-local and reports client/server progress without
 writing per-chunk state to SQLite.
 
+Schema v24 adds `telegram_download_account_connections`, defaulting to `5` and
+bounded to `1–5`. Adaptive reads acquire a per-download semaphore whose
+effective capacity is the minimum of that setting, the prefetch window, and the
+enabled replica accounts that have a location for the object. The existing
+per-account semaphore remains at one active payload read. Sequential mode is
+always serial. This prevents a file with many replicas from creating an
+unbounded fan-out while still allowing independent accounts to contribute
+parallel capacity.
+
 Every prefetched result must complete remote download, decryption, and checksum
 verification before it enters the output stream. Client traffic counters are
 incremented only when a verified result is emitted. A stream error terminates
@@ -51,6 +60,7 @@ recovery semantics.
 - `0` provides a serial-read fallback for constrained Telegram accounts or
   memory-limited deployments.
 - Higher values can improve client smoothness but increase parallel Telegram
-  traffic and transient per-stream memory, bounded by four extra chunks.
+  traffic and transient per-stream memory, bounded by four extra chunks and
+  the account-connection policy.
 - A missing, corrupt, or permanently unavailable chunk remains an integrity
   failure; prefetching does not hide or repair it.
