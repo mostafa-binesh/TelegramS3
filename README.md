@@ -96,7 +96,7 @@ staging, and recovery artifacts, not committed payloads.
   loads. The browser also supports server-paginated bucket/folder listings,
   bucket and recursive object search, result locations with direct parent-folder
    navigation, sortable bucket and object columns across paginated results, and
-   compact per-row **Actions** menus that expose the applicable move, replicate,
+   compact icon-only per-row action menus that expose the applicable move, replicate,
    re-chunk, share, link-management, and delete operations alongside the fixed
    bulk-selection actions. Shared-link management uses a per-link expandable
    expiry editor so larger link sets remain usable on narrow screens. Each file
@@ -138,7 +138,10 @@ staging, and recovery artifacts, not committed payloads.
    verified alternate when one exists; recovered replica events remain visible
    in Recovery without hiding an otherwise healthy object. The Connections tab
    loads its account state once when opened and provides an explicit refresh
-   action instead of polling the account list in the background.
+  action instead of polling the account list in the background. Every client
+  read carries the persisted Telegram peer and message ID for its selected
+  location, which is required when an access replica reads from a shared chat
+  different from the selected account's configured storage chat.
 - Automatic physical replication reuses existing encrypted chunk messages when
   the source and target connections use the same Telegram storage chat. This
   records a new account location without downloading or uploading the chunk;
@@ -153,6 +156,8 @@ staging, and recovery artifacts, not committed payloads.
   snapshot existing physical/access targets and queue durable follow-up jobs,
   or explicitly choose the faster primary-only path; primary-only means the
   replacement layout has no replica read paths until it is replicated again.
+  The worker creates its receiving transfer before staging replacement chunks
+  and reports the final partial chunk in durable progress.
 - **Session recovery** — an expired admin session synchronizes with the
   guest-safe session endpoint and returns to the login screen instead of
   leaving a stale “not authenticated” error in the SPA.

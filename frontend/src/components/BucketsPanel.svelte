@@ -70,6 +70,7 @@
   export let onGoToFolder: (location: string) => void = () => {};
 
   let openActionMenu = '';
+  let actionMenuStyle = 'top: 8px; right: 8px;';
 
   type PageItem = number | 'ellipsis';
 
@@ -166,7 +167,28 @@
 
   function toggleActionMenu(key: string, event: MouseEvent) {
     event.stopPropagation();
-    openActionMenu = openActionMenu === key ? '' : key;
+    if (openActionMenu === key) {
+      openActionMenu = '';
+      return;
+    }
+
+    const trigger = event.currentTarget as HTMLElement;
+    const triggerBox = trigger.getBoundingClientRect();
+    const menuWidth = 198;
+    const menuHeight = key.startsWith('object:') ? 320 : 108;
+    const margin = 8;
+    const gap = 7;
+    const rightFromTrigger = window.innerWidth - triggerBox.right;
+    const maxRight = Math.max(margin, window.innerWidth - menuWidth - margin);
+    const right = Math.min(Math.max(margin, rightFromTrigger), maxRight);
+    const spaceBelow = window.innerHeight - triggerBox.bottom - margin;
+    const spaceAbove = triggerBox.top - margin;
+    const opensUp = spaceBelow < menuHeight && spaceAbove > spaceBelow;
+    const preferredTop = opensUp ? triggerBox.top - menuHeight - gap : triggerBox.bottom + gap;
+    const maxTop = Math.max(margin, window.innerHeight - menuHeight - margin);
+    const top = Math.min(Math.max(margin, preferredTop), maxTop);
+    actionMenuStyle = `top: ${Math.round(top)}px; right: ${Math.round(right)}px;`;
+    openActionMenu = key;
   }
 
   function runRowAction(action: () => void) {
@@ -179,7 +201,7 @@
   }
 </script>
 
-<svelte:window on:click={closeActionMenu} />
+<svelte:window on:click={closeActionMenu} on:resize={closeActionMenu} on:scroll={closeActionMenu} />
 
 <section class="card surface">
   <div class="section-head"><div class="heading-row">{#if selectedBucket}<button class="icon-button back-button" type="button" title="Back to parent" aria-label="Back to parent folder" on:click={onBack}>←</button>{/if}<div><p class="card-label">Buckets and files</p><h2>{selectedBucket ? `Bucket / ${selectedBucket}${currentPrefix ? ` / ${currentPrefix.split('/').filter(Boolean).join(' / ')}` : ''}` : 'Your buckets'}</h2></div></div>
@@ -207,10 +229,10 @@
           {@const bucketActionKey = `bucket:${bucket.name}`}
           <tr><td><input class="select-all" type="checkbox" checked={selectedBuckets.includes(bucket.name)} on:change={() => onToggleBucket(bucket.name)} aria-label={`Select bucket ${bucket.name}`}/></td><td><button type="button" class="btn-link bucket-name-link" aria-label={`${bucket.name} created ${formatTimestamp(bucket.created_at)}`} on:click={() => onOpenBucket(bucket.name)}>{bucket.name}</button></td><td class="muted">{formatTimestamp(bucket.created_at)}</td><td>{#if (bucket.replica_accounts ?? 0) + (bucket.access_accounts ?? 0)}<span class="account-summary">{(bucket.replica_accounts ?? 0) + (bucket.access_accounts ?? 0)} total<span>{bucket.replica_accounts ?? 0} copies · {bucket.access_accounts ?? 0} access</span></span>{:else}<span class="muted">—</span>{/if}</td><td><div class="row-actions">
             {#if (bucket.replica_accounts ?? 0) + (bucket.access_accounts ?? 0)}<ActionIcon name="accounts" tone={bucket.replica_chunk_size_mismatch ? 'warning' : 'success'} badge={(bucket.replica_accounts ?? 0) + (bucket.access_accounts ?? 0)} label={`Show account copies and access for ${bucket.name}${bucket.replica_chunk_size_mismatch ? ' (replica chunk sizes differ)' : ''}`} on:click={() => onOpenReplicas(bucket.name)}/>{/if}
-            <div class="row-action-menu"><button class="actions-trigger" type="button" aria-haspopup="menu" aria-expanded={openActionMenu === bucketActionKey} aria-label={`Actions for bucket ${bucket.name}`} on:click={(event) => toggleActionMenu(bucketActionKey, event)}><span>Actions</span><span class="actions-trigger-mark" aria-hidden="true">⋯</span></button>
-              {#if openActionMenu === bucketActionKey}<div class="action-menu" role="menu" tabindex="-1" aria-label={`Actions for bucket ${bucket.name}`}>
+            <div class="row-action-menu"><button class="actions-trigger" type="button" aria-haspopup="menu" aria-expanded={openActionMenu === bucketActionKey} aria-label={`Actions for bucket ${bucket.name}`} title={`Show actions for bucket ${bucket.name}`} on:click={(event) => toggleActionMenu(bucketActionKey, event)}><svg class="actions-trigger-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>
+              {#if openActionMenu === bucketActionKey}<div class="action-menu" style={actionMenuStyle} role="menu" tabindex="-1" aria-label={`Actions for bucket ${bucket.name}`}>
                 <button class="action-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onRechunkBucket(bucket.name))}><span aria-hidden="true">⟳</span>Re-chunk files</button>
-                <button class="action-menu-item danger-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onRemoveBucket(bucket.name))} disabled={busy}><span aria-hidden="true">⌫</span>Delete bucket</button>
+                <button class="action-menu-item danger-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onRemoveBucket(bucket.name))} disabled={busy}><svg class="action-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16m-10 4v6m4-6v6M9 7V4h6v3m-9 0 1 13h10l1-13Z"/></svg>Delete bucket</button>
               </div>{/if}
             </div>
           </div></td></tr>
@@ -239,9 +261,9 @@
         {:else}<div class="table-scroll" class:listing-dimmed={objectsLoading}><table class="kv-table"><colgroup><col class="selection-column"/><col class="name-column"/><col class="size-column"/><col class="modified-column"/><col class="actions-column"/></colgroup><thead><tr><th><input class="select-all" type="checkbox" aria-label="Select all visible items" checked={allVisibleSelected} on:change={onToggleAll}/></th><th aria-sort={objectSortKey === 'name' ? objectSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort objects by Name ${sortLabel('name', objectSortKey, objectSortDirection)}`} on:click={() => onObjectSort('name')}><span>Name</span><span class:active-sort={objectSortKey === 'name'} class="sort-glyph" aria-hidden="true">{sortGlyph('name', objectSortKey, objectSortDirection)}</span></button></th><th aria-sort={objectSortKey === 'size' ? objectSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort objects by Size ${sortLabel('size', objectSortKey, objectSortDirection)}`} on:click={() => onObjectSort('size')}><span>Size</span><span class:active-sort={objectSortKey === 'size'} class="sort-glyph" aria-hidden="true">{sortGlyph('size', objectSortKey, objectSortDirection)}</span></button></th><th aria-sort={objectSortKey === 'last_modified' ? objectSortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}><button class="sort-header" type="button" aria-label={`Sort objects by Modified ${sortLabel('last_modified', objectSortKey, objectSortDirection)}`} on:click={() => onObjectSort('last_modified')}><span>Modified</span><span class:active-sort={objectSortKey === 'last_modified'} class="sort-glyph" aria-hidden="true">{sortGlyph('last_modified', objectSortKey, objectSortDirection)}</span></button></th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
       {#each listing?.folders ?? [] as folder (folder)}
         {@const folderActionKey = `folder:${currentPrefix}${folder}/`}
-        <tr><td><input class="select-all" type="checkbox" checked={selectedFolders.includes(`${currentPrefix}${folder}/`)} on:change={() => onToggleFolder(folder)} aria-label={`Select folder ${folder}`}/></td><td><button class="btn-link" on:click={() => onEnterFolder(folder)}>{folder}/</button></td><td class="muted">folder</td><td class="muted">—</td><td><div class="row-actions"><div class="row-action-menu"><button class="actions-trigger" type="button" aria-haspopup="menu" aria-expanded={openActionMenu === folderActionKey} aria-label={`Actions for folder ${folder}`} on:click={(event) => toggleActionMenu(folderActionKey, event)}><span>Actions</span><span class="actions-trigger-mark" aria-hidden="true">⋯</span></button>{#if openActionMenu === folderActionKey}<div class="action-menu" role="menu" tabindex="-1" aria-label={`Actions for folder ${folder}`}>
+      <tr><td><input class="select-all" type="checkbox" checked={selectedFolders.includes(`${currentPrefix}${folder}/`)} on:change={() => onToggleFolder(folder)} aria-label={`Select folder ${folder}`}/></td><td><button class="btn-link" on:click={() => onEnterFolder(folder)}>{folder}/</button></td><td class="muted">folder</td><td class="muted">—</td><td><div class="row-actions"><div class="row-action-menu"><button class="actions-trigger" type="button" aria-haspopup="menu" aria-expanded={openActionMenu === folderActionKey} aria-label={`Actions for folder ${folder}`} title={`Show actions for folder ${folder}`} on:click={(event) => toggleActionMenu(folderActionKey, event)}><svg class="actions-trigger-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>{#if openActionMenu === folderActionKey}<div class="action-menu" style={actionMenuStyle} role="menu" tabindex="-1" aria-label={`Actions for folder ${folder}`}>
           <button class="action-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onOpenMoveSelection([], [`${currentPrefix}${folder}/`]))}><span aria-hidden="true">↕</span>Move folder</button>
-          <button class="action-menu-item danger-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onRemoveKey(folder))} disabled={busy}><span aria-hidden="true">⌫</span>Delete folder</button>
+          <button class="action-menu-item danger-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onRemoveKey(folder))} disabled={busy}><svg class="action-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16m-10 4v6m4-6v6M9 7V4h6v3m-9 0 1 13h10l1-13Z"/></svg>Delete folder</button>
         </div>{/if}</div></div></td></tr>
       {/each}
       {#each listing?.objects ?? [] as obj (obj.key)}
@@ -294,16 +316,16 @@
                 {@const objectActionKey = `object:${obj.key}`}
                 {#if (obj.replica_accounts ?? 0) + (obj.access_accounts ?? 0)}<ActionIcon name="accounts" tone={obj.replica_chunk_size_mismatch ? 'warning' : 'success'} badge={(obj.replica_accounts ?? 0) + (obj.access_accounts ?? 0)} label={`Show account copies and access for ${obj.name}${obj.replica_chunk_size_mismatch ? ' (replica chunk sizes differ)' : ''}`} on:click={() => onOpenReplicas(selectedBucket, obj.key)}/>{/if}
                 <ActionIcon name="download" label={`Download ${obj.name}`} href={contentUrl(selectedBucket, obj.key)}/>
-                <div class="row-action-menu"><button class="actions-trigger" type="button" aria-haspopup="menu" aria-expanded={openActionMenu === objectActionKey} aria-label={`Actions for ${obj.name}`} on:click={(event) => toggleActionMenu(objectActionKey, event)}><span>Actions</span><span class="actions-trigger-mark" aria-hidden="true">⋯</span></button>
-                   {#if openActionMenu === objectActionKey}<div class="action-menu" role="menu" tabindex="-1" aria-label={`Actions for ${obj.name}`}>
+                <div class="row-action-menu"><button class="actions-trigger" type="button" aria-haspopup="menu" aria-expanded={openActionMenu === objectActionKey} aria-label={`Actions for ${obj.name}`} title={`Show actions for ${obj.name}`} on:click={(event) => toggleActionMenu(objectActionKey, event)}><svg class="actions-trigger-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>
+                   {#if openActionMenu === objectActionKey}<div class="action-menu" style={actionMenuStyle} role="menu" tabindex="-1" aria-label={`Actions for ${obj.name}`}>
                      {#if obj.location}<button class="action-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onGoToFolder(obj.location ?? ''))}><span aria-hidden="true">↗</span>Open location</button>{/if}
                      <button class="action-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onOpenInfo(obj))}><span aria-hidden="true">ⓘ</span>Information</button>
-                     <button class="action-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onShare(obj))} disabled={busy}><span aria-hidden="true">↗</span>Share</button>
+                     <button class="action-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onShare(obj))} disabled={busy}><svg class="action-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.2 10.8 7.6-4.5m-7.6 6.9 7.6 4.5"/></svg>Share</button>
                     <button class="action-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onOpenShareLinks(obj))} disabled={busy}><span aria-hidden="true">🔗</span>Manage shared links{#if obj.shared_links} <small>({obj.shared_links})</small>{/if}</button>
                     <button class="action-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onOpenReplicas(selectedBucket, obj.key))}><span aria-hidden="true">♧</span>Replicas and access</button>
                     <button class="action-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onOpenMoveSelection([obj.key], []))}><span aria-hidden="true">↕</span>Move</button>
                     <button class="action-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onRechunkObject(obj.key))}><span aria-hidden="true">⟳</span>Re-chunk</button>
-                    <button class="action-menu-item danger-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onRemoveKey(obj))} disabled={busy}><span aria-hidden="true">⌫</span>Delete</button>
+                    <button class="action-menu-item danger-menu-item" type="button" role="menuitem" on:click={() => runRowAction(() => onRemoveKey(obj))} disabled={busy}><svg class="action-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16m-10 4v6m4-6v6M9 7V4h6v3m-9 0 1 13h10l1-13Z"/></svg>Delete</button>
                   </div>{/if}
                 </div>
               {/if}</div></td>
@@ -381,15 +403,16 @@
   .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 38px; white-space: nowrap; overflow: visible; }
   .row-actions :global(.action-icon) { flex: 0 0 38px; }
   .row-action-menu { position: relative; flex: 0 0 auto; }
-  .actions-trigger { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 10px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); color: var(--text); font-size: .74rem; font-weight: 800; white-space: nowrap; cursor: pointer; }
+   .actions-trigger { display: inline-grid; place-items: center; width: 38px; height: 38px; padding: 0; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); color: var(--text); cursor: pointer; }
   .actions-trigger:hover, .actions-trigger[aria-expanded="true"] { border-color: var(--accent-ring); background: var(--accent-soft); color: var(--accent); }
   .actions-trigger:focus-visible, .action-menu-item:focus-visible { outline: 3px solid rgba(43,130,197,.2); outline-offset: 2px; }
-  .actions-trigger-mark { color: var(--muted); font-size: 1.15rem; line-height: .5; letter-spacing: .05em; }
-  .action-menu { position: absolute; top: calc(100% + 7px); right: 0; z-index: 12; display: grid; min-width: 198px; padding: 6px; border: 1px solid #cfe0eb; border-radius: 13px; background: var(--surface); box-shadow: 0 16px 34px rgba(22,57,84,.2); }
-  .action-menu-item { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 36px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: .76rem; font-weight: 700; text-align: left; cursor: pointer; }
+   .actions-trigger-icon { width: 18px; height: 18px; fill: currentColor; color: var(--muted); }
+  .action-menu { position: fixed; top: 8px; right: 8px; z-index: 100; display: grid; min-width: 198px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); box-sizing: border-box; overflow-y: auto; padding: 6px; border: 1px solid #cfe0eb; border-radius: 13px; background: var(--surface); box-shadow: 0 16px 34px rgba(22,57,84,.2); }
+   .action-menu-item { display: flex; align-items: center; justify-content: flex-start; gap: 9px; width: 100%; min-height: 36px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: .76rem; font-weight: 700; text-align: left; cursor: pointer; }
   .action-menu-item:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
   .action-menu-item:disabled { cursor: not-allowed; opacity: .45; }
-  .action-menu-item span { display: inline-grid; place-items: center; width: 18px; color: var(--muted); font-size: .95rem; }
+   .action-menu-item span { display: inline-grid; place-items: center; width: 18px; color: var(--muted); font-size: .95rem; }
+   .action-menu-icon { flex: 0 0 18px; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
   .action-menu-item small { margin-left: auto; color: var(--muted); font-size: .68rem; }
   .action-menu-item.danger-menu-item { color: var(--danger, #b00020); }
   .action-menu-item.danger-menu-item:hover:not(:disabled) { background: color-mix(in srgb, var(--danger, #b00020) 8%, transparent); color: var(--danger, #b00020); }
@@ -434,7 +457,7 @@
   @keyframes shimmer { from { transform: translateX(-160%); } to { transform: translateX(380%); } }
   @keyframes indeterminate { 0% { transform: translateX(-110%); } 55%,100% { transform: translateX(270%); } }
   @media (prefers-reduced-motion: reduce) { .status-beacon, .upload-fill, .upload-fill::after { animation: none!important; transition: none; } .listing-frame .table-scroll { transition: none; } }
-  @media (max-width: 700px) { .browser-toolbar { align-items: stretch; flex-wrap: wrap; } .search-field { flex-basis: 100%; max-width: none; } .object-toolbar .search-hint { flex: 1 1 auto; } .pagination { flex-wrap: wrap; } .pagination-summary { flex-basis: 100%; margin: 0; text-align: center; } .global-search-head, .global-search-list li { align-items: stretch; flex-direction: column; } .result-open { align-self: flex-start; } .bucket-table { min-width: 0!important; } .bucket-created-column { width: 96px; } .bucket-accounts-column { width: 104px; } .bucket-actions-column { width: 118px; } .bucket-table .sort-header { gap: 3px; padding-inline: 3px; margin-inline: -3px; font-size: .6rem; } .bucket-table .account-summary span { display: none; } .bucket-table .row-actions { gap: 3px; } .bucket-table .row-actions :global(.action-icon) { flex-basis: 32px; width: 32px; height: 32px; } .bucket-table .actions-trigger { min-height: 32px; padding-inline: 7px; font-size: .67rem; } .bucket-table .action-menu { right: 0; } }
+   @media (max-width: 700px) { .browser-toolbar { align-items: stretch; flex-wrap: wrap; } .search-field { flex-basis: 100%; max-width: none; } .object-toolbar .search-hint { flex: 1 1 auto; } .pagination { flex-wrap: wrap; } .pagination-summary { flex-basis: 100%; margin: 0; text-align: center; } .global-search-head, .global-search-list li { align-items: stretch; flex-direction: column; } .result-open { align-self: flex-start; } .bucket-table { min-width: 0!important; } .bucket-created-column { width: 96px; } .bucket-accounts-column { width: 104px; } .bucket-actions-column { width: 72px; } .bucket-table .sort-header { gap: 3px; padding-inline: 3px; margin-inline: -3px; font-size: .6rem; } .bucket-table .account-summary span { display: none; } .bucket-table .row-actions { gap: 3px; } .bucket-table .row-actions :global(.action-icon) { flex-basis: 32px; width: 32px; height: 32px; } .bucket-table .actions-trigger { width: 32px; height: 32px; } .bucket-table .action-menu { right: 0; } }
   @media (max-width: 900px) { .selection-bar { left: 12px; right: 12px; bottom: 12px; } }
   .visually-hidden { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
 </style>

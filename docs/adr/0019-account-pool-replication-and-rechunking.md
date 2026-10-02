@@ -96,3 +96,9 @@ before the next eligible account is attempted. The
 accepts zero through eight. Each attempt retains the existing transport retry,
 120-second stream recovery, decryption, and checksum verification boundaries;
 accounts are never mixed within one chunk.
+
+Each selected location is read through its persisted Telegram peer and message
+ID. This is required for access-only replicas: the target account may be
+configured with a different storage chat while still having access to the
+source chat. Message IDs are chat-scoped, so using the target account's
+configured storage chat would make a valid access replica unreadable.

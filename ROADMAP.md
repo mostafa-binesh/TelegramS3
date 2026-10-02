@@ -389,9 +389,12 @@ Multi-user boundary for the next increment:
 - [x] Added an isolated additional-account onboarding wizard that carries its
   account ID through every Telegram login step and leaves primary settings
   untouched.
-- [x] Added schema v18 durable re-chunk replica policy and target snapshots;
-  operators can rebuild prior replica/access targets or choose primary-only
-  re-chunking with explicit read-availability consequences.
+ - [x] Added schema v18 durable re-chunk replica policy and target snapshots;
+   operators can rebuild prior replica/access targets or choose primary-only
+   re-chunking with explicit read-availability consequences.
+ - [x] Fixed re-chunk staging order and final-chunk progress accounting so a
+   queued job can publish its requested layout instead of failing before the
+   first chunk.
 - [x] Added replica source chunk-size metadata and object/bucket mismatch
   reporting, with a yellow account badge when a persisted replica layout differs
   from the canonical manifest layout; legacy unknown values remain readable.
@@ -424,6 +427,9 @@ Multi-user boundary for the next increment:
 - [x] Added a manual eligible-cleanup action. It wakes the durable cleanup
   worker without bypassing retention windows, evidence-first ordering, or
   `recovery_required` quarantine, with Rust and Playwright coverage.
+- [x] Fixed access-replica reads to resolve the persisted source peer together
+  with each Telegram message ID across public, admin, range, prefetch, failover,
+  verifier, and replication-read paths; added a disabled-primary regression.
 
 Remaining Phase 10 work:
 

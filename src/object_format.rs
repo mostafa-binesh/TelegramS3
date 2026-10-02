@@ -248,6 +248,7 @@ struct IntegrityLocation {
     account_label: String,
     mode: Option<ReplicaMode>,
     primary: bool,
+    peer_id: String,
     message_id: i64,
 }
 
@@ -3192,7 +3193,9 @@ impl ObjectFormatService {
                     chunk.order
                 ))
             })?;
-            let ciphertext = self.download_message_bytes(message_id).await?;
+            let ciphertext = self
+                .download_message_bytes(&chunk.telegram_peer_id, message_id)
+                .await?;
             let plaintext = if manifest.encryption.enabled {
                 let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
                 self.decrypt_chunk(source_object_id, source_order, &ciphertext)?
@@ -3690,7 +3693,9 @@ impl ObjectFormatService {
                     chunk.order
                 ))
             })?;
-            let bytes = self.download_message_bytes(message_id).await?;
+            let bytes = self
+                .download_message_bytes(&chunk.telegram_peer_id, message_id)
+                .await?;
             let plaintext = if manifest.encryption.enabled {
                 let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
                 self.decrypt_chunk(source_object_id, source_order, &bytes)?
@@ -3918,7 +3923,7 @@ impl ObjectFormatService {
             ),
         })?;
         let ciphertext = self
-            .download_message_bytes_from_transport(transport, message_id)
+            .download_message_bytes_from_transport(transport, &location.peer_id, message_id)
             .await
             .map_err(|error| {
                 let message = error.to_string();
@@ -4080,6 +4085,7 @@ impl ObjectFormatService {
                     .unwrap_or_else(|| "Primary account".to_string()),
                 mode: None,
                 primary: true,
+                peer_id: chunk.telegram_peer_id.clone(),
                 message_id: chunk.telegram_message_id,
             }];
             locations.extend(chunk.replicas.iter().map(|replica| {
@@ -4091,6 +4097,7 @@ impl ObjectFormatService {
                         .unwrap_or_else(|| replica.account_id.clone()),
                     mode: Some(replica.mode),
                     primary: false,
+                    peer_id: replica.telegram_peer_id.clone(),
                     message_id: replica.telegram_message_id,
                 }
             }));
@@ -4489,7 +4496,10 @@ impl ObjectFormatService {
             self.add_telegram_upload_bytes(fs::metadata(path)?.len());
             fs::write(
                 mock_dir.join(format!("{message_id}.json")),
-                serde_json::to_vec(&serde_json::json!({ "file_name": file_name }))?,
+                serde_json::to_vec(&serde_json::json!({
+                    "file_name": file_name,
+                    "peer_id": self.storage_chat_id()?,
+                }))?,
             )?;
             if fault.as_deref() == Some("ambiguous") {
                 return Err(ObjectFormatError::Telegram(
@@ -4558,46 +4568,57 @@ impl ObjectFormatService {
         })
     }
 
-    async fn download_message_bytes(&self, message_id: i32) -> Result<Vec<u8>, ObjectFormatError> {
+    async fn download_message_bytes(
+        &self,
+        peer_id: &str,
+        message_id: i32,
+    ) -> Result<Vec<u8>, ObjectFormatError> {
         let transport = self.transport_manager.current().await?;
-        self.download_message_bytes_from_transport(transport, message_id)
+        self.download_message_bytes_from_transport(transport, peer_id, message_id)
             .await
     }
 
     async fn download_message_bytes_from_transport(
         &self,
         transport: Arc<crate::telegram::TelegramTransport>,
+        peer_id: &str,
         message_id: i32,
     ) -> Result<Vec<u8>, ObjectFormatError> {
         if transport.is_mock() {
             return self
-                .download_message_bytes_once_with_transport(transport, message_id)
+                .download_message_bytes_once_with_transport(transport, peer_id, message_id)
                 .await;
         }
         retry_telegram_read(transport.retry_policy(), message_id, || {
-            self.download_message_bytes_once_with_transport(Arc::clone(&transport), message_id)
+            self.download_message_bytes_once_with_transport(
+                Arc::clone(&transport),
+                peer_id,
+                message_id,
+            )
         })
         .await
     }
 
     async fn download_message_bytes_for_stream(
         &self,
+        peer_id: &str,
         message_id: i32,
     ) -> Result<TelegramStreamRead, ObjectFormatError> {
         let transport = self.transport_manager.current().await?;
-        self.download_message_bytes_for_stream_from_transport(transport, message_id)
+        self.download_message_bytes_for_stream_from_transport(transport, peer_id, message_id)
             .await
     }
 
     async fn download_message_bytes_for_stream_from_transport(
         &self,
         transport: Arc<crate::telegram::TelegramTransport>,
+        peer_id: &str,
         message_id: i32,
     ) -> Result<TelegramStreamRead, ObjectFormatError> {
         let started = StdInstant::now();
         if transport.is_mock() {
             let bytes = self
-                .download_message_bytes_once_with_transport(transport, message_id)
+                .download_message_bytes_once_with_transport(transport, peer_id, message_id)
                 .await?;
             return Ok(TelegramStreamRead {
                 telegram_us: started.elapsed().as_micros() as u64,
@@ -4611,7 +4632,13 @@ impl ObjectFormatService {
             retry_policy,
             message_id,
             TELEGRAM_STREAM_RECOVERY_WINDOW,
-            || self.download_message_bytes_once_with_transport(Arc::clone(&transport), message_id),
+            || {
+                self.download_message_bytes_once_with_transport(
+                    Arc::clone(&transport),
+                    peer_id,
+                    message_id,
+                )
+            },
         )
         .await
         .map(|result| TelegramStreamRead {
@@ -4625,6 +4652,7 @@ impl ObjectFormatService {
     async fn download_message_bytes_once_with_transport(
         &self,
         transport: Arc<crate::telegram::TelegramTransport>,
+        peer_id: &str,
         message_id: i32,
     ) -> Result<Vec<u8>, ObjectFormatError> {
         if transport.is_mock() {
@@ -4636,15 +4664,27 @@ impl ObjectFormatService {
             let path = self.mock_telegram_dir().join(format!("{message_id}.bin"));
             if !path.exists() {
                 return Err(ObjectFormatError::InvalidRead(format!(
-                    "telegram message not found: {message_id}"
+                    "telegram message not found: {message_id} in peer {peer_id}"
                 )));
+            }
+            let sidecar = self.mock_telegram_dir().join(format!("{message_id}.json"));
+            if sidecar.exists() {
+                let details: serde_json::Value = serde_json::from_slice(&fs::read(sidecar)?)?;
+                if let Some(stored_peer_id) =
+                    details.get("peer_id").and_then(|value| value.as_str())
+                    && stored_peer_id != peer_id
+                {
+                    return Err(ObjectFormatError::InvalidRead(format!(
+                        "telegram message not found: {message_id} in peer {peer_id}"
+                    )));
+                }
             }
             let bytes = fs::read(path)?;
             self.add_telegram_download_bytes(bytes.len() as u64);
             return Ok(bytes);
         }
         let client = transport.client()?;
-        let storage_peer = transport.storage_peer().await?;
+        let storage_peer = transport.peer_for_id(peer_id).await?;
         let messages = client
             .get_messages_by_id(storage_peer, &[message_id])
             .await
@@ -5000,14 +5040,18 @@ async fn read_stream_span(
         };
         let result = if *is_primary {
             object_format
-                .download_message_bytes_for_stream(message_id)
+                .download_message_bytes_for_stream(&location.peer_id, message_id)
                 .await
                 .map_err(|error| io::Error::other(error.to_string()))
         } else {
             match object_format.account_manager(account_id).await {
                 Ok(manager) => match manager.current().await {
                     Ok(transport) => object_format
-                        .download_message_bytes_for_stream_from_transport(transport, message_id)
+                        .download_message_bytes_for_stream_from_transport(
+                            transport,
+                            &location.peer_id,
+                            message_id,
+                        )
                         .await
                         .map_err(|error| io::Error::other(error.to_string())),
                     Err(error) => Err(io::Error::other(error.to_string())),
@@ -5722,6 +5766,125 @@ mod tests {
         assert_eq!(metrics.recent[0].chunks, 5);
     }
 
+    #[tokio::test]
+    async fn access_replica_reads_source_chat_when_primary_download_is_disabled() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = Arc::new(sample_service(&tempdir).await);
+        service.set_chunk_size(512).expect("small chunks");
+        let payload = (0..2049)
+            .map(|index| (index % 239) as u8)
+            .collect::<Vec<_>>();
+        let manifest = service
+            .put_bytes(
+                "bucket",
+                "access-replica.bin",
+                "application/octet-stream",
+                &payload,
+            )
+            .await
+            .expect("put object");
+
+        let primary_id = service
+            .metadata_store()
+            .active_connection_id()
+            .expect("active account")
+            .expect("primary account id");
+        let (primary, primary_settings) = service
+            .metadata_store()
+            .telegram_account(&primary_id)
+            .expect("primary account lookup")
+            .expect("primary account");
+        service
+            .metadata_store()
+            .upsert_telegram_account(
+                Some(&primary_id),
+                &primary.label,
+                &primary_settings,
+                primary.phone.as_deref(),
+                Some(false),
+            )
+            .expect("disable primary downloads");
+
+        let replica_id = "access-replica-account";
+        let mut replica_settings = primary_settings.clone();
+        replica_settings.telegram_storage_chat_id = Some("-1009876543210".to_string());
+        service
+            .metadata_store()
+            .upsert_telegram_account(
+                Some(replica_id),
+                "Access replica account",
+                &replica_settings,
+                primary.phone.as_deref(),
+                Some(true),
+            )
+            .expect("access replica account");
+
+        let mut replica_manifest = manifest.clone();
+        for chunk in &mut replica_manifest.chunks {
+            let peer_id = chunk.telegram_peer_id.clone();
+            let message_id = chunk.telegram_message_id;
+            chunk.replicas.push(ChunkReplica {
+                account_id: replica_id.to_string(),
+                mode: ReplicaMode::Access,
+                chunk_size: chunk.size,
+                telegram_peer_id: peer_id.clone(),
+                telegram_message_id: message_id,
+                telegram_document_id: chunk.telegram_document_id.clone(),
+            });
+            service
+                .metadata_store()
+                .insert_replica_location(
+                    manifest.object_id,
+                    chunk.order,
+                    replica_id,
+                    "access",
+                    &peer_id,
+                    message_id,
+                    chunk.telegram_document_id.as_deref(),
+                )
+                .expect("access replica location");
+        }
+        service
+            .metadata_store()
+            .update_manifest(replica_manifest.clone())
+            .expect("manifest with access replica");
+
+        let replica_transport = service
+            .account_manager(replica_id)
+            .await
+            .expect("replica manager")
+            .current()
+            .await
+            .expect("replica transport");
+        assert_ne!(
+            replica_transport
+                .status()
+                .await
+                .expect("replica status")
+                .storage_chat_id,
+            replica_manifest.chunks[0].telegram_peer_id
+        );
+
+        let plan =
+            ObjectFormatService::plan_read(&replica_manifest, 0..replica_manifest.content_length)
+                .expect("read plan");
+        let pieces = ObjectFormatService::read_spans_to_stream(
+            Arc::clone(&service),
+            &replica_manifest,
+            plan.chunks,
+            "test-access-replica",
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let actual = pieces
+            .into_iter()
+            .map(|piece| piece.expect("stream piece"))
+            .flat_map(|piece| piece.to_vec())
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, payload);
+    }
+
     #[test]
     fn checksum_helpers_round_trip_hex() {
         let checksum = sha256_hex(b"hello world");
@@ -5883,6 +6046,74 @@ mod tests {
                 .read_bytes("bucket", "moved/source.bin", 0..payload.len() as u64)
                 .await
                 .expect("read moved object"),
+            payload
+        );
+    }
+
+    #[tokio::test]
+    async fn rechunk_worker_publishes_the_requested_chunk_layout() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = sample_service(&tempdir).await;
+        service.set_chunk_size(1024).expect("initial chunk size");
+        let payload = (0..5000)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let original = service
+            .put_bytes(
+                "bucket",
+                "rechunk.bin",
+                "application/octet-stream",
+                &payload,
+            )
+            .await
+            .expect("put source object");
+        assert_eq!(original.chunks.len(), 5);
+
+        let job = service
+            .metadata_store()
+            .queue_rechunk("bucket", "rechunk.bin", 512, false)
+            .expect("queue re-chunk");
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let current = service
+                    .metadata_store()
+                    .rechunk_job(&job.id)
+                    .expect("read re-chunk job")
+                    .expect("re-chunk job exists");
+                if matches!(current.state.as_str(), "completed" | "failed") {
+                    break current;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("re-chunk worker completed in time");
+        assert_eq!(
+            completed.state, "completed",
+            "re-chunk failed: {completed:?}"
+        );
+        assert_eq!(completed.new_chunk_size, 512);
+        assert_eq!(completed.chunks_total, 10);
+        assert_eq!(completed.chunks_done, 10);
+
+        let replacement = service
+            .get_active_manifest("bucket", "rechunk.bin")
+            .expect("read replacement")
+            .expect("replacement is active");
+        assert_eq!(completed.object_id, original.object_id.to_string());
+        assert_ne!(replacement.object_id, original.object_id);
+        assert_eq!(replacement.chunks.len(), 10);
+        assert!(
+            replacement.chunks[..9]
+                .iter()
+                .all(|chunk| chunk.size == 512)
+        );
+        assert_eq!(replacement.chunks[9].size, 392);
+        assert_eq!(
+            service
+                .read_bytes("bucket", "rechunk.bin", 0..payload.len() as u64)
+                .await
+                .expect("read re-chunked object"),
             payload
         );
     }

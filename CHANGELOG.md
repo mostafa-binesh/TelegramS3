@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.7.6-rc.27 - 2026-10-02
+
+### Access-replica downloads across shared chats
+
+- Fixed Telegram reads for access-only replicas by resolving each persisted
+  source peer/chat together with its message ID through the selected account.
+- Public links, authenticated admin downloads, ranged reads, prefetching,
+  account failover, integrity verification, and server-side replication copies
+  now preserve the manifest location instead of incorrectly using the selected
+  account's configured storage chat.
+- Added a regression test covering a disabled primary account and an enabled
+  access replica whose transport is configured for a different chat.
+
+### Icon-first row action menus
+
+- Replaced the visible **Actions** label with a compact accessible ellipsis icon
+  while retaining the full accessible name and tooltip.
+- Left-aligned menu contents and replaced the ambiguous share and delete glyphs
+  with clearer SVG icons; the menu remains keyboard and screen-reader friendly.
+- Added an explicit chunk-size field to the file information modal, including
+  variable first and final chunk sizes.
+- Fixed row action menus at the bottom of short bucket listings so they open as
+  bounded overlays instead of being clipped by the listing card or table header.
+
+### Re-chunk worker reliability
+
+- Fixed re-chunk jobs failing before their first chunk because staging space was
+  reserved before the replacement transfer entered the receiving state.
+- Re-chunk progress now includes the final partial chunk, so completed jobs
+  report the requested total accurately.
+
 ## 0.7.6-rc.26 - 2026-10-02
 
 ### On-demand object information panel

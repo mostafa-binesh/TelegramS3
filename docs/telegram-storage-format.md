@@ -82,9 +82,15 @@ being guessed through.
 
 Replication copies encrypted chunk bytes, preserving the object checksum and
 encryption identity. Access-only replication records the source location and
-requires the target Telegram session to have access to that group/chat.
-Re-chunking stages a replacement object with a new chunk policy, then commits
-it through the normal transfer journal. A lock prevents mixed old/new reads.
+requires the target Telegram session to have access to that group/chat. The
+shared reader always resolves that persisted source peer together with the
+message ID, even when the target account has a different configured storage
+chat; message IDs are not treated as globally unique across chats.
+ Re-chunking stages a replacement object with a new chunk policy, then commits
+ it through the normal transfer journal. A lock prevents mixed old/new reads.
+The replacement transfer is created before chunk staging so each staged chunk
+has a receiving job to reserve space against; progress includes the final
+partial chunk before the replacement manifest is published.
 The storage operation is object-scoped. The admin bucket selection may expand
 selected buckets into one durable job per committed object before invoking the
 worker. Replica locations belong to the old manifest;
@@ -496,7 +502,7 @@ Folder entries remain name-ordered when an object-only column such as size or
 modified time is selected because folders have no object size or modification
 timestamp.
 
-The bucket browser's per-row Actions menu and expandable shared-link expiry
+The bucket browser's per-row icon-only Actions menu and expandable shared-link expiry
 editor are presentation-layer controls. They reuse the existing object,
 replication, re-chunk, move, share, and link-management endpoints and introduce
 no new Telegram message or manifest format.

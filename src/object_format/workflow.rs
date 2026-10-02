@@ -611,20 +611,53 @@ impl ObjectFormatService {
         self.metadata
             .update_rechunk_progress(&job.id, planned_total, 0, 0)?;
         let new_id = Uuid::new_v4();
+        // stage_transfer_chunk reserves staging bytes against the transfer
+        // row. Create that row before building the replacement chunks; doing
+        // this afterward made every re-chunk job fail with "upload is no
+        // longer receiving" on its first chunk.
+        let transfer_id =
+            self.metadata
+                .begin_transfer(new_id, &old_manifest.bucket, &old_manifest.key)?;
         let dir = self.staging_dir(new_id);
-        async_fs::create_dir_all(&dir).await?;
+        if let Err(error) = async_fs::create_dir_all(&dir).await {
+            let _ = self.metadata.fail_reception(
+                &transfer_id,
+                true,
+                "Re-chunk staging could not be created",
+            );
+            return Err(error.into());
+        }
         let mut pending = Vec::with_capacity(new_size.min(16 * 1024 * 1024));
         let mut chunks = Vec::new();
         let mut hasher = Sha256::new();
         let mut offset = 0_u64;
         let mut bytes_done = 0_u64;
-        for source in &old_manifest.chunks {
-            let plaintext = self.read_manifest_chunk(&old_manifest, source).await?;
-            bytes_done = bytes_done.saturating_add(plaintext.len() as u64);
-            hasher.update(&plaintext);
-            pending.extend_from_slice(&plaintext);
-            while pending.len() >= new_size {
-                let remainder = pending.split_off(new_size);
+        let staging_result = async {
+            for source in &old_manifest.chunks {
+                let plaintext = self.read_manifest_chunk(&old_manifest, source).await?;
+                bytes_done = bytes_done.saturating_add(plaintext.len() as u64);
+                hasher.update(&plaintext);
+                pending.extend_from_slice(&plaintext);
+                while pending.len() >= new_size {
+                    let remainder = pending.split_off(new_size);
+                    self.stage_transfer_chunk(
+                        new_id,
+                        &pending,
+                        &mut chunks,
+                        &mut Sha256::new(),
+                        &mut offset,
+                    )
+                    .await?;
+                    pending = remainder;
+                    self.metadata.update_rechunk_progress(
+                        &job.id,
+                        planned_total,
+                        chunks.len() as u64,
+                        bytes_done,
+                    )?;
+                }
+            }
+            if !pending.is_empty() {
                 self.stage_transfer_chunk(
                     new_id,
                     &pending,
@@ -633,7 +666,6 @@ impl ObjectFormatService {
                     &mut offset,
                 )
                 .await?;
-                pending = remainder;
                 self.metadata.update_rechunk_progress(
                     &job.id,
                     planned_total,
@@ -641,16 +673,21 @@ impl ObjectFormatService {
                     bytes_done,
                 )?;
             }
+            Ok::<(), ObjectFormatError>(())
         }
-        if !pending.is_empty() {
-            self.stage_transfer_chunk(
-                new_id,
-                &pending,
-                &mut chunks,
-                &mut Sha256::new(),
-                &mut offset,
-            )
-            .await?;
+        .await;
+        if let Err(error) = staging_result {
+            let removed = match async_fs::remove_dir_all(&dir).await {
+                Ok(()) => true,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+                Err(_) => false,
+            };
+            let _ = self.metadata.fail_reception(
+                &transfer_id,
+                removed,
+                "Re-chunk staging failed before durable acceptance",
+            );
+            return Err(error);
         }
         let manifest_args = ManifestBuildArgs {
             object_id: new_id,
@@ -662,10 +699,22 @@ impl ObjectFormatService {
             chunks,
             whole_checksum: hex::encode(hasher.finalize()),
         };
-        let transfer_id =
-            self.metadata
-                .begin_transfer(new_id, &old_manifest.bucket, &old_manifest.key)?;
-        let transfer = self.finalize_reception(&transfer_id, manifest_args, None)?;
+        let transfer = match self.finalize_reception(&transfer_id, manifest_args, None) {
+            Ok(transfer) => transfer,
+            Err(error) => {
+                let removed = match async_fs::remove_dir_all(&dir).await {
+                    Ok(()) => true,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+                    Err(_) => false,
+                };
+                let _ = self.metadata.fail_reception(
+                    &transfer_id,
+                    removed,
+                    "Re-chunk replacement could not be durably queued",
+                );
+                return Err(error);
+            }
+        };
         let _replacement = self.wait_transfer(&transfer.id).await?;
         if job.apply_to_replicas {
             for target in &job.replica_targets {
@@ -839,6 +888,7 @@ impl ObjectFormatService {
                         let ciphertext = self
                             .download_message_bytes_once_with_transport(
                                 Arc::clone(&source_transport),
+                                &source_location.peer_id,
                                 message_id,
                             )
                             .await?;
@@ -994,17 +1044,21 @@ impl ObjectFormatService {
         if transport.is_mock() {
             let message_id = self.next_mock_message_id()?;
             let dir = self.mock_telegram_dir();
+            let peer_id = transport.status().await?.storage_chat_id;
             fs::create_dir_all(&dir)?;
             fs::write(dir.join(format!("{message_id}.bin")), bytes)?;
             fs::write(
                 dir.join(format!("{message_id}.json")),
-                serde_json::to_vec(
-                    &serde_json::json!({"replica_job":job_id,"account_id":account_id,"chunk":order}),
-                )?,
+                serde_json::to_vec(&serde_json::json!({
+                    "replica_job": job_id,
+                    "account_id": account_id,
+                    "chunk": order,
+                    "peer_id": peer_id,
+                }))?,
             )?;
             self.add_telegram_upload_bytes(bytes.len() as u64);
             return Ok(TelegramLocation {
-                peer_id: transport.status().await?.storage_chat_id,
+                peer_id,
                 message_id: i64::from(message_id),
                 document_id: Some(format!("mock-replica:{account_id}:{message_id}")),
             });
@@ -1032,7 +1086,9 @@ impl ObjectFormatService {
                 chunk.order
             ))
         })?;
-        let ciphertext = self.download_message_bytes(message_id).await?;
+        let ciphertext = self
+            .download_message_bytes(&chunk.telegram_peer_id, message_id)
+            .await?;
         let plaintext = if manifest.encryption.enabled {
             let (source_object_id, source_order) = chunk.payload_identity(manifest.object_id);
             self.decrypt_chunk(source_object_id, source_order, &ciphertext)?

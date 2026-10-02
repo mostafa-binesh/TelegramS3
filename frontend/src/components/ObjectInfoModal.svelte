@@ -64,6 +64,7 @@
             <div><dt>Modified</dt><dd>{formatTimestamp(details.last_modified)}</dd></div>
             <div><dt>Expires</dt><dd>{expiryText(details.expires_at)}</dd></div>
             <div><dt>Schema version</dt><dd>{details.schema_version}</dd></div>
+            <div><dt>Chunk size</dt><dd>{chunkSizeSummary(details)}</dd></div>
             <div><dt>Shared links</dt><dd>{formatCount(details.shared_links)}</dd></div>
             <div><dt>Checksum</dt><dd class="mono breakable">{details.checksum_algorithm}: {details.etag}</dd></div>
             <div><dt>Encryption</dt><dd>{details.encryption_enabled ? `${details.encryption_format}${details.encryption_key_id ? ` · key ${details.encryption_key_id}` : ''}` : 'Disabled'}</dd></div>

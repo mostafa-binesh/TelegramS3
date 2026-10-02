@@ -13,7 +13,9 @@ per-account integrity findings; queued
 workers resume after restart. Inspect
 failed replication or re-chunk jobs before retrying them. An access-only record
 is not a second copy: it is recoverable only while the target session can read
-the shared Telegram chat.
+the shared Telegram chat. During recovery and ordinary reads, the persisted
+source peer is resolved with the message ID; the target account's own storage
+chat is not substituted for an access location.
 
 The runtime opens the restored file through a bounded eight-connection SQLite
 pool. Each handle uses WAL, foreign keys, `FULL` synchronous durability, and a
@@ -27,8 +29,11 @@ while the page is open.
 
 The admin bucket-level re-chunk action expands selected buckets into their
 committed objects and queues independent durable jobs. A restart can therefore
-resume or inspect each object job separately; it does not create a single
-all-or-nothing bucket transaction.
+ resume or inspect each object job separately; it does not create a single
+ all-or-nothing bucket transaction.
+Each job creates its replacement receiving transfer before staging chunks, so
+the staging reservation is durable from the first chunk; the persisted
+completion count includes a final partial chunk.
 
 For a re-chunk job with “apply to replicas” enabled, schema v18 records the
 source account and the old ready replica/access targets before replacement.

@@ -337,6 +337,55 @@ impl TelegramTransport {
         ))
     }
 
+    /// Resolve a manifest location's Telegram peer using this account. A
+    /// replica may point at a chat different from this transport's configured
+    /// storage chat, especially for access-only replicas, so callers must not
+    /// silently fall back to `storage_peer()`.
+    pub(crate) async fn peer_for_id(
+        &self,
+        peer_id: &str,
+    ) -> Result<PeerRef, TelegramTransportError> {
+        let parsed_id = peer_id.parse::<i64>().map_err(|_| {
+            TelegramTransportError::Rpc(format!("invalid Telegram peer id: {peer_id}"))
+        })?;
+        let peer_id = PeerId::from_bot_api_dialog_id(parsed_id).ok_or_else(|| {
+            TelegramTransportError::Rpc(format!("invalid Telegram peer id: {parsed_id}"))
+        })?;
+
+        if peer_id == self.storage_peer_id {
+            return self.storage_peer().await;
+        }
+
+        if let Some(session) = self.session.as_ref()
+            && let Ok(Some(peer)) = session.storage().peer_ref(peer_id).await
+        {
+            return Ok(peer);
+        }
+
+        if self.mock_mode {
+            return Ok(peer_id.to_ambient_ref());
+        }
+
+        let client = self.client()?;
+        let mut dialogs = client.iter_dialogs();
+        while let Some(dialog) = dialogs.next().await.map_err(map_rpc_error)? {
+            if dialog.peer_id() == peer_id {
+                return Ok(dialog.peer_ref());
+            }
+        }
+
+        if let Ok(peer) = client.resolve_peer(peer_id.to_ambient_ref()).await
+            && peer.id() == peer_id
+            && let Ok(Some(peer_ref)) = peer.to_ref().await
+        {
+            return Ok(peer_ref);
+        }
+
+        Err(TelegramTransportError::InvalidState(
+            "telegram manifest peer is not cached or accessible by this account",
+        ))
+    }
+
     async fn resolve_storage_peer_from_dialogs(
         &self,
     ) -> Result<Option<PeerRef>, TelegramTransportError> {

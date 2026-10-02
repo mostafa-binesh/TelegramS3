@@ -111,10 +111,17 @@
                 <p class="legacy-note">This older link cannot be reconstructed because its bearer token was not stored. Revoke it here and create a new link to manage its URL.</p>
               {/if}
               <div class="link-controls">
-                <button class="expiry-toggle" type="button" aria-expanded={expandedExpiryId === link.id} aria-controls={`expiry-editor-${link.id}`} on:click={() => toggleExpiry(link)} disabled={busy}>
-                  <span class="expiry-toggle-copy"><span class="expiry-toggle-label">Change expiry</span><span>{expandedExpiryId === link.id ? 'Hide options' : 'Set a new lifetime'}</span></span>
-                  <span class="expiry-toggle-chevron" aria-hidden="true">{expandedExpiryId === link.id ? '⌃' : '⌄'}</span>
-                </button>
+                <div class="link-action-bar">
+                  <button class="expiry-action" type="button" aria-expanded={expandedExpiryId === link.id} aria-controls={`expiry-editor-${link.id}`} on:click={() => toggleExpiry(link)} disabled={busy}>
+                    <span class="expiry-action-title">{expandedExpiryId === link.id ? 'Close expiry editor' : 'Change expiry'}</span>
+                    <span class="expiry-action-note">{expandedExpiryId === link.id ? 'Choose a new lifetime' : (link.expires_at ? 'Update the current lifetime' : 'Never expires')}</span>
+                  </button>
+                  {#if confirmingId === link.id}
+                    <div class="revoke-confirm"><span>Revoke this link?</span><button class="ghost small-button" type="button" on:click={() => confirmingId = ''} disabled={busy}>Keep</button><button class="danger-button small-button" type="button" on:click={() => { confirmingId = ''; onRevoke(link.id); }} disabled={busy}>Revoke</button></div>
+                  {:else}
+                    <button class="revoke-link" type="button" on:click={() => confirmingId = link.id} disabled={busy}>Revoke link</button>
+                  {/if}
+                </div>
                 {#if expandedExpiryId === link.id}
                   <div id={`expiry-editor-${link.id}`} class="expiry-editor">
                     <label class="expiry-control">
@@ -136,11 +143,6 @@
                       </div>
                     {/if}
                   </div>
-                {/if}
-                {#if confirmingId === link.id}
-                  <div class="revoke-confirm"><span>Revoke this link?</span><button class="ghost small-button" type="button" on:click={() => confirmingId = ''} disabled={busy}>Keep</button><button class="danger-button small-button" type="button" on:click={() => { confirmingId = ''; onRevoke(link.id); }} disabled={busy}>Revoke</button></div>
-                {:else}
-                  <button class="ghost revoke-button" type="button" on:click={() => confirmingId = link.id} disabled={busy}>Revoke link</button>
                 {/if}
               </div>
             </article>
@@ -178,27 +180,28 @@
   .url-row input { min-width: 0; font-size: .78rem; background: #f8fbfd; }
   .copy-button, .small-button { min-height: 40px; padding: .55rem .8rem; white-space: nowrap; }
   .copy-button { background: var(--text); }
-  .link-controls { display: grid; gap: 10px; padding-top: 2px; }
-  .expiry-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 8px 0 2px; border: 0; border-top: 1px solid #e6eef3; background: transparent; color: #537087; text-align: left; cursor: pointer; }
-  .expiry-toggle:hover:not(:disabled) { color: var(--accent); }
-  .expiry-toggle:focus-visible { outline: 3px solid rgba(43,130,197,.18); outline-offset: 3px; border-radius: 8px; }
-  .expiry-toggle-copy { display: grid; gap: 2px; }
-  .expiry-toggle-label { color: var(--accent); font-size: .7rem; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
-  .expiry-toggle-copy > span:last-child { color: var(--muted); font-size: .72rem; }
-  .expiry-toggle-chevron { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: #edf6fb; color: var(--accent); font-size: 1rem; font-weight: 850; }
+  .link-controls { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid #e6eef3; }
+  .link-action-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .expiry-action { display: grid; gap: 2px; min-width: 0; padding: 8px 12px; border: 1px solid #d9e7ef; border-radius: 10px; background: #f7fbfd; color: var(--text); text-align: left; cursor: pointer; transition: border-color .15s ease, background .15s ease, box-shadow .15s ease; }
+  .expiry-action:hover:not(:disabled) { border-color: #9bc8e2; background: #f1f9fd; box-shadow: 0 3px 10px rgba(31, 93, 135, .08); }
+  .expiry-action:focus-visible { outline: 3px solid rgba(43,130,197,.18); outline-offset: 2px; }
+  .expiry-action-title { color: var(--accent); font-size: .78rem; font-weight: 850; }
+  .expiry-action-note { color: var(--muted); font-size: .72rem; }
+  .revoke-link { flex: 0 0 auto; padding: 8px 2px; border: 0; background: transparent; color: #c74e4e; font-size: .78rem; font-weight: 750; cursor: pointer; }
+  .revoke-link:hover:not(:disabled) { color: #a72828; text-decoration: underline; text-underline-offset: 3px; }
+  .revoke-link:focus-visible { outline: 3px solid rgba(199,78,78,.18); outline-offset: 3px; border-radius: 6px; }
   .expiry-editor { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; padding: 10px; border: 1px solid #dbeaf2; border-radius: 11px; background: #f8fcfe; }
   .expiry-control { display: grid; gap: 5px; flex: 1 1 220px; }
   .expiry-control span { color: var(--muted); font-size: .72rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
   .expiry-control select { min-height: 40px; padding-top: .55rem; padding-bottom: .55rem; }
   .custom-expiry { display: flex; gap: 7px; flex: 1 1 180px; }
   .custom-expiry input { min-width: 0; min-height: 40px; }
-  .revoke-button { min-height: 40px; color: var(--danger); border-color: #edcaca; }
-  .revoke-confirm { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; color: var(--danger); font-size: .8rem; font-weight: 700; }
+  .revoke-confirm { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; justify-content: flex-end; color: var(--danger); font-size: .8rem; font-weight: 700; }
   .legacy-note { margin: 0; padding: 10px; border-radius: 10px; color: #7b5a25; background: #fff8e8; font-size: .78rem; line-height: 1.45; }
   .empty-links { display: grid; justify-items: center; gap: 7px; padding: 32px 20px; border: 1px dashed #cbdce8; border-radius: 16px; color: var(--muted); text-align: center; }
   .empty-links strong { color: var(--text); }
   .empty-links p { max-width: 42ch; margin: 0; line-height: 1.5; font-size: .86rem; }
   .empty-orbit { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 1.5rem; font-weight: 800; }
   .shared-footer { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding-top: 2px; color: var(--muted); font-size: .76rem; }
-  @media(max-width:600px) { .shared-hero { grid-template-columns: auto minmax(0,1fr); } .shared-hero > .icon-button { grid-column: 2; grid-row: 1; justify-self: end; } .url-row { align-items: stretch; flex-direction: column; } .shared-footer { align-items: stretch; flex-direction: column; } .shared-footer button { width: 100%; } .expiry-editor { align-items: stretch; flex-direction: column; } .expiry-control, .custom-expiry { flex-basis: auto; } .custom-expiry input { flex: 1 1 auto; } }
+  @media(max-width:600px) { .shared-hero { grid-template-columns: auto minmax(0,1fr); } .shared-hero > .icon-button { grid-column: 2; grid-row: 1; justify-self: end; } .url-row { align-items: stretch; flex-direction: column; } .shared-footer { align-items: stretch; flex-direction: column; } .shared-footer button { width: 100%; } .link-action-bar { align-items: stretch; flex-direction: column; } .expiry-action { width: 100%; } .revoke-link { align-self: flex-start; } .revoke-confirm { justify-content: flex-start; } .expiry-editor { align-items: stretch; flex-direction: column; } .expiry-control, .custom-expiry { flex-basis: auto; } .custom-expiry input { flex: 1 1 auto; } }
 </style>

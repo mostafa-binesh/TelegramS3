@@ -53,6 +53,7 @@ type MockOptions = {
   shareFailure?: boolean;
   objectDetailsFailure?: boolean;
   storageFailure?: boolean;
+  singleObject?: boolean;
   recoveryIssue?: Record<string, unknown>;
   activeUpload?: boolean;
   activeUploadState?: string;
@@ -74,7 +75,7 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
   let recoveryVerifyChunks = 1;
   let cleanupRetentionSecs = 43200;
   let connectionRemoved = false;
-  let createdFolders = new Set(['docs']);
+  let createdFolders = new Set(options.singleObject ? [] : ['docs']);
   const deletedKeys = new Set<string>();
   const buckets = [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }];
   const users = [user];
@@ -188,6 +189,8 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
             { key: 'docs/report.txt', name: 'report.txt', size: 24, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 },
             { key: 'docs/Hoomaan - Khatere (SPOTISAVER).mp3', name: 'Hoomaan - Khatere (SPOTISAVER).mp3', size: 28, last_modified: '2026-01-01T00:00:00Z', shared_links: 0 }
           ]
+        : options.singleObject
+          ? [{ key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z', shared_links: shareLinksByKey.get('readme.txt')?.length ?? 0 }]
         : [
             { key: 'readme.txt', name: 'readme.txt', size: 12, last_modified: '2026-01-01T00:00:00Z', shared_links: shareLinksByKey.get('readme.txt')?.length ?? 0 },
             { key: 'archive.bin', name: 'archive.bin', size: 28, last_modified: '2026-01-01T00:00:00Z', shared_links: shareLinksByKey.get('archive.bin')?.length ?? 0 }
@@ -432,7 +435,13 @@ test('share modal uses an expiry preset, sends the correct payload, displays, an
   await signIn(page);
   await openBucket(page);
 
+  const row = page.locator('.kv-table tbody tr').filter({ hasText: 'readme.txt' }).last();
+  const actionsTrigger = row.getByRole('button', { name: 'Actions for readme.txt' });
+  await expect(actionsTrigger).not.toContainText('Actions');
+  await expect(actionsTrigger.locator('svg')).toBeVisible();
   const shareMenu = await openObjectActions(page, 'readme.txt');
+  await expect(shareMenu.getByRole('menuitem', { name: 'Share', exact: true })).toHaveCSS('text-align', 'left');
+  await expect(shareMenu.getByRole('menuitem', { name: 'Delete', exact: true })).toHaveCSS('justify-content', 'flex-start');
   await expect(shareMenu.getByRole('menuitem', { name: 'Share', exact: true })).toBeVisible();
   await shareMenu.getByRole('menuitem', { name: 'Share', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Share readme.txt' })).toBeVisible();
@@ -461,6 +470,28 @@ test('share modal uses an expiry preset, sends the correct payload, displays, an
   await publicPage.close();
 });
 
+test('single-row action menu opens upward inside the bucket card', async ({ page }) => {
+  await mockAdminApi(page, { singleObject: true });
+  await signIn(page);
+  await openBucket(page);
+
+  const row = page.locator('.kv-table tbody tr').filter({ hasText: 'readme.txt' }).last();
+  const trigger = row.getByRole('button', { name: 'Actions for readme.txt' });
+  await trigger.click();
+  const menu = page.getByRole('menu', { name: 'Actions for readme.txt' });
+  await expect(menu).toBeVisible();
+
+  const menuBox = await menu.boundingBox();
+  const triggerBox = await trigger.boundingBox();
+  const cardBox = await page.locator('section.card.surface').first().boundingBox();
+  expect(menuBox).not.toBeNull();
+  expect(triggerBox).not.toBeNull();
+  expect(cardBox).not.toBeNull();
+  if (!menuBox || !triggerBox || !cardBox) throw new Error('single-row action menu or card was not rendered');
+  expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(cardBox.y + cardBox.height);
+  expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(triggerBox.y + 1);
+});
+
 test('object information action loads the complete manifest and chunk layout on demand', async ({ page }) => {
   await mockAdminApi(page);
   await signIn(page);
@@ -478,6 +509,8 @@ test('object information action loads the complete manifest and chunk layout on 
   await expect(page.getByRole('heading', { name: 'readme.txt' })).toBeVisible();
   await expect(page.getByText('12 MiB')).toBeVisible();
   await expect(page.getByText('2 stored chunks')).toBeVisible();
+  const chunkSizeField = page.locator('dt').filter({ hasText: 'Chunk size' }).locator('..');
+  await expect(chunkSizeField).toContainText('8.0 MiB first · 4.0 MiB final');
   await expect(page.getByText('text/plain')).toBeVisible();
   await expect(page.getByText('x-amz-meta-owner')).toBeVisible();
   await expect(page.getByText('chunk-checksum-1')).toBeVisible();

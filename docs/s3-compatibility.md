@@ -60,7 +60,9 @@ it uploads encrypted chunk bytes to the target connection; `access` mode always
 records a shared-chat location without uploading a second copy. A chunk may
 have several account locations and the shared reader
 rotates across them; an access-only target must be able to resolve the source
-peer. The Accounts workspace is the single home for the primary connection and
+peer. Every read resolves the persisted location peer and message ID through
+the selected account rather than assuming that account's configured storage
+chat. The Accounts workspace is the single home for the primary connection and
 additional connections, with separate Connections, Replication, and
 Maintenance tabs. Bucket/object account badges open per-account copy/access
 details and can queue either a whole-bucket or selected-key replication job.
@@ -109,8 +111,10 @@ evidence-first cleanup worker handles it. The operator chooses whether the job
 should apply to replicas. When enabled, the job snapshots the old physical and
 access-only account targets in schema v18 and queues durable follow-up jobs for
 the replacement manifest after the primary commit. When disabled, old replica
-locations remain attached only to the old manifest and are cleaned up with it;
-the replacement is therefore primary-only until it is replicated again.
+ locations remain attached only to the old manifest and are cleaned up with it;
+ the replacement is therefore primary-only until it is replicated again.
+The worker creates the replacement transfer before reserving chunk staging
+space, and its durable progress includes a final partial chunk.
 The additional-account wizard saves its account definition first, then sends
 `account_id` with every login flow so the code/password steps use that account's
 session and transport rather than the primary connection.
@@ -169,7 +173,7 @@ while transient account/network failures remain retryable.
   operator-console features;
   S3 `ListObjects` and `ListObjectsV2` semantics are unchanged.
 - Object, folder, and bucket rows expose applicable maintenance and destructive
-   operations through a responsive Actions menu, while the fixed bulk bar keeps
+   operations through a responsive icon-only Actions menu, while the fixed bulk bar keeps
    its multi-selection actions. A row-level re-chunk or move carries an isolated
    target scope and does not reuse an unrelated selection. Shared-link expiry
    editing is a per-link expandable control; it changes presentation only and
