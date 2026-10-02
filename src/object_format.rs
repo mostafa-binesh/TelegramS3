@@ -467,6 +467,7 @@ pub struct ObjectFormatService {
     data_dir: PathBuf,
     chunk_size: Arc<RwLock<u64>>,
     download_prefetch_chunks: Arc<RwLock<u64>>,
+    download_prefetch_mode: Arc<RwLock<String>>,
     download_failover_retries: Arc<RwLock<u64>>,
     recovery_verify_enabled: Arc<RwLock<bool>>,
     recovery_verify_startup: Arc<RwLock<bool>>,
@@ -511,8 +512,26 @@ pub struct DownloadStageMetrics {
     pub completed_requests: u64,
     pub failed_requests: u64,
     pub test_active_requests: u64,
+    pub active: Vec<DownloadStageActive>,
     pub last_test: Option<DownloadStageSample>,
     pub recent: Vec<DownloadStageSample>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DownloadStageActive {
+    pub request_id: u64,
+    pub surface: String,
+    pub object: String,
+    pub mode: String,
+    pub total_chunks: u64,
+    pub server_chunks: u64,
+    pub client_chunks: u64,
+    pub current_chunk: Option<u64>,
+    pub client_bytes: u64,
+    pub telegram_bytes: u64,
+    pub telegram_retries: u64,
+    pub prefetch_window_max: u64,
+    pub prefetch_window_final: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -525,6 +544,7 @@ pub struct DownloadStageSample {
     pub client_bytes: u64,
     pub telegram_bytes: u64,
     pub telegram_retries: u64,
+    pub prefetch_mode: String,
     pub prefetch_window_max: u64,
     pub prefetch_window_final: u64,
     pub accounts: Vec<DownloadAccountStageSample>,
@@ -553,17 +573,40 @@ struct DownloadStageMetricsStore {
     completed_requests: AtomicU64,
     failed_requests: AtomicU64,
     test_active_requests: AtomicU64,
+    active: Mutex<BTreeMap<u64, DownloadStageLive>>,
     last_test: Mutex<Option<DownloadStageSample>>,
     recent: Mutex<VecDeque<DownloadStageSample>>,
 }
 
 struct DownloadStageAccumulator {
     request_id: u64,
-    surface: &'static str,
+    live: DownloadStageLive,
+}
+
+#[derive(Clone, Default)]
+struct DownloadAccountStageAccumulator {
+    chunks: u64,
+    telegram_bytes: u64,
+    telegram_retries: u64,
+    telegram_us: u64,
+}
+
+#[derive(Clone)]
+struct DownloadStageLive(Arc<Mutex<DownloadStageLiveState>>);
+
+#[derive(Clone)]
+struct DownloadStageLiveState {
+    request_id: u64,
+    surface: String,
+    object: String,
+    mode: String,
     started: StdInstant,
     started_at: String,
     expected_client_bytes: u64,
-    chunks: u64,
+    total_chunks: u64,
+    server_chunks: u64,
+    client_chunks: u64,
+    current_chunk: Option<u64>,
     client_bytes: u64,
     telegram_bytes: u64,
     telegram_retries: u64,
@@ -577,53 +620,146 @@ struct DownloadStageAccumulator {
     verify_us: u64,
 }
 
-#[derive(Default)]
-struct DownloadAccountStageAccumulator {
-    chunks: u64,
-    telegram_bytes: u64,
-    telegram_retries: u64,
-    telegram_us: u64,
-}
-
 struct DownloadStageGuard {
     store: Arc<DownloadStageMetricsStore>,
     sample: Option<DownloadStageAccumulator>,
+}
+
+impl DownloadStageLive {
+    fn new(
+        request_id: u64,
+        surface: &'static str,
+        object: String,
+        mode: &str,
+        expected_client_bytes: u64,
+        total_chunks: u64,
+        prefetch_window_max: u64,
+    ) -> Self {
+        Self(Arc::new(Mutex::new(DownloadStageLiveState {
+            request_id,
+            surface: surface.to_string(),
+            object,
+            mode: mode.to_string(),
+            started: StdInstant::now(),
+            started_at: OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string()),
+            expected_client_bytes,
+            total_chunks,
+            server_chunks: 0,
+            client_chunks: 0,
+            current_chunk: None,
+            client_bytes: 0,
+            telegram_bytes: 0,
+            telegram_retries: 0,
+            prefetch_window_max,
+            prefetch_window_final: 1,
+            accounts: BTreeMap::new(),
+            first_chunk_us: None,
+            telegram_us: 0,
+            retry_wait_us: 0,
+            decrypt_us: 0,
+            verify_us: 0,
+        })))
+    }
+
+    fn record_fetched(&self, result: &Result<ReadSpanResult, io::Error>) {
+        let Ok(result) = result else {
+            return;
+        };
+        let Ok(mut state) = self.0.lock() else {
+            return;
+        };
+        state.server_chunks = state.server_chunks.saturating_add(1);
+        state.current_chunk = Some(result.chunk_order);
+        state.telegram_bytes = state.telegram_bytes.saturating_add(result.telegram_bytes);
+        state.telegram_retries = state
+            .telegram_retries
+            .saturating_add(result.telegram_retries);
+        let account = state.accounts.entry(result.account_id.clone()).or_default();
+        account.chunks = account.chunks.saturating_add(1);
+        account.telegram_bytes = account.telegram_bytes.saturating_add(result.telegram_bytes);
+        account.telegram_retries = account
+            .telegram_retries
+            .saturating_add(result.telegram_retries);
+        account.telegram_us = account.telegram_us.saturating_add(result.telegram_us);
+        state.telegram_us = state.telegram_us.saturating_add(result.telegram_us);
+        state.retry_wait_us = state.retry_wait_us.saturating_add(result.retry_wait_us);
+        state.decrypt_us = state.decrypt_us.saturating_add(result.decrypt_us);
+        state.verify_us = state.verify_us.saturating_add(result.verify_us);
+    }
+
+    fn record_emitted(&self, bytes: u64) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        state.client_chunks = state.client_chunks.saturating_add(1);
+        state.client_bytes = state.client_bytes.saturating_add(bytes);
+        if state.first_chunk_us.is_none() {
+            state.first_chunk_us = Some(state.started.elapsed().as_micros() as u64);
+        }
+        state.expected_client_bytes > 0 && state.client_bytes >= state.expected_client_bytes
+    }
+
+    fn set_prefetch_window(&self, window: usize) {
+        if let Ok(mut state) = self.0.lock() {
+            state.prefetch_window_final = window as u64;
+        }
+    }
+
+    fn snapshot(&self) -> Option<DownloadStageLiveState> {
+        self.0.lock().ok().map(|state| state.clone())
+    }
+
+    fn active_snapshot(&self) -> Option<DownloadStageActive> {
+        self.snapshot().map(|state| DownloadStageActive {
+            request_id: state.request_id,
+            surface: state.surface,
+            object: state.object,
+            mode: state.mode,
+            total_chunks: state.total_chunks,
+            server_chunks: state.server_chunks,
+            client_chunks: state.client_chunks,
+            current_chunk: state.current_chunk,
+            client_bytes: state.client_bytes,
+            telegram_bytes: state.telegram_bytes,
+            telegram_retries: state.telegram_retries,
+            prefetch_window_max: state.prefetch_window_max,
+            prefetch_window_final: state.prefetch_window_final,
+        })
+    }
 }
 
 impl DownloadStageMetricsStore {
     fn start(
         self: &Arc<Self>,
         surface: &'static str,
+        object: String,
+        mode: &str,
         expected_client_bytes: u64,
+        total_chunks: u64,
         prefetch_window_max: u64,
     ) -> DownloadStageGuard {
         self.active_requests.fetch_add(1, Ordering::Relaxed);
         if surface == "diagnostic-test" {
             self.test_active_requests.fetch_add(1, Ordering::Relaxed);
         }
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let live = DownloadStageLive::new(
+            request_id,
+            surface,
+            object,
+            mode,
+            expected_client_bytes,
+            total_chunks,
+            prefetch_window_max,
+        );
+        if let Ok(mut active) = self.active.lock() {
+            active.insert(request_id, live.clone());
+        }
         DownloadStageGuard {
             store: Arc::clone(self),
-            sample: Some(DownloadStageAccumulator {
-                request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed) + 1,
-                surface,
-                started: StdInstant::now(),
-                started_at: OffsetDateTime::now_utc()
-                    .format(&time::format_description::well_known::Rfc3339)
-                    .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string()),
-                expected_client_bytes,
-                chunks: 0,
-                client_bytes: 0,
-                telegram_bytes: 0,
-                telegram_retries: 0,
-                prefetch_window_max,
-                prefetch_window_final: 1,
-                accounts: BTreeMap::new(),
-                first_chunk_us: None,
-                telegram_us: 0,
-                retry_wait_us: 0,
-                decrypt_us: 0,
-                verify_us: 0,
-            }),
+            sample: Some(DownloadStageAccumulator { request_id, live }),
         }
     }
 
@@ -633,6 +769,16 @@ impl DownloadStageMetricsStore {
             completed_requests: self.completed_requests.load(Ordering::Relaxed),
             failed_requests: self.failed_requests.load(Ordering::Relaxed),
             test_active_requests: self.test_active_requests.load(Ordering::Relaxed),
+            active: self
+                .active
+                .lock()
+                .map(|active| {
+                    active
+                        .values()
+                        .filter_map(DownloadStageLive::active_snapshot)
+                        .collect()
+                })
+                .unwrap_or_default(),
             last_test: self.last_test.lock().ok().and_then(|sample| sample.clone()),
             recent: self
                 .recent
@@ -654,19 +800,28 @@ impl DownloadStageMetricsStore {
         } else if status == "completed" {
             self.completed_requests.fetch_add(1, Ordering::Relaxed);
         }
+        let live = sample.live.snapshot();
+        if let Ok(mut active) = self.active.lock() {
+            active.remove(&sample.request_id);
+        }
+        let Some(live) = live else {
+            return;
+        };
         let output = DownloadStageSample {
-            request_id: sample.request_id,
-            surface: sample.surface.to_string(),
-            started_at: sample.started_at,
+            request_id: live.request_id,
+            surface: live.surface.clone(),
+            started_at: live.started_at.clone(),
             status: status.to_string(),
-            chunks: sample.chunks,
-            client_bytes: sample.client_bytes,
-            telegram_bytes: sample.telegram_bytes,
-            telegram_retries: sample.telegram_retries,
-            prefetch_window_max: sample.prefetch_window_max,
-            prefetch_window_final: sample.prefetch_window_final,
-            accounts: sample
+            chunks: live.server_chunks,
+            client_bytes: live.client_bytes,
+            telegram_bytes: live.telegram_bytes,
+            telegram_retries: live.telegram_retries,
+            prefetch_mode: live.mode.clone(),
+            prefetch_window_max: live.prefetch_window_max,
+            prefetch_window_final: live.prefetch_window_final,
+            accounts: live
                 .accounts
+                .clone()
                 .into_iter()
                 .map(|(account_id, account)| DownloadAccountStageSample {
                     account_id,
@@ -676,15 +831,15 @@ impl DownloadStageMetricsStore {
                     telegram_us: account.telegram_us,
                 })
                 .collect(),
-            first_chunk_us: sample.first_chunk_us,
-            telegram_us: sample.telegram_us,
-            retry_wait_us: sample.retry_wait_us,
-            decrypt_us: sample.decrypt_us,
-            verify_us: sample.verify_us,
-            total_us: sample.started.elapsed().as_micros() as u64,
+            first_chunk_us: live.first_chunk_us,
+            telegram_us: live.telegram_us,
+            retry_wait_us: live.retry_wait_us,
+            decrypt_us: live.decrypt_us,
+            verify_us: live.verify_us,
+            total_us: live.started.elapsed().as_micros() as u64,
             error,
         };
-        if sample.surface == "diagnostic-test" {
+        if live.surface == "diagnostic-test" {
             self.test_active_requests.fetch_sub(1, Ordering::Relaxed);
             if let Ok(mut last_test) = self.last_test.lock() {
                 *last_test = Some(output.clone());
@@ -700,46 +855,18 @@ impl DownloadStageMetricsStore {
 }
 
 impl DownloadStageGuard {
-    fn record_chunk(&mut self, result: &ReadSpanResult) {
-        let Some(sample) = self.sample.as_mut() else {
-            return;
-        };
-        sample.chunks += 1;
-        sample.telegram_bytes = sample.telegram_bytes.saturating_add(result.telegram_bytes);
-        sample.telegram_retries = sample
-            .telegram_retries
-            .saturating_add(result.telegram_retries);
-        let account = sample
-            .accounts
-            .entry(result.account_id.clone())
-            .or_default();
-        account.chunks = account.chunks.saturating_add(1);
-        account.telegram_bytes = account.telegram_bytes.saturating_add(result.telegram_bytes);
-        account.telegram_retries = account
-            .telegram_retries
-            .saturating_add(result.telegram_retries);
-        account.telegram_us = account.telegram_us.saturating_add(result.telegram_us);
-        sample.telegram_us = sample.telegram_us.saturating_add(result.telegram_us);
-        sample.retry_wait_us = sample.retry_wait_us.saturating_add(result.retry_wait_us);
-        sample.decrypt_us = sample.decrypt_us.saturating_add(result.decrypt_us);
-        sample.verify_us = sample.verify_us.saturating_add(result.verify_us);
+    fn live(&self) -> Option<DownloadStageLive> {
+        self.sample.as_ref().map(|sample| sample.live.clone())
     }
 
     fn record_prefetch_window(&mut self, window: usize) {
-        if let Some(sample) = self.sample.as_mut() {
-            sample.prefetch_window_final = window as u64;
+        if let Some(live) = self.live() {
+            live.set_prefetch_window(window);
         }
     }
 
     fn record_emitted(&mut self, bytes: u64) -> bool {
-        let Some(sample) = self.sample.as_mut() else {
-            return false;
-        };
-        sample.client_bytes = sample.client_bytes.saturating_add(bytes);
-        if sample.first_chunk_us.is_none() {
-            sample.first_chunk_us = Some(sample.started.elapsed().as_micros() as u64);
-        }
-        sample.expected_client_bytes > 0 && sample.client_bytes >= sample.expected_client_bytes
+        self.live().is_some_and(|live| live.record_emitted(bytes))
     }
 
     fn finish(&mut self, status: &'static str, error: Option<String>) {
@@ -860,9 +987,16 @@ struct ReadPipeline {
     object_format: Arc<ObjectFormatService>,
     manifest: ObjectManifest,
     first: Option<ReadSpanFuture>,
-    remaining: Option<AdaptiveReadWindow>,
+    remaining: Option<ReadPipelineTail>,
     spans: Vec<ReadSpan>,
     max_window: usize,
+    mode: String,
+    live: DownloadStageLive,
+}
+
+enum ReadPipelineTail {
+    Adaptive(AdaptiveReadWindow),
+    Sequential(SequentialReadAhead),
 }
 
 impl ReadPipeline {
@@ -871,11 +1005,18 @@ impl ReadPipeline {
         manifest: ObjectManifest,
         spans: Vec<ReadSpan>,
         max_window: usize,
+        mode: &str,
+        live: DownloadStageLive,
     ) -> Self {
         let first = spans.first().cloned().map(|span| {
             let object_format = Arc::clone(&object_format);
             let manifest = manifest.clone();
-            Box::pin(read_stream_span(object_format, manifest, span)) as ReadSpanFuture
+            let first_live = live.clone();
+            Box::pin(async move {
+                let result = read_stream_span(object_format, manifest, span).await;
+                first_live.record_fetched(&result);
+                result
+            }) as ReadSpanFuture
         });
         Self {
             object_format,
@@ -884,6 +1025,8 @@ impl ReadPipeline {
             remaining: None,
             spans,
             max_window,
+            mode: mode.to_string(),
+            live,
         }
     }
 
@@ -891,22 +1034,41 @@ impl ReadPipeline {
         if let Some(first) = self.first.take() {
             let result = first.await;
             if result.is_ok() {
-                self.remaining = Some(AdaptiveReadWindow::new(
-                    Arc::clone(&self.object_format),
-                    self.manifest.clone(),
-                    self.spans.iter().skip(1).cloned().collect(),
-                    self.max_window,
-                ));
+                let remaining = self.spans.iter().skip(1).cloned().collect();
+                self.remaining = Some(
+                    if self.mode == crate::config::DOWNLOAD_PREFETCH_MODE_SEQUENTIAL {
+                        ReadPipelineTail::Sequential(SequentialReadAhead::new(
+                            Arc::clone(&self.object_format),
+                            self.manifest.clone(),
+                            remaining,
+                            self.max_window,
+                            self.live.clone(),
+                        ))
+                    } else {
+                        ReadPipelineTail::Adaptive(AdaptiveReadWindow::new(
+                            Arc::clone(&self.object_format),
+                            self.manifest.clone(),
+                            remaining,
+                            self.max_window,
+                            self.live.clone(),
+                        ))
+                    },
+                );
             }
             return Some(result);
         }
-        self.remaining.as_mut()?.next().await
+        match self.remaining.as_mut()? {
+            ReadPipelineTail::Adaptive(window) => window.next().await,
+            ReadPipelineTail::Sequential(window) => window.next().await,
+        }
     }
 
     fn current_window(&self) -> usize {
-        self.remaining
-            .as_ref()
-            .map_or(1, AdaptiveReadWindow::window)
+        match self.remaining.as_ref() {
+            Some(ReadPipelineTail::Adaptive(window)) => window.window(),
+            Some(ReadPipelineTail::Sequential(window)) => window.window(),
+            None => 1,
+        }
     }
 }
 
@@ -922,6 +1084,7 @@ struct AdaptiveReadWindow {
     max_window: usize,
     clean_streak: u8,
     throughput_ewma: Option<f64>,
+    live: DownloadStageLive,
 }
 
 impl AdaptiveReadWindow {
@@ -930,6 +1093,7 @@ impl AdaptiveReadWindow {
         manifest: ObjectManifest,
         spans: Vec<ReadSpan>,
         max_window: usize,
+        live: DownloadStageLive,
     ) -> Self {
         Self {
             object_format,
@@ -943,6 +1107,7 @@ impl AdaptiveReadWindow {
             max_window,
             clean_streak: 0,
             throughput_ewma: None,
+            live,
         }
     }
 
@@ -958,11 +1123,11 @@ impl AdaptiveReadWindow {
             let span = self.spans[sequence].clone();
             let object_format = Arc::clone(&self.object_format);
             let manifest = self.manifest.clone();
+            let live = self.live.clone();
             self.pending.push(Box::pin(async move {
-                (
-                    sequence,
-                    read_stream_span(object_format, manifest, span).await,
-                )
+                let result = read_stream_span(object_format, manifest, span).await;
+                live.record_fetched(&result);
+                (sequence, result)
             }));
             self.next_to_schedule += 1;
         }
@@ -1024,6 +1189,83 @@ impl AdaptiveReadWindow {
     }
 }
 
+struct SequentialReadAhead {
+    object_format: Arc<ObjectFormatService>,
+    manifest: ObjectManifest,
+    spans: Vec<ReadSpan>,
+    next_to_read: usize,
+    receiver: Option<tokio::sync::mpsc::Receiver<Result<ReadSpanResult, io::Error>>>,
+    window: usize,
+    live: DownloadStageLive,
+}
+
+impl SequentialReadAhead {
+    fn new(
+        object_format: Arc<ObjectFormatService>,
+        manifest: ObjectManifest,
+        spans: Vec<ReadSpan>,
+        max_window: usize,
+        live: DownloadStageLive,
+    ) -> Self {
+        let prefetch = max_window.saturating_sub(1);
+        if prefetch == 0 {
+            return Self {
+                object_format,
+                manifest,
+                spans,
+                next_to_read: 0,
+                receiver: None,
+                window: 1,
+                live,
+            };
+        }
+        let (sender, receiver) = tokio::sync::mpsc::channel(prefetch);
+        let worker_object_format = Arc::clone(&object_format);
+        let worker_manifest = manifest.clone();
+        let worker_live = live.clone();
+        tokio::spawn(async move {
+            for span in spans {
+                let result = read_stream_span(
+                    Arc::clone(&worker_object_format),
+                    worker_manifest.clone(),
+                    span,
+                )
+                .await;
+                worker_live.record_fetched(&result);
+                let failed = result.is_err();
+                if sender.send(result).await.is_err() || failed {
+                    break;
+                }
+            }
+        });
+        Self {
+            object_format,
+            manifest,
+            spans: Vec::new(),
+            next_to_read: 0,
+            receiver: Some(receiver),
+            window: max_window,
+            live,
+        }
+    }
+
+    fn window(&self) -> usize {
+        self.window
+    }
+
+    async fn next(&mut self) -> Option<Result<ReadSpanResult, io::Error>> {
+        if let Some(receiver) = self.receiver.as_mut() {
+            return receiver.recv().await;
+        }
+        let span = self.spans.get(self.next_to_read)?.clone();
+        self.next_to_read += 1;
+        let result =
+            read_stream_span(Arc::clone(&self.object_format), self.manifest.clone(), span).await;
+        self.live.record_fetched(&result);
+        Some(result)
+    }
+}
+
 impl ObjectFormatService {
     pub async fn open(config: &AppConfig) -> Result<Self, ObjectFormatError> {
         let transport_manager = TelegramTransportManager::open(config.clone()).await?;
@@ -1058,6 +1300,17 @@ impl ObjectFormatService {
             None => {
                 let value = crate::config::DEFAULT_DOWNLOAD_PREFETCH_CHUNKS;
                 metadata.set_telegram_download_prefetch_chunks(value)?;
+                value
+            }
+        };
+        let download_prefetch_mode = match metadata.telegram_download_prefetch_mode()? {
+            Some(value) => {
+                AppConfig::validate_download_prefetch_mode(&value)?;
+                value
+            }
+            None => {
+                let value = crate::config::DEFAULT_DOWNLOAD_PREFETCH_MODE.to_string();
+                metadata.set_telegram_download_prefetch_mode(&value)?;
                 value
             }
         };
@@ -1108,6 +1361,7 @@ impl ObjectFormatService {
             config.data_dir(),
             chunk_size,
             download_prefetch_chunks,
+            download_prefetch_mode,
             download_failover_retries,
             storage_chat_id,
             ObjectEncryption::from_master_key(&master_key),
@@ -1130,6 +1384,7 @@ impl ObjectFormatService {
         data_dir: impl AsRef<Path>,
         chunk_size: u64,
         download_prefetch_chunks: u64,
+        download_prefetch_mode: String,
         download_failover_retries: u64,
         storage_chat_id: String,
         encryption: ObjectEncryption,
@@ -1149,6 +1404,7 @@ impl ObjectFormatService {
             data_dir,
             chunk_size: Arc::new(RwLock::new(chunk_size)),
             download_prefetch_chunks: Arc::new(RwLock::new(download_prefetch_chunks)),
+            download_prefetch_mode: Arc::new(RwLock::new(download_prefetch_mode)),
             download_failover_retries: Arc::new(RwLock::new(download_failover_retries)),
             recovery_verify_enabled: Arc::new(RwLock::new(
                 crate::config::DEFAULT_RECOVERY_VERIFY_ENABLED,
@@ -1373,6 +1629,23 @@ impl ObjectFormatService {
             .download_prefetch_chunks
             .write()
             .expect("download prefetch chunks lock") = chunks;
+        Ok(())
+    }
+
+    pub fn download_prefetch_mode(&self) -> String {
+        self.download_prefetch_mode
+            .read()
+            .expect("download prefetch mode lock")
+            .clone()
+    }
+
+    pub fn set_download_prefetch_mode(&self, mode: &str) -> Result<(), ObjectFormatError> {
+        AppConfig::validate_download_prefetch_mode(mode)
+            .map_err(|error| ObjectFormatError::InvalidPlan(error.to_string()))?;
+        *self
+            .download_prefetch_mode
+            .write()
+            .expect("download prefetch mode lock") = mode.to_string();
         Ok(())
     }
 
@@ -3084,10 +3357,26 @@ impl ObjectFormatService {
         let max_window = usize::try_from(this.download_prefetch_chunks().saturating_add(1))
             .unwrap_or(usize::MAX)
             .max(1);
-        let stage =
-            this.download_stage_metrics
-                .start(surface, expected_client_bytes, max_window as u64);
-        let pipeline = ReadPipeline::new(Arc::clone(&this), manifest.clone(), spans, max_window);
+        let mode = this.download_prefetch_mode();
+        let stage = this.download_stage_metrics.start(
+            surface,
+            format!("{}/{}", manifest.bucket, manifest.key),
+            &mode,
+            expected_client_bytes,
+            manifest.chunks.len() as u64,
+            max_window as u64,
+        );
+        let live = stage
+            .live()
+            .expect("download stage live state should exist");
+        let pipeline = ReadPipeline::new(
+            Arc::clone(&this),
+            manifest.clone(),
+            spans,
+            max_window,
+            &mode,
+            live,
+        );
         futures::stream::unfold(
             (pipeline, this, pin, stage, false),
             |(mut pipeline, object_format, pin, mut stage, done)| async move {
@@ -3098,7 +3387,6 @@ impl ObjectFormatService {
                 match pipeline.next().await {
                     Some(Ok(result)) => {
                         let length = result.length;
-                        stage.record_chunk(&result);
                         stage.record_prefetch_window(pipeline.current_window());
                         let complete = stage.record_emitted(length);
                         if complete {
@@ -4574,6 +4862,7 @@ async fn read_stream_span(
     }
     Ok(ReadSpanResult {
         account_id,
+        chunk_order: u64::from(span.order),
         length: span.length,
         bytes: Bytes::copy_from_slice(&plaintext[start..end]),
         telegram_bytes,
@@ -4596,6 +4885,7 @@ fn account_failover_candidate_index(
 
 struct ReadSpanResult {
     account_id: String,
+    chunk_order: u64,
     length: u64,
     bytes: Bytes,
     telegram_bytes: u64,
@@ -4860,10 +5150,12 @@ mod tests {
         let spans = ObjectFormatService::plan_read(&manifest, 0..4096)
             .expect("read plan")
             .chunks;
-        let mut window = AdaptiveReadWindow::new(Arc::clone(&service), manifest, spans, 4);
+        let live = DownloadStageLive::new(1, "test", "test/object".into(), "adaptive", 0, 4, 4);
+        let mut window = AdaptiveReadWindow::new(Arc::clone(&service), manifest, spans, 4, live);
         assert_eq!(window.window(), 2);
         let clean = |telegram_us, telegram_retries| ReadSpanResult {
             account_id: "same-account".to_string(),
+            chunk_order: 0,
             length: 1024,
             bytes: Bytes::new(),
             telegram_bytes: 1024,
@@ -5106,7 +5398,52 @@ mod tests {
         assert_eq!(metrics.recent[0].surface, "test");
         assert_eq!(metrics.recent[0].chunks, 5);
         assert_eq!(metrics.recent[0].client_bytes, payload.len() as u64);
+        assert_eq!(metrics.recent[0].prefetch_mode, "adaptive");
         assert!(metrics.recent[0].first_chunk_us.is_some());
+    }
+
+    #[tokio::test]
+    async fn sequential_prefetch_reads_nearest_chunks_in_order() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let service = Arc::new(sample_service(&tempdir).await);
+        service.set_chunk_size(512).expect("small chunks");
+        service
+            .set_download_prefetch_chunks(2)
+            .expect("prefetch setting");
+        service
+            .set_download_prefetch_mode(crate::config::DOWNLOAD_PREFETCH_MODE_SEQUENTIAL)
+            .expect("sequential setting");
+        let payload = (0..2049)
+            .map(|index| (index % 239) as u8)
+            .collect::<Vec<_>>();
+        let manifest = service
+            .put_bytes(
+                "bucket",
+                "sequential.bin",
+                "application/octet-stream",
+                &payload,
+            )
+            .await
+            .expect("put");
+        let plan =
+            ObjectFormatService::plan_read(&manifest, 0..payload.len() as u64).expect("read plan");
+        let pieces = ObjectFormatService::read_spans_to_stream(
+            Arc::clone(&service),
+            &manifest,
+            plan.chunks,
+            "test",
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let actual = pieces
+            .into_iter()
+            .map(|piece| piece.expect("stream piece"))
+            .flat_map(|piece| piece.to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, payload);
+        let metrics = service.download_stage_metrics();
+        assert_eq!(metrics.recent[0].prefetch_mode, "sequential");
+        assert_eq!(metrics.recent[0].chunks, 5);
     }
 
     #[test]

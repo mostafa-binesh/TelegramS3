@@ -46,6 +46,7 @@
     completed_requests: 0,
     failed_requests: 0,
     test_active_requests: 0,
+    active: [],
     last_test: null,
     recent: []
   };
@@ -191,6 +192,20 @@
           <div><strong>{formatCount(stageMetrics.completed_requests)}</strong><small>completed reads</small></div>
           <div><strong class:bad={stageMetrics.failed_requests > 0}>{formatCount(stageMetrics.failed_requests)}</strong><small>failed reads</small></div>
         </div>
+        {#if stageMetrics.active?.length}
+          <div class="stage-live" aria-label="Live download status">
+            <div class="stage-live-heading"><strong>Live download status</strong><span>{stageMetrics.active.length} active</span></div>
+            {#each stageMetrics.active as active (active.request_id)}
+              <div class="stage-live-row">
+                <div class="stage-live-title"><strong>{active.object}</strong><span>{active.surface} · {active.mode === 'sequential' ? 'sequential' : 'adaptive parallel'}</span></div>
+                <div class="stage-live-progress"><span style={`width:${active.total_chunks ? Math.min(100, (active.client_chunks / active.total_chunks) * 100) : 0}%`}></span></div>
+                <div class="stage-live-stats"><span>Chunk {active.current_chunk == null ? '—' : active.current_chunk + 1} / {active.total_chunks}</span><span>Client {formatBytes(active.client_bytes)}</span><span>Server {formatBytes(active.telegram_bytes)}</span><span>{active.telegram_retries} retries</span></div>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="fine-print live-empty">No active client downloads.</p>
+        {/if}
         {#if stageMetrics.last_test}
           <div class="diagnostic-test" aria-label="Last diagnostic stage test">
             <div class="diagnostic-heading"><div><strong>Last diagnostic test</strong><small>One verified chunk from a committed object</small></div><span class:stage-ok={stageMetrics.last_test.status === 'completed'} class:stage-bad={stageMetrics.last_test.status === 'failed'} class="stage-status">{stageMetrics.last_test.status}</span></div>
@@ -268,6 +283,17 @@
   .live-chip { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; padding: 6px 9px; border: 1px solid #b8dfce; border-radius: 999px; background: #effaf5; color: #197658; font-size: .7rem; font-weight: 800; }
   .stage-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; justify-content: flex-end; }
   .diagnostic-test { display: grid; gap: 12px; padding: 13px 14px; border: 1px solid #c8dff0; border-radius: 13px; background: linear-gradient(135deg,#f5fbff,#f9fcff); }
+  .stage-live { display: grid; gap: 10px; padding: 13px 14px; border: 1px solid #d7e5ee; border-radius: 13px; background: linear-gradient(135deg,#fbfdff,#f2f8fb); }
+  .stage-live-heading, .stage-live-stats, .stage-live-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .stage-live-heading { color: #24526f; font-size: .78rem; }
+  .stage-live-heading span, .stage-live-title span, .stage-live-stats { color: var(--muted); font-size: .68rem; }
+  .stage-live-row { display: grid; gap: 7px; padding-top: 9px; border-top: 1px solid #e5edf3; }
+  .stage-live-title { min-width: 0; align-items: flex-start; }
+  .stage-live-title strong { overflow: hidden; color: #203b57; font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
+  .stage-live-progress { height: 7px; overflow: hidden; border-radius: 999px; background: #e2ebf1; }
+  .stage-live-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,#3183bd,#36a78a); transition: width .25s ease; }
+  .stage-live-stats { justify-content: flex-start; flex-wrap: wrap; }
+  .live-empty { margin: -5px 0 0; }
   .diagnostic-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .diagnostic-heading strong, .diagnostic-heading small { display: block; }
   .diagnostic-heading strong { color: #24526f; font-size: .78rem; }

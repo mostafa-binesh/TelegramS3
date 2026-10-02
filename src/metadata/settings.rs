@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 const CHUNK_SIZE_SETTING: &str = "telegram_chunk_size";
 pub(crate) const DOWNLOAD_PREFETCH_CHUNKS_SETTING: &str = "telegram_download_prefetch_chunks";
+pub(crate) const DOWNLOAD_PREFETCH_MODE_SETTING: &str = "telegram_download_prefetch_mode";
 pub(crate) const DOWNLOAD_FAILOVER_RETRIES_SETTING: &str = "telegram_download_failover_retries";
 const RECOVERY_VERIFY_ENABLED_SETTING: &str = "telegram_recovery_verify_enabled";
 const RECOVERY_VERIFY_STARTUP_SETTING: &str = "telegram_recovery_verify_startup";
@@ -112,6 +113,14 @@ impl MetadataStore {
         self.set_numeric_setting(DOWNLOAD_PREFETCH_CHUNKS_SETTING, chunks)
     }
 
+    pub fn telegram_download_prefetch_mode(&self) -> Result<Option<String>, MetadataError> {
+        self.read_text_setting(DOWNLOAD_PREFETCH_MODE_SETTING)
+    }
+
+    pub fn set_telegram_download_prefetch_mode(&self, mode: &str) -> Result<(), MetadataError> {
+        self.set_text_setting(DOWNLOAD_PREFETCH_MODE_SETTING, mode)
+    }
+
     pub fn telegram_download_failover_retries(&self) -> Result<Option<u64>, MetadataError> {
         self.read_numeric_setting(DOWNLOAD_FAILOVER_RETRIES_SETTING)
     }
@@ -209,6 +218,19 @@ impl MetadataStore {
         })
     }
 
+    fn read_text_setting(&self, key: &str) -> Result<Option<String>, MetadataError> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key=?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(MetadataError::from)
+        })
+    }
+
     fn set_numeric_setting(&self, key: &str, value: u64) -> Result<(), MetadataError> {
         self.with_connection(|connection| {
             connection.execute(
@@ -224,6 +246,16 @@ impl MetadataStore {
             connection.execute(
                 "INSERT INTO app_settings(key,value,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
                 params![key, value.to_string(), timestamp_now()?],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn set_text_setting(&self, key: &str, value: &str) -> Result<(), MetadataError> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO app_settings(key,value,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                params![key, value, timestamp_now()?],
             )?;
             Ok(())
         })
@@ -630,6 +662,36 @@ mod tests {
                 .telegram_download_prefetch_chunks()
                 .expect("prefetch after migration"),
             Some(4)
+        );
+    }
+
+    #[test]
+    fn download_prefetch_mode_setting_defaults_and_round_trips() {
+        let store = MetadataStore::open_in_memory().expect("metadata");
+        assert_eq!(
+            store
+                .telegram_download_prefetch_mode()
+                .expect("mode read")
+                .as_deref(),
+            Some("adaptive")
+        );
+        store
+            .set_telegram_download_prefetch_mode("sequential")
+            .expect("mode write");
+        assert_eq!(
+            store
+                .telegram_download_prefetch_mode()
+                .expect("mode read")
+                .as_deref(),
+            Some("sequential")
+        );
+        store.migrate().expect("idempotent migration");
+        assert_eq!(
+            store
+                .telegram_download_prefetch_mode()
+                .expect("mode after migration")
+                .as_deref(),
+            Some("sequential")
         );
     }
 

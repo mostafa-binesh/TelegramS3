@@ -13,6 +13,9 @@ pub const DEFAULT_CHUNK_SIZE: u64 = 1_048_576;
 pub const MIN_DOWNLOAD_PREFETCH_CHUNKS: u64 = 0;
 pub const MAX_DOWNLOAD_PREFETCH_CHUNKS: u64 = 4;
 pub const DEFAULT_DOWNLOAD_PREFETCH_CHUNKS: u64 = 1;
+pub const DOWNLOAD_PREFETCH_MODE_ADAPTIVE: &str = "adaptive";
+pub const DOWNLOAD_PREFETCH_MODE_SEQUENTIAL: &str = "sequential";
+pub const DEFAULT_DOWNLOAD_PREFETCH_MODE: &str = DOWNLOAD_PREFETCH_MODE_ADAPTIVE;
 pub const MIN_DOWNLOAD_FAILOVER_RETRIES: u64 = 0;
 pub const MAX_DOWNLOAD_FAILOVER_RETRIES: u64 = 8;
 pub const DEFAULT_DOWNLOAD_FAILOVER_RETRIES: u64 = 1;
@@ -162,6 +165,16 @@ impl AppConfig {
             return Err(ConfigError::Invalid("TELEGRAM_DOWNLOAD_PREFETCH_CHUNKS"));
         }
         Ok(value)
+    }
+
+    pub fn validate_download_prefetch_mode(value: &str) -> Result<(), ConfigError> {
+        if !matches!(
+            value,
+            DOWNLOAD_PREFETCH_MODE_ADAPTIVE | DOWNLOAD_PREFETCH_MODE_SEQUENTIAL
+        ) {
+            return Err(ConfigError::Invalid("TELEGRAM_DOWNLOAD_PREFETCH_MODE"));
+        }
+        Ok(())
     }
 
     pub fn validate_download_failover_retries(value: u64) -> Result<u64, ConfigError> {
@@ -703,6 +716,17 @@ mod tests {
             AppConfig::validate_download_failover_retries(MAX_DOWNLOAD_FAILOVER_RETRIES + 1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn download_prefetch_modes_are_supported() {
+        assert!(
+            AppConfig::validate_download_prefetch_mode(DOWNLOAD_PREFETCH_MODE_ADAPTIVE).is_ok()
+        );
+        assert!(
+            AppConfig::validate_download_prefetch_mode(DOWNLOAD_PREFETCH_MODE_SEQUENTIAL).is_ok()
+        );
+        assert!(AppConfig::validate_download_prefetch_mode("burst").is_err());
     }
 
     #[test]

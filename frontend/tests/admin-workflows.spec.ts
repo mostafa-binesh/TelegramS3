@@ -64,6 +64,7 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
   let loggedIn = false;
   let chunkSize = overview.storage.chunk_size;
   let downloadPrefetchChunks = 1;
+  let downloadPrefetchMode = 'adaptive';
   let downloadFailoverRetries = 1;
   let recoveryVerifyEnabled = true;
   let recoveryVerifyStartup = true;
@@ -135,20 +136,21 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
       return route.fulfill({ json: { settings: { telegram_api_id: '12345', telegram_api_hash: 'hash', telegram_storage_chat_id: '-1001234567890', telegram_proxy_url: '', telegram_proxy_username: '', telegram_proxy_password: '', telegram_proxy_mode: 'auto', telegram_account_phone: '+15551234567' } } });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'GET') {
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_failover_retries: downloadFailoverRetries, min_download_failover_retries: 0, max_download_failover_retries: 8, recovery_verify_enabled: recoveryVerifyEnabled, recovery_verify_startup: recoveryVerifyStartup, recovery_verify_interval_secs: recoveryVerifyIntervalSecs, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: recoveryVerifyChunks, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: cleanupRetentionSecs, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_prefetch_mode: downloadPrefetchMode, download_prefetch_modes: ['adaptive', 'sequential'], download_failover_retries: downloadFailoverRetries, min_download_failover_retries: 0, max_download_failover_retries: 8, recovery_verify_enabled: recoveryVerifyEnabled, recovery_verify_startup: recoveryVerifyStartup, recovery_verify_interval_secs: recoveryVerifyIntervalSecs, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: recoveryVerifyChunks, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: cleanupRetentionSecs, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'POST') {
       if (options.storageFailure) return route.fulfill({ status: 400, json: { error: 'storage settings rejected for this test' } });
-      const body = request.postDataJSON() as { chunk_size: number; download_prefetch_chunks: number; download_failover_retries: number; recovery_verify_enabled: boolean; recovery_verify_startup: boolean; recovery_verify_interval_secs: number; recovery_verify_chunks: number; cleanup_retention_secs: number };
+      const body = request.postDataJSON() as { chunk_size: number; download_prefetch_chunks: number; download_prefetch_mode: string; download_failover_retries: number; recovery_verify_enabled: boolean; recovery_verify_startup: boolean; recovery_verify_interval_secs: number; recovery_verify_chunks: number; cleanup_retention_secs: number };
       chunkSize = body.chunk_size;
       downloadPrefetchChunks = body.download_prefetch_chunks;
+      downloadPrefetchMode = body.download_prefetch_mode;
       downloadFailoverRetries = body.download_failover_retries;
       recoveryVerifyEnabled = body.recovery_verify_enabled;
       recoveryVerifyStartup = body.recovery_verify_startup;
       recoveryVerifyIntervalSecs = body.recovery_verify_interval_secs;
       recoveryVerifyChunks = body.recovery_verify_chunks;
       cleanupRetentionSecs = body.cleanup_retention_secs;
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_failover_retries: downloadFailoverRetries, min_download_failover_retries: 0, max_download_failover_retries: 8, recovery_verify_enabled: recoveryVerifyEnabled, recovery_verify_startup: recoveryVerifyStartup, recovery_verify_interval_secs: recoveryVerifyIntervalSecs, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: recoveryVerifyChunks, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: cleanupRetentionSecs, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_prefetch_mode: downloadPrefetchMode, download_prefetch_modes: ['adaptive', 'sequential'], download_failover_retries: downloadFailoverRetries, min_download_failover_retries: 0, max_download_failover_retries: 8, recovery_verify_enabled: recoveryVerifyEnabled, recovery_verify_startup: recoveryVerifyStartup, recovery_verify_interval_secs: recoveryVerifyIntervalSecs, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: recoveryVerifyChunks, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: cleanupRetentionSecs, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
     }
     if (path === '/recovery/verify-now' && request.method() === 'POST') {
       if (options.storageFailure) return route.fulfill({ status: 409, json: { error: 'automatic recovery verification is disabled' } });
@@ -657,6 +659,7 @@ test('storage policy tab loads, applies MiB to bytes, and reports a save failure
   await expect(page.getByLabel('New upload chunk size')).toHaveValue('1');
   await page.getByRole('button', { name: '8 MiB', exact: true }).click();
   await page.getByLabel('Parallel download prefetch chunks').fill('2');
+  await page.getByLabel('Download scheduling mode').selectOption('sequential');
   await page.getByLabel('Retries before account failover').fill('2');
   await page.getByLabel('Parallel download prefetch chunks').fill('5');
   await expect(page.getByRole('button', { name: 'Apply storage policy' })).toBeDisabled();
@@ -669,7 +672,7 @@ test('storage policy tab loads, applies MiB to bytes, and reports a save failure
     page.waitForRequest((candidate) => candidate.url().endsWith('/_admin/api/telegram/storage-settings') && candidate.method() === 'POST'),
     page.getByRole('button', { name: 'Apply storage policy' }).click()
   ]);
-  expect(saveRequest.postDataJSON()).toMatchObject({ chunk_size: 8 * 1_048_576, download_prefetch_chunks: 2, download_failover_retries: 2, recovery_verify_enabled: true, recovery_verify_startup: true, recovery_verify_interval_secs: 600, recovery_verify_chunks: 3, cleanup_retention_secs: 43200 });
+  expect(saveRequest.postDataJSON()).toMatchObject({ chunk_size: 8 * 1_048_576, download_prefetch_chunks: 2, download_prefetch_mode: 'sequential', download_failover_retries: 2, recovery_verify_enabled: true, recovery_verify_startup: true, recovery_verify_interval_secs: 600, recovery_verify_chunks: 3, cleanup_retention_secs: 43200 });
   await expect(page.getByRole('alert')).toContainText('storage settings rejected for this test');
 });
 

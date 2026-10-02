@@ -144,15 +144,21 @@ days. It applies to future delayed/orphan cleanup targets and does not rewrite
 existing scheduled or `recovery_required` cleanup rows.
 
 The same page controls `telegram_download_prefetch_chunks`, the number of
-extra complete chunks allowed in flight while a client download is streaming.
-Its database default is `1`; `0` disables prefetching and `4` is the maximum.
-The setting is introduced by metadata schema v13 and is safe to change without
-rewriting existing objects or changing active transfer chunk boundaries. A
-larger value can reduce visible zero-speed gaps at the cost of additional
-parallel Telegram traffic and up to `(prefetch + 1) × chunk size` of transient
-per-stream plaintext/ciphertext work. It is a ceiling for the adaptive
-scheduler; the scheduler may use a smaller window when the account is retrying
-or slowing.
+extra complete chunks allowed ahead of a client download. Its database default
+is `1`; `0` disables look-ahead and `4` is the maximum. The setting was
+introduced by metadata schema v13 and is safe to change without rewriting
+existing objects or changing active transfer chunk boundaries. In adaptive
+parallel mode it is a concurrency ceiling; the scheduler may use a smaller
+window when an account is retrying or slowing. In sequential nearest-chunk mode
+it is an ordered look-ahead queue: the first chunk is read first, then later
+chunks are fetched one at a time, never concurrently, until the queue is full.
+
+The `telegram_download_prefetch_mode` setting was introduced by schema v23 and
+defaults to `adaptive`. `sequential` is useful when one Telegram account has a
+shared bandwidth limit and predictable nearest-chunk reads are preferable to
+parallel pressure. Existing objects and their chunk layout are unchanged.
+Live active-download status is kept in process memory and is not persisted as
+per-chunk SQLite state.
 
 The same page controls `telegram_download_failover_retries`, introduced by
 schema v19. It is the number of additional complete attempts made on the

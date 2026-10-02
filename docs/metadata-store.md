@@ -44,6 +44,10 @@ setting. The migration seeds existing databases with `1` extra prefetched
 chunk; it is idempotent and does not alter manifests, Telegram documents, or
 active transfer boundaries.
 
+Schema v23 adds the database-backed `telegram_download_prefetch_mode` setting.
+Existing databases are migrated with `adaptive`, preserving all object and
+transfer metadata. The setting changes only runtime download scheduling.
+
 ## Tables
 
 - `schema_version`

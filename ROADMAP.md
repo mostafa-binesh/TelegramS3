@@ -248,6 +248,8 @@ Completed in this increment:
 - the prefetch window is adaptive: it ramps up after clean reads and backs off
   after retries or measured throughput drops, while a per-account limiter keeps
   one account from competing with itself
+- storage policy now offers a sequential nearest-chunk mode that preloads the
+  configured look-ahead one chunk at a time in manifest order
 - the shared download reader now delivers the first requested chunk before
   opening speculative prefetch, reducing time to first byte without changing
   the ordered `0–4` concurrency bound
@@ -257,6 +259,9 @@ Completed in this increment:
   writes; it also reports client/Telegram byte totals, adaptive-window values,
   and per-account Telegram bytes/retries/duration, and treats complete
   final-byte delivery as completed when a response consumer closes early
+- active reads expose process-local object, mode, chunk, client-byte,
+  Telegram-byte, retry, and server/client chunk progress without per-chunk
+  SQLite writes
 - the Overview caches manifest-derived object counts and unique Telegram
   payload size for five seconds; its five-second refresh uses the cheap
   `/overview/live` endpoint for transfer, traffic, stage, and connection

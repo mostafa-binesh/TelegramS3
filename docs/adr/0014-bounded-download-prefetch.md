@@ -28,6 +28,13 @@ therefore provide parallel capacity without multiplying pressure on one
 account. Download stage diagnostics record the final/max window and per-account
 bytes, retries, chunks, and Telegram duration.
 
+Schema v23 adds `telegram_download_prefetch_mode`. `adaptive` retains the
+bounded adaptive parallel scheduler. `sequential` keeps the first requested
+span priority and fetches subsequent spans one at a time in manifest order,
+using the prefetch setting only as a bounded ordered look-ahead queue. Active
+download status is process-local and reports client/server progress without
+writing per-chunk state to SQLite.
+
 Every prefetched result must complete remote download, decryption, and checksum
 verification before it enters the output stream. Client traffic counters are
 incremented only when a verified result is emitted. A stream error terminates

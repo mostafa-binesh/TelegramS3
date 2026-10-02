@@ -183,13 +183,22 @@ drops. A per-account limiter allows at most one active Telegram payload read per
 account, while enabled physical replicas can still serve different chunks in
 parallel.
 
+Operators may choose sequential nearest-chunk mode in the same policy page.
+After the first requested chunk, it fetches the next chunks strictly in
+manifest order, one at a time, with the prefetch value limiting how many
+verified chunks may wait ahead of the client. This mode trades parallelism for
+predictable account pressure and is still bounded, cancellable, and checksum
+verified.
+
 The first requested chunk is fetched before speculative prefetch begins to
 reduce time to first byte. The authenticated Overview's Download stage metrics
 section can be used while testing a read: it records bounded, process-local
 samples for first-chunk, Telegram, retry-wait, decrypt, checksum-verify, and
 total durations, plus retry and byte counts. These samples are diagnostic only
 and disappear on restart; they are not recovery evidence or durable transfer
-state.
+state. Active reads additionally expose the object, mode, current chunk,
+client-delivered bytes, Telegram-read bytes, retries, and server/client chunk
+counts from process memory only.
 
 Public and admin responses advertise `Accept-Ranges: bytes`. If the recovery
 window is exhausted after earlier bytes were sent, a capable client can resume

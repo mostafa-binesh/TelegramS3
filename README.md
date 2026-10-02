@@ -360,7 +360,9 @@ bounded to the latest 20 reads, so this panel does not replace durable traffic
 accounting or recovery records. Client-downloaded and Telegram-read byte sizes
 are shown separately, and successful final-byte delivery is recorded as
 completed even if the response consumer drops the stream immediately after
-receiving those bytes.
+receiving those bytes. While a read is active, the panel also shows the object,
+mode, current chunk, client-delivered bytes, Telegram-read bytes, retries, and
+server/client chunk counts from process memory.
 
 Per-object expiry is available as a Telegram S3 extension. Send either
 `x-amz-meta-telegram-s3-expires-at: <RFC3339 timestamp>` or
@@ -396,12 +398,13 @@ the database value is authoritative. The verifier defaults to one random chunk
 per committed object every five minutes and can be changed or disabled live
 from **Telegram settings → Storage policy**. The first remote scan runs at
 startup by default and can be deferred until the interval from the same
-setting. Download smoothing defaults to one extra verified chunk prefetched in
-parallel, accepts `0–4` extra chunks, and can also be changed live. The reader
-starts conservatively, ramps up after clean reads, and backs off after retries
-or throughput drops. It keeps at most one active Telegram payload read per
-account so replicas can add parallel capacity without making one account
-compete with itself. Telegram
+setting. Download scheduling defaults to adaptive parallel mode. The alternate
+sequential nearest-chunk mode fetches the first requested chunk first and then
+preloads later chunks one at a time in manifest order. Both modes accept `0–4`
+extra chunks; in sequential mode this is the maximum ordered look-ahead, while
+adaptive mode uses it as a parallel ceiling. The reader keeps at most one
+active Telegram payload read per account, and live status stays in process
+memory rather than SQLite. Telegram
 API IDs and storage chat IDs are validated as numeric values
 before persistence; connection refresh failures are returned as JSON warnings
 from the admin API rather than as proxy-level failures.

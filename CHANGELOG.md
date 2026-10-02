@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.6-rc.24 - 2026-10-02
+
+### Sequential nearest-chunk downloads and live status
+
+- Added a persisted download scheduling mode with adaptive parallel and
+  sequential nearest-chunk options. Sequential mode reads the first requested
+  chunk, then preloads later chunks one at a time in manifest order, bounded by
+  the configured prefetch count.
+- Added process-local live download status showing the object, scheduling mode,
+  current chunk, client-delivered bytes, Telegram-read bytes, retries, and
+  active server/client chunk counts. No per-chunk live state is written to
+  SQLite.
+- Added schema v23 migration, storage-policy UI, Rust coverage, and Playwright
+  coverage for the new mode and live status.
+- Updated configuration, recovery, storage-format, compatibility, roadmap, and
+  prefetch ADR documentation.
+
 ## 0.7.6-rc.23 - 2026-10-02
 
 ### Account-aware adaptive download prefetch

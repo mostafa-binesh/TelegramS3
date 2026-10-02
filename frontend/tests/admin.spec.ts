@@ -63,6 +63,7 @@ const overview = {
     completed_requests: 12,
     failed_requests: 1,
     test_active_requests: 0,
+    active: [{ request_id: 7, surface: 'public', object: 'backups/demo.bin', mode: 'adaptive', total_chunks: 8, server_chunks: 3, client_chunks: 2, current_chunk: 2, client_bytes: 8_388_608, telegram_bytes: 12_582_912, telegram_retries: 1, prefetch_window_max: 3, prefetch_window_final: 2 }],
     last_test: null,
     recent: [{
       request_id: 42,
@@ -73,6 +74,7 @@ const overview = {
       client_bytes: 8_388_608,
       telegram_bytes: 8_400_000,
       telegram_retries: 1,
+      prefetch_mode: 'adaptive',
       prefetch_window_max: 3,
       prefetch_window_final: 2,
       accounts: [{ account_id: 'primary', chunks: 3, telegram_bytes: 8_400_000, telegram_retries: 1, telegram_us: 3_200_000 }],
@@ -122,6 +124,7 @@ async function mockAdminApi(
   let connectionRemoved = false;
   let chunkSize = 1_048_576;
   let downloadPrefetchChunks = 1;
+  let downloadPrefetchMode = 'adaptive';
   const deletedKeys = new Set<string>();
   const buckets = options.browserBuckets ?? [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }];
   const users = [user];
@@ -159,6 +162,7 @@ async function mockAdminApi(
         chunks: 1, client_bytes: 1_048_576, telegram_bytes: 1_050_000, telegram_retries: 0,
         first_chunk_us: 2_000_000, telegram_us: 1_800_000, retry_wait_us: 0, decrypt_us: 1_100,
         verify_us: 2_100, total_us: 3_900_000, prefetch_window_max: 2, prefetch_window_final: 1,
+        prefetch_mode: 'adaptive',
         accounts: [{ account_id: 'primary', chunks: 1, telegram_bytes: 1_050_000, telegram_retries: 0, telegram_us: 1_800_000 }], error: null
       };
       return route.fulfill({ json: { ok: true, sample: stageTestSample } });
@@ -220,14 +224,15 @@ async function mockAdminApi(
       });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'GET') {
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, recovery_verify_enabled: true, recovery_verify_startup: true, recovery_verify_interval_secs: 300, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: 1, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: 43200, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_prefetch_mode: downloadPrefetchMode, download_prefetch_modes: ['adaptive', 'sequential'], recovery_verify_enabled: true, recovery_verify_startup: true, recovery_verify_interval_secs: 300, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: 1, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: 43200, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
     }
     if (path === '/telegram/storage-settings' && request.method() === 'POST') {
       if (options.storageSettingsFailure) return route.fulfill({ status: 400, json: { error: 'storage settings rejected for this test' } });
-      const body = request.postDataJSON() as { chunk_size: number; download_prefetch_chunks: number };
+      const body = request.postDataJSON() as { chunk_size: number; download_prefetch_chunks: number; download_prefetch_mode?: string };
       chunkSize = body.chunk_size;
       downloadPrefetchChunks = body.download_prefetch_chunks;
-      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, recovery_verify_enabled: true, recovery_verify_startup: true, recovery_verify_interval_secs: 300, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: 1, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: 43200, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
+      downloadPrefetchMode = body.download_prefetch_mode ?? downloadPrefetchMode;
+      return route.fulfill({ json: { chunk_size: chunkSize, min_chunk_size: 1, max_chunk_size: 2_000_000_000, download_prefetch_chunks: downloadPrefetchChunks, min_download_prefetch_chunks: 0, max_download_prefetch_chunks: 4, download_prefetch_mode: downloadPrefetchMode, download_prefetch_modes: ['adaptive', 'sequential'], recovery_verify_enabled: true, recovery_verify_startup: true, recovery_verify_interval_secs: 300, min_recovery_verify_interval_secs: 60, max_recovery_verify_interval_secs: 604800, recovery_verify_chunks: 1, min_recovery_verify_chunks: 1, max_recovery_verify_chunks: 1024, cleanup_retention_secs: 43200, min_cleanup_retention_secs: 3600, max_cleanup_retention_secs: 2592000, source: 'database' } });
     }
     if (path === '/telegram/wizard/begin' && request.method() === 'POST') {
       return route.fulfill({ json: { phase: 'code', message: null } });
@@ -436,6 +441,9 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
   await expect(page.getByText('Clients → server')).toBeVisible();
   await expect(page.getByText('Telegram → server')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Download stage metrics' })).toBeVisible();
+  await expect(page.getByLabel('Live download status')).toContainText('backups/demo.bin');
+  await expect(page.getByLabel('Live download status')).toContainText('Client 8.0 MiB');
+  await expect(page.getByLabel('Live download status')).toContainText('Server 12 MiB');
   await expect(page.getByRole('table', { name: 'Recent download stage timings' })).toBeVisible();
   await expect(page.getByRole('table', { name: 'Recent download stage timings' })).toContainText('8.0 MiB');
   await expect(page.getByRole('table', { name: 'Recent download stage timings' })).toContainText('Primary account');

@@ -280,6 +280,13 @@ per-account limiter keeps one active Telegram payload read per account, so
 different enabled replicas can still provide parallel capacity. Dropping the
 client stream drops outstanding prefetch work as well.
 
+The database-backed `telegram_download_prefetch_mode` setting (schema v23)
+selects `adaptive` parallel scheduling or `sequential` nearest-chunk scheduling.
+Sequential mode reads the first span alone, then fetches later spans strictly
+in manifest order, one at a time, with at most the configured prefetch count
+waiting ahead of the client. It changes runtime scheduling only; manifests,
+chunk references, and checksums are unchanged.
+
 The first requested span is intentionally fetched on its own before the
 speculative window is opened. This first-chunk priority improves time to first
 byte while preserving manifest order and the same bounded concurrency limit.
@@ -288,7 +295,10 @@ for recent reads: surface, chunk and payload counts, first-chunk latency,
 Telegram and retry-wait time, decrypt time, checksum-verification time, and
 total duration, plus the final/max adaptive window and per-account Telegram
 chunk, byte, retry, and duration totals. The snapshot retains only the latest 20 samples and is not
-part of the manifest, metadata journal, recovery state, or traffic totals.
+part of the manifest, metadata journal, recovery state, or traffic totals. Active
+reads are held in process memory and report object, mode, current chunk,
+client-delivered bytes, Telegram-read bytes, retries, and server/client chunk
+counts without adding per-chunk SQLite writes.
 
 The Overview keeps manifest-derived object counts and unique committed Telegram
 payload size in a five-second cache. Its five-second background refresh reads

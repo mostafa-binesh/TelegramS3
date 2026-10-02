@@ -149,6 +149,7 @@ export interface DownloadStageSample {
   client_bytes: number;
   telegram_bytes: number;
   telegram_retries: number;
+  prefetch_mode?: string;
   prefetch_window_max?: number;
   prefetch_window_final?: number;
   accounts?: DownloadAccountStageSample[];
@@ -159,6 +160,22 @@ export interface DownloadStageSample {
   verify_us: number;
   total_us: number;
   error?: string | null;
+}
+
+export interface DownloadStageActive {
+  request_id: number;
+  surface: string;
+  object: string;
+  mode: string;
+  total_chunks: number;
+  server_chunks: number;
+  client_chunks: number;
+  current_chunk?: number | null;
+  client_bytes: number;
+  telegram_bytes: number;
+  telegram_retries: number;
+  prefetch_window_max: number;
+  prefetch_window_final: number;
 }
 
 export interface DownloadAccountStageSample {
@@ -174,6 +191,7 @@ export interface DownloadStageMetrics {
   completed_requests: number;
   failed_requests: number;
   test_active_requests: number;
+  active?: DownloadStageActive[];
   last_test?: DownloadStageSample | null;
   recent: DownloadStageSample[];
 }
@@ -290,6 +308,8 @@ export interface StorageSettings {
   download_prefetch_chunks: number;
   min_download_prefetch_chunks: number;
   max_download_prefetch_chunks: number;
+  download_prefetch_mode: 'adaptive' | 'sequential' | string;
+  download_prefetch_modes?: string[];
   download_failover_retries: number;
   min_download_failover_retries: number;
   max_download_failover_retries: number;
