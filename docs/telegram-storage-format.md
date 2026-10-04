@@ -28,6 +28,9 @@ retry state and does not change Telegram or local metadata.
 The Accounts/Connections view likewise does not change the storage layout: it
 loads account state on entry and uses an explicit operator refresh instead of
 periodically polling account metadata.
+The operator Profile page is also control-plane metadata only: it updates the
+SQLite user row and session token version, never a manifest, chunk, Telegram
+message, or object location.
 
 Every send attempt is durable before the remote call. A restart that finds a
 `recovery_required` job with no lease normalizes any stale `sending` attempt to

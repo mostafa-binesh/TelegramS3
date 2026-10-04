@@ -136,6 +136,9 @@ while transient account/network failures remain retryable.
   the sign-in screen; every management API requires a session bound to a user.
 - Login is rate-limited with per-account lockout; passwords/session state are
   not stored in browser storage.
+- The authenticated console includes a self-service Profile page. It updates
+  the local operator display name and password through a CSRF-protected control-
+  plane endpoint; this does not add or alter an S3 operation.
 - The admin SPA resynchronizes its cookie-bound CSRF token after the specific
   `invalid csrf token` response and retries that action once. This is an
   operator-console convenience only; the server still requires the signed

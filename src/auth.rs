@@ -28,6 +28,7 @@ const MIN_PASSWORD_LENGTH: usize = 12;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthErrorKind {
     InvalidUsername,
+    InvalidDisplayName,
     WeakPassword,
     UnknownUser,
     InvalidPassword,
@@ -60,7 +61,9 @@ impl AuthError {
             AuthErrorKind::RateLimited | AuthErrorKind::LockedOut => StatusCode::TOO_MANY_REQUESTS,
             AuthErrorKind::NotAllowed => StatusCode::FORBIDDEN,
             AuthErrorKind::UsernameTaken => StatusCode::CONFLICT,
-            AuthErrorKind::InvalidUsername | AuthErrorKind::WeakPassword => StatusCode::BAD_REQUEST,
+            AuthErrorKind::InvalidUsername
+            | AuthErrorKind::InvalidDisplayName
+            | AuthErrorKind::WeakPassword => StatusCode::BAD_REQUEST,
             AuthErrorKind::UnknownUser
             | AuthErrorKind::InvalidPassword
             | AuthErrorKind::Disabled => StatusCode::UNAUTHORIZED,
@@ -105,6 +108,20 @@ pub fn normalize_username(raw: &str) -> Result<String, AuthError> {
         ));
     }
     Ok(value)
+}
+
+/// Normalize the operator-facing name while allowing ordinary spaces. Names
+/// are presentation data, but still reject control characters and excessive
+/// input before it reaches the UI or audit surfaces.
+pub fn normalize_display_name(raw: &str) -> Result<String, AuthError> {
+    let value = raw.trim();
+    if value.is_empty() || value.chars().count() > 120 || value.chars().any(char::is_control) {
+        return Err(AuthError::new(
+            AuthErrorKind::InvalidDisplayName,
+            "display name must be 1-120 non-control characters",
+        ));
+    }
+    Ok(value.to_string())
 }
 
 /// Enforce a password policy server-side. We keep it deliberately simple and
@@ -268,6 +285,33 @@ pub fn change_password(
         .map_err(|error| internal(format!("failed to revoke sessions: {error}")))
 }
 
+/// Update the signed-in operator's profile. The metadata write is atomic; a
+/// password update also revokes all older sessions so the HTTP layer can issue
+/// one fresh session for the browser that made the change.
+pub fn update_profile(
+    store: &MetadataStore,
+    user_id: &str,
+    display_name: &str,
+    new_password: Option<&str>,
+) -> Result<(), AuthError> {
+    let display_name = normalize_display_name(display_name)?;
+    let password_hash = new_password
+        .map(|password| {
+            validate_password(password)?;
+            hash_password(password)
+        })
+        .transpose()?;
+    store
+        .update_user_profile(user_id, &display_name, password_hash.as_deref())
+        .map_err(|error| internal(format!("failed to update profile: {error}")))?;
+    if new_password.is_some() {
+        store
+            .revoke_user_sessions(user_id)
+            .map_err(|error| internal(format!("failed to revoke sessions: {error}")))?;
+    }
+    Ok(())
+}
+
 // ---- In-process login rate limiting / lockout -------------------------------
 //
 // Chosen over `governor`: this control plane is a single process behind one
@@ -411,6 +455,17 @@ mod tests {
     }
 
     #[test]
+    fn display_name_policy_trims_and_rejects_invalid_values() {
+        assert_eq!(
+            normalize_display_name("  Ada Lovelace  ").unwrap(),
+            "Ada Lovelace"
+        );
+        assert!(normalize_display_name("").is_err());
+        assert!(normalize_display_name("bad\nname").is_err());
+        assert!(normalize_display_name(&"x".repeat(121)).is_err());
+    }
+
+    #[test]
     fn password_policy_rejects_short() {
         assert!(validate_password("short").is_err());
         assert!(validate_password("a-long-enough-pw").is_ok());
@@ -454,5 +509,30 @@ mod tests {
         let second = create_account(&store, "peer", "another-correct-passphrase", ROLE_ADMIN, "")
             .expect("peer");
         assert_eq!(second.role, ROLE_ADMIN);
+    }
+
+    #[test]
+    fn profile_update_changes_name_and_invalidates_sessions_when_password_changes() {
+        let store = crate::metadata::MetadataStore::open_in_memory().expect("store");
+        let user = create_account(
+            &store,
+            "root",
+            "correct-horse-battery-staple",
+            ROLE_ADMIN,
+            "Original",
+        )
+        .expect("create");
+        update_profile(
+            &store,
+            &user.id,
+            "Updated Name",
+            Some("new-correct-passphrase"),
+        )
+        .expect("update profile");
+        let updated = store.get_user_by_id(&user.id).expect("read").expect("user");
+        assert_eq!(updated.display_name, "Updated Name");
+        assert!(updated.token_version > user.token_version);
+        assert!(authenticate(&store, "root", "new-correct-passphrase").is_ok());
+        assert!(authenticate(&store, "root", "correct-horse-battery-staple").is_err());
     }
 }

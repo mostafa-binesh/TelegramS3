@@ -40,6 +40,7 @@
     runStageMetricsTest,
     runRecoveryVerificationNow,
     runEligibleCleanupNow,
+    updateProfile,
   } from './lib/api';
   import {normalizeError} from './lib/format';
   import type {
@@ -82,6 +83,7 @@
   let BucketsPanelComponent: any = null;
   let AdminModalsComponent: any = null;
   let ObjectInfoModalComponent: any = null;
+  let ProfilePanelComponent: any = null;
   let routeLoadKey = '';
   let loadedRouteKey = '';
   let routeLoadError = '';
@@ -98,10 +100,14 @@
   async function loadBucketsPanel() { BucketsPanelComponent ??= (await import('./components/BucketsPanel.svelte')).default; }
   async function loadAdminModals() { AdminModalsComponent ??= (await import('./components/AdminModals.svelte')).default; }
   async function loadObjectInfoModal() { ObjectInfoModalComponent ??= (await import('./components/ObjectInfoModal.svelte')).default; }
+  async function loadProfilePanel() { ProfilePanelComponent ??= (await import('./components/ProfilePanel.svelte')).default; }
 
   let username = '';
   let password = '';
   let loginError = '';
+  let profileBusy = false;
+  let profileError = '';
+  let profileMessage = '';
 
   let users: UserInfo[] = [];
   let newUsername = '';
@@ -450,6 +456,7 @@
       await loadUsersPanel();
       await refreshUsers();
     }
+    if (next.view === 'profile') await loadProfilePanel();
     if (next.view === 'accounts') await loadAccountsPanel();
     if (next.view === 'telegram') {
       await loadTelegramPanel();
@@ -599,6 +606,22 @@
     else if (next === 'recovery') navigate({ view: 'recovery', recoveryTab: 'issues' });
     else if (next === 'telegram') navigate({ view: 'telegram', telegramTab: 'storage' });
     else navigate({ view: next });
+  }
+
+  async function saveProfile(body: { display_name: string; password?: string }) {
+    profileBusy = true;
+    profileError = '';
+    profileMessage = '';
+    try {
+      session = await updateProfile(session?.csrf_token, body);
+      profileMessage = body.password ? 'Profile and password updated. Other sessions were signed out.' : 'Profile updated.';
+      notifySuccess(profileMessage);
+    } catch (cause) {
+      profileError = normalizeError(cause);
+      throw cause;
+    } finally {
+      profileBusy = false;
+    }
   }
 
   async function runStageMetricsDiagnostic() {
@@ -1407,7 +1430,7 @@
 
 <main class="shell" class:signed-in={session?.authenticated}>
   {#if session?.authenticated}
-    <Sidebar {view} username={session.user?.username ?? ''} {busy} onNavigate={switchView} onLogout={handleLogout}/>
+    <Sidebar {view} username={session.user?.username ?? ''} displayName={session.user?.display_name ?? ''} {busy} onNavigate={switchView} onLogout={handleLogout}/>
     <header class="console-header"><div><p class="card-label">Workspace</p>
       {#if view === 'buckets' && selectedBucket}
         <div class="header-address" aria-label="Current bucket location">
@@ -1469,6 +1492,8 @@
       {#if AccountsPanelComponent}<svelte:component this={AccountsPanelComponent} csrf={session?.csrf_token} buckets={buckets} {accountsTab} onTabChange={(tab: AccountsTab) => navigate({ view: 'accounts', accountsTab: tab })} overview={overview} {session} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode bind:telegramAccountPhone settingsBusy={telegramSettingsBusy} settingsError={telegramSettingsError} settingsMessage={telegramSettingsMessage} {showWizard} wizardComponent={TelegramWizardComponent} onSave={saveTelegramSettingsForm} onManageOperators={() => switchView('users')} onToggleWizard={toggleWizard} onWizardDone={handleWizardAuthorized} onWizardClose={handleWizardClose} onRemoveConnection={removeCurrentConnection}/>{:else if routeLoadError}<LoadError title="Could not load accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:360px"></div></section>{/if}
     {:else if view === 'users'}
       {#if UsersPanelComponent}<svelte:component this={UsersPanelComponent} {users} loading={usersLoading} error={usersError} canManage={canManageOperators} {busy} onRefresh={refreshUsers} onRemove={(id: string) => requestDelete({ type: 'operator', name: users.find((user) => user.id === id)?.username ?? id, key: id })} onAdd={openOperatorModal}/>{:else if routeLoadError}<LoadError title="Could not load operator accounts" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:220px"></div></section>{/if}
+    {:else if view === 'profile'}
+      {#if ProfilePanelComponent}<svelte:component this={ProfilePanelComponent} {session} busy={profileBusy} error={profileError} message={profileMessage} onSave={saveProfile}/>{:else if routeLoadError}<LoadError title="Could not load your profile" message={routeLoadError} onRetry={retryRouteLoad}/>{:else}<section class="card surface"><div class="skeleton" style="height:300px"></div></section>{/if}
     {/if}
   {/if}
 

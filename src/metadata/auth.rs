@@ -103,6 +103,37 @@ impl MetadataStore {
         })
     }
 
+    /// Update the operator-facing name and, when supplied, the password hash
+    /// in one metadata transaction. Password changes advance token_version so
+    /// every previously issued session is invalidated by the caller.
+    pub fn update_user_profile(
+        &self,
+        id: &str,
+        display_name: &str,
+        password_hash: Option<&str>,
+    ) -> Result<(), MetadataError> {
+        let now = timestamp_now()?;
+        self.with_connection(|connection| {
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            match password_hash {
+                Some(password_hash) => {
+                    tx.execute(
+                        "UPDATE users SET display_name=?2, password_hash=?3, token_version=token_version+1, updated_at=?4 WHERE id=?1",
+                        params![id, display_name, password_hash, now],
+                    )?;
+                }
+                None => {
+                    tx.execute(
+                        "UPDATE users SET display_name=?2, updated_at=?3 WHERE id=?1",
+                        params![id, display_name, now],
+                    )?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     pub fn user_count(&self) -> Result<u64, MetadataError> {
         self.with_connection(|conn| {
             Ok(conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, u64>(0))?)

@@ -1,12 +1,13 @@
 <script lang="ts">
   export let view: string;
   export let username: string;
-  export let onNavigate: (view: 'overview'|'buckets'|'transfers'|'recovery'|'telegram'|'accounts'|'users') => void;
+  export let displayName = '';
+  export let onNavigate: (view: 'overview'|'buckets'|'transfers'|'recovery'|'telegram'|'accounts'|'users'|'profile') => void;
   export let onLogout: () => void;
   export let busy = false;
   const links = [
     ['overview','Overview'],['buckets','Buckets'],['transfers','Transfers'],
-    ['recovery','Recovery'],['telegram','Storage settings'],['accounts','Accounts'],['users','Operators']
+    ['recovery','Recovery'],['telegram','Storage settings'],['accounts','Accounts'],['users','Operators'],['profile','Profile']
   ] as const;
 </script>
 <aside>
@@ -18,9 +19,10 @@
     {:else if id === 'recovery'}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 5v5h5"/></svg>
     {:else if id === 'telegram'}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="17" r="2" fill="currentColor" stroke="none"/></svg>
     {:else if id === 'accounts'}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><path d="M16 11a3 3 0 0 1 4.5 2.6M16.5 19a5 5 0 0 1 4 0"/></svg>
+    {:else if id === 'profile'}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.2"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>
     {:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><path d="M16 11a3 3 0 0 1 4.5 2.6M16.5 19a5 5 0 0 1 4 0"/></svg>{/if}
   </span><span>{label}</span></button>{/each}</nav>
-  <footer><div class="account-card"><span class="account-avatar" aria-hidden="true">{username.slice(0, 1).toUpperCase() || 'A'}</span><div class="account-copy"><span class="account-kicker">Signed in as</span><strong>{username}</strong></div></div><button class="sign-out" type="button" on:click={onLogout} disabled={busy}><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19H10"/><path d="M13 8l4 4-4 4M9 12h8"/></svg><span>{busy ? 'Signing out…' : 'Sign out'}</span></button></footer>
+  <footer><button class="account-card" type="button" on:click={() => onNavigate('profile')} aria-label="Open profile"><span class="account-avatar" aria-hidden="true">{(displayName || username).slice(0, 1).toUpperCase() || 'A'}</span><span class="account-copy"><span class="account-kicker">Signed in as</span><strong>{displayName || username}</strong>{#if displayName && displayName !== username}<small>@{username}</small>{/if}</span></button><button class="sign-out" type="button" on:click={onLogout} disabled={busy}><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19H10"/><path d="M13 8l4 4-4 4M9 12h8"/></svg><span>{busy ? 'Signing out…' : 'Sign out'}</span></button></footer>
 </aside>
 <style>
   aside { position: fixed; inset: 0 auto 0 0; width: 230px; background: #142235; color: #e8eef6; padding: 30px 18px; display: flex; flex-direction: column; z-index: 5; }
@@ -39,6 +41,8 @@
   .account-copy { display: grid; gap: 3px; min-width: 0; }
   .account-kicker { color: #9fb5ca; font-size: 9px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
   .account-copy strong { overflow-wrap: anywhere; color: #fff; font-size: 14px; font-weight: 750; }
+  .account-copy small { overflow-wrap: anywhere; color: #9fb5ca; font-size: 11px; }
+  .account-card { border: 0; text-align: left; cursor: pointer; }
   .sign-out { width: 100%; min-height: 42px; padding: 0 12px; gap: 8px; background: rgba(179, 56, 56, .08); color: #ffd6d6; border: 1px solid rgba(255, 210, 210, .28); justify-content: center; }
   .sign-out svg { width: 17px; height: 17px; }
   .sign-out:hover:not(:disabled) { background: rgba(179, 56, 56, .24); border-color: #e38c8c; }

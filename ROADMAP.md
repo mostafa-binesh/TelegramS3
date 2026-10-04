@@ -165,6 +165,8 @@ Completed work (initial slice):
 - in-browser management UI: username/password sign-in, overview, operator list, in-app bucket creation, and a (JSON) bucket/object browser with prefix folders + directory markers + file/folder delete
 - CLI `users` family (`create`, `list`, `password`, `delete`, `status`); first account is forced to superadmin and is provisionable while the server is down
 - login rate limiting / lockout (in-process per-IP + per-account buckets)
+- self-service operator profile page with atomic display-name updates, password
+  rotation, session revocation, and browser validation/error coverage
 - unit + integration smoke coverage for auth, migrations, user CRUD, and the credential login lifecycle
 
 Next slice (landed this increment): bounded binary content streaming over `_admin` and the in-browser Telegram onboarding wizard.

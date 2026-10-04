@@ -27,6 +27,7 @@ staging, and recovery artifacts, not committed payloads.
 - [S3 compatibility](#s3-compatibility)
 - [Security and durability](#security-and-durability)
 - [Operator web UI](#operator-web-ui)
+- [Console screenshots](#console-screenshots)
 - [Roadmap](#roadmap)
 - [Development](#development)
 - [Documentation](#documentation)
@@ -112,7 +113,10 @@ staging, and recovery artifacts, not committed payloads.
   metrics endpoints, and a production Docker image published to GHCR.
 - **Multi-user control plane** — argon2id-hashed operator accounts in SQLite,
   HTTP-only session cookies, per-account login rate limiting and lockout,
-  revocable sessions, and a superadmin role for account management.
+  revocable sessions, a superadmin role for account management, and a profile
+  page where an authenticated operator can update the display name or rotate
+  the password. Password changes revoke other active sessions and issue a
+  fresh session to the browser that made the change.
 - **Bounded metadata connection pool** — the local SQLite store uses eight
   independently configured handles with WAL and a 30-second busy timeout;
   low-level handle failures are isolated and replaced without a schema change.
@@ -518,6 +522,26 @@ session with CSRF protection.
 If a session cookie is rotated in another tab, the SPA automatically
 resynchronizes its CSRF token and retries the rejected action once; genuine
 authorization failures still remain visible to the operator.
+
+The signed-in account card and the **Profile** page provide a small self-service
+profile workflow. Display names are trimmed and bounded to 120 characters;
+passwords must meet the same 12-character policy as account creation. The
+server validates and writes both fields together, and a password change
+invalidates older sessions without interrupting the current browser.
+
+## Console screenshots
+
+These screenshots show the release's main operator surfaces. They are kept as
+lossless PNGs in the repository so the README remains useful when viewed
+offline or from a tagged source archive.
+
+<table>
+  <tr>
+    <td align="center" width="33%"><img src="docs/screenshots/overview.png" alt="Telegram S3 overview dashboard" width="100%"><br><sub><b>Overview</b><br>Storage health, Telegram payload totals, and recovery signal at a glance.</sub></td>
+    <td align="center" width="33%"><img src="docs/screenshots/network-usage.png" alt="Telegram S3 network usage" width="100%"><br><sub><b>Network usage</b><br>Session or lifetime traffic split between clients and Telegram.</sub></td>
+    <td align="center" width="33%"><img src="docs/screenshots/buckets-and-actions.png" alt="Telegram S3 bucket object actions" width="100%"><br><sub><b>Bucket browser</b><br>Paginated objects, replica badges, row actions, and bulk-friendly navigation.</sub></td>
+  </tr>
+</table>
 
 The bucket browser also includes active S3 transfer jobs before their final
 manifest is committed. A dedicated progress card shows completed/total parts,

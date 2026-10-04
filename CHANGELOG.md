@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.0-rc.1 - 2026-10-04
+
+### Operator profiles and console documentation
+
+- Added an authenticated Profile page reachable from the sidebar and signed-in
+  account card.
+- Added server-side display-name validation and atomic profile updates; names
+  are trimmed, limited to 120 non-control characters, and reflected in the
+  navigation immediately.
+- Added self-service password rotation using the existing Argon2id policy. A
+  password change revokes older sessions and returns a fresh cookie and CSRF
+  token to the current browser.
+- Added focused Rust auth coverage and Playwright coverage for initial values,
+  short/mismatched password validation, successful saves, session identity
+  refresh, and save failures.
+- Added lossless PNG console screenshots and a README gallery covering the
+  Overview, network usage, and bucket/action surfaces.
+
 ## 0.8.0 - 2026-10-04
 
 ### Stable release

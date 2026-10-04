@@ -3,7 +3,7 @@ import { readable } from 'svelte/store';
 /** The console is always mounted under this path (see Vite `base`). */
 export const BASE = '/_admin';
 
-export type ViewName = 'overview' | 'buckets' | 'transfers' | 'recovery' | 'telegram' | 'accounts' | 'users';
+export type ViewName = 'overview' | 'buckets' | 'transfers' | 'recovery' | 'telegram' | 'accounts' | 'users' | 'profile';
 export type RecoveryTab = 'issues' | 'transfers';
 export type TelegramTab = 'connection' | 'proxy' | 'storage';
 export type AccountsTab = 'connections' | 'replication' | 'maintenance';
@@ -28,7 +28,7 @@ const DEFAULT_ROUTE: Route = {
   accountsTab: 'connections'
 };
 
-const VIEWS: ViewName[] = ['overview', 'buckets', 'transfers', 'recovery', 'telegram', 'accounts', 'users'];
+const VIEWS: ViewName[] = ['overview', 'buckets', 'transfers', 'recovery', 'telegram', 'accounts', 'users', 'profile'];
 
 function decode(segment: string): string {
   try {

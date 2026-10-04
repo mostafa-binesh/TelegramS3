@@ -170,6 +170,14 @@ struct ChangePasswordRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
+struct UpdateProfileRequest {
+    display_name: String,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
 struct CreateFolderRequest {
     bucket: String,
     path: String,
@@ -667,6 +675,10 @@ impl AdminUiState {
             (Method::POST, "session/refresh") => self.handle_refresh(&principal).await,
             (Method::GET, "overview/live") => self.handle_overview_live().await,
             (Method::GET, "overview") => self.handle_overview(&principal).await,
+            (Method::GET, "profile") => {
+                json_response(StatusCode::OK, UserWire::from_user(&principal.user))
+            }
+            (Method::PATCH, "profile") => self.handle_update_profile(request, &principal).await,
             (Method::POST, "stage-metrics/test") => self.handle_stage_metrics_test().await,
             (Method::GET, "accounts") => self.handle_list_accounts(),
             (Method::POST, "accounts") => self.handle_save_account(request).await,
@@ -1240,6 +1252,71 @@ impl AdminUiState {
             };
         }
         json_response(StatusCode::OK, serde_json::json!({ "ok": true }))
+    }
+
+    async fn handle_update_profile(
+        &self,
+        request: Request<Incoming>,
+        principal: &ResolvedPrincipal,
+    ) -> Response<Body> {
+        let UpdateProfileRequest {
+            display_name,
+            password,
+        } = match read_json::<UpdateProfileRequest>(request).await {
+            Ok(body) => body,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid profile payload"),
+        };
+        let password_changed = password.is_some();
+        if let Err(error) = auth::update_profile(
+            self.store(),
+            &principal.user.id,
+            &display_name,
+            password.as_deref(),
+        ) {
+            return auth_error_response(&error);
+        }
+
+        let Some(user) = self
+            .store()
+            .get_user_by_id(&principal.user.id)
+            .ok()
+            .flatten()
+        else {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "updated profile is unreadable",
+            );
+        };
+        if password_changed {
+            return match self.issue_session(&user, None) {
+                Ok(issued) => {
+                    let mut response = json_response(
+                        StatusCode::OK,
+                        SessionResponse {
+                            authenticated: true,
+                            user: Some(issued.user),
+                            issued_at: Some(issued.issued_at),
+                            expires_at: Some(issued.expires_at),
+                            csrf_token: Some(issued.csrf_token),
+                        },
+                    );
+                    with_set_cookie(&mut response, issued.cookie_value);
+                    response
+                }
+                Err(error) => auth_error_response(&error),
+            };
+        }
+
+        json_response(
+            StatusCode::OK,
+            SessionResponse {
+                authenticated: true,
+                user: Some(UserWire::from_user(&user)),
+                issued_at: Some(rfc3339_unix(principal.claims.iat)),
+                expires_at: Some(rfc3339_unix(principal.claims.exp)),
+                csrf_token: Some(principal.claims.csrf.clone()),
+            },
+        )
     }
 
     fn handle_delete_user(&self, id_path: &str, principal: &ResolvedPrincipal) -> Response<Body> {

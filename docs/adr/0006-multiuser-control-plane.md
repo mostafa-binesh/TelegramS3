@@ -66,6 +66,11 @@ add or remove people who should reach the management UI. Phase 9 needs:
   `ObjectFormatService` as the S3 server (single-writer, bounded reads,
   tombstones before cleanup). It never introduces an independent object-writing
   path, and it never buffers a full object in memory.
+- **Self-service profile changes**: the authenticated operator can update the
+  display name and optionally rotate the password through one CSRF-protected
+  profile endpoint. The metadata write is atomic; password rotation advances
+  `token_version`, revokes older sessions, and issues a fresh session to the
+  browser that completed the change.
 
 ## Consequences
 

@@ -139,6 +139,13 @@ export function getSession() {
   return requestJson<SessionState>('/session');
 }
 
+export function updateProfile(
+  csrf: string | null | undefined,
+  body: { display_name: string; password?: string }
+) {
+  return requestJson<SessionState>('/profile', csrf, { method: 'PATCH', body });
+}
+
 export function login(username: string, password: string) {
   return requestJson<SessionState>('/session/login', null, {
     method: 'POST',

@@ -114,6 +114,7 @@ async function mockAdminApi(
     browserBuckets?: Array<{ name: string; created_at: string }>;
     browserObjects?: Array<Record<string, unknown>>;
     telegramAccounts?: Array<{ id: string; label: string; state: string; detail: string; connected: boolean; download_enabled: boolean }>;
+    profileSaveFailure?: boolean;
   } = {}
 ) {
   let loggedIn = false;
@@ -129,6 +130,7 @@ async function mockAdminApi(
   const deletedKeys = new Set<string>();
   const buckets = options.browserBuckets ?? [{ name: 'release-test', created_at: '2026-01-01T00:00:00Z' }];
   const users = [user];
+  let profileUser = { ...user };
   let delayedFirstObjectList = false;
   let delayedNestedObjectList = false;
   let stageTestSample: Record<string, unknown> | null = null;
@@ -138,12 +140,12 @@ async function mockAdminApi(
     const request = route.request();
     const path = new URL(request.url()).pathname.replace('/_admin/api', '');
     if (path === '/session' && request.method() === 'GET') {
-      return route.fulfill({ json: loggedIn && !sessionExpired ? { ...authenticated, csrf_token: csrfToken } : { authenticated: false } });
+      return route.fulfill({ json: loggedIn && !sessionExpired ? { ...authenticated, user: profileUser, csrf_token: csrfToken } : { authenticated: false } });
     }
     if (path === '/session/login' && request.method() === 'POST') {
       loggedIn = true;
       csrfToken = authenticated.csrf_token;
-      return route.fulfill({ json: { ...authenticated, csrf_token: csrfToken } });
+      return route.fulfill({ json: { ...authenticated, user: profileUser, csrf_token: csrfToken } });
     }
     if (path === '/session/logout' && request.method() === 'POST') {
       loggedIn = false;
@@ -157,6 +159,16 @@ async function mockAdminApi(
       return route.fulfill({ status: 401, json: { error: 'session expired' } });
     }
     if (!loggedIn || sessionExpired) return route.fulfill({ status: 401, json: { error: 'unauthorized' } });
+    if (path === '/profile' && request.method() === 'GET') {
+      return route.fulfill({ json: profileUser });
+    }
+    if (path === '/profile' && request.method() === 'PATCH') {
+      if (options.profileSaveFailure) return route.fulfill({ status: 400, json: { error: 'profile update rejected for this test' } });
+      const body = request.postDataJSON() as { display_name: string; password?: string };
+      profileUser = { ...profileUser, display_name: body.display_name };
+      csrfToken = body.password ? 'csrf-profile-refreshed' : csrfToken;
+      return route.fulfill({ json: { ...authenticated, user: profileUser, csrf_token: csrfToken } });
+    }
     if (path === '/stage-metrics/test' && request.method() === 'POST') {
       stageTestSample = {
         request_id: 99, surface: 'diagnostic-test', started_at: '2026-01-01T00:00:00Z', status: 'completed',
@@ -470,6 +482,50 @@ test('guest is gated, authenticated navigation works, and logout revokes the ses
   await expect(page.getByRole('heading', { name: 'Give every upload the right-sized runway.' })).toBeVisible();
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page.getByRole('heading', { name: 'Sign in to manage storage' })).toBeVisible();
+});
+
+test('profile page validates and saves the display name and password', async ({ page }) => {
+  await mockAdminApi(page);
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
+
+  await expect(page.getByRole('heading', { name: 'Personalize your workspace' })).toBeVisible();
+  await expect(page.getByLabel('Display name')).toHaveValue('Administrator');
+  await page.getByLabel('New password', { exact: true }).fill('too-short');
+  await page.getByLabel('Confirm new password').fill('too-short');
+  await page.getByRole('button', { name: 'Save profile' }).click();
+  await expect(page.getByRole('alert')).toContainText('at least 12 characters');
+
+  await page.getByLabel('New password', { exact: true }).fill('new-correct-passphrase');
+  await page.getByLabel('Confirm new password').fill('different-passphrase');
+  await page.getByRole('button', { name: 'Save profile' }).click();
+  await expect(page.getByRole('alert')).toContainText('do not match');
+
+  const request = page.waitForRequest((candidate) => new URL(candidate.url()).pathname === '/_admin/api/profile' && candidate.method() === 'PATCH');
+  await page.getByLabel('Display name').fill('Storage Operator');
+  await page.getByLabel('Confirm new password').fill('new-correct-passphrase');
+  await page.getByRole('button', { name: 'Save profile' }).click();
+  const profileRequest = await request;
+  expect(profileRequest.postDataJSON()).toEqual({ display_name: 'Storage Operator', password: 'new-correct-passphrase' });
+  await expect(page.locator('form').getByRole('status')).toContainText('Other sessions were signed out');
+  await expect(page.locator('.account-copy strong')).toHaveText('Storage Operator');
+  await expect(page.locator('.account-copy small')).toHaveText('@admin');
+});
+
+test('profile save failure stays visible and preserves the form', async ({ page }) => {
+  await mockAdminApi(page, { profileSaveFailure: true });
+  await page.goto('/');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByLabel('Password').fill('correct-password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
+  await page.getByLabel('Display name').fill('Rejected Name');
+  await page.getByRole('button', { name: 'Save profile' }).click();
+  await expect(page.getByText('profile update rejected for this test')).toBeVisible();
+  await expect(page.getByLabel('Display name')).toHaveValue('Rejected Name');
 });
 
 test('overview polls lightweight live telemetry without rescanning the full snapshot', async ({ page }) => {
