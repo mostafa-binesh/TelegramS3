@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0 - 2026-10-04
+
+### Stable release
+
+This stable release promotes the validated `v1.0.0-rc.2` candidate. It
+includes current-password verification for self-service password changes,
+profile-session safety, the complete operator console, Telegram-backed S3
+storage, recovery tooling, and the release validation documented below.
+
 ## 1.0.0-rc.2 - 2026-10-04
 
 ### Verified profile password changes
