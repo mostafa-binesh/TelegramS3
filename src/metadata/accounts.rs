@@ -11,6 +11,8 @@ pub struct AccountRecord {
     pub state: String,
     pub download_enabled: bool,
     pub storage_chat_id: Option<String>,
+    pub quota_bytes: Option<u64>,
+    pub used_bytes: u64,
     pub replica_objects: u64,
     pub access_objects: u64,
     pub created_at: i64,
@@ -85,6 +87,58 @@ fn parse_bootstrap(json: String) -> Result<TelegramBootstrapSettings, MetadataEr
     Ok(serde_json::from_str(&json)?)
 }
 
+fn enforce_quota(
+    label: &str,
+    quota_bytes: Option<u64>,
+    used_bytes: u64,
+    additional_bytes: u64,
+) -> Result<(), MetadataError> {
+    let Some(quota_bytes) = quota_bytes else {
+        return Ok(());
+    };
+    let requested_total = used_bytes.saturating_add(additional_bytes);
+    if requested_total > quota_bytes {
+        return Err(MetadataError::QuotaExceeded(format!(
+            "account {label} has {} used of {} and cannot receive {} more bytes",
+            used_bytes, quota_bytes, additional_bytes
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn enforce_account_quota_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    bucket: &str,
+    key: &str,
+    content_length: u64,
+) -> Result<(), MetadataError> {
+    let Some((label, quota, used)) = tx
+        .query_row(
+            "SELECT a.label,a.quota_bytes,COALESCE((SELECT SUM(CAST(json_extract(m.manifest_json,'$.content_length') AS INTEGER)) FROM active_objects ao JOIN object_manifests m ON m.object_id=ao.object_id WHERE m.connection_id=a.id AND m.commit_state='committed'),0)+COALESCE((SELECT SUM(CAST(json_extract(m.manifest_json, '$.chunks[' || r.chunk_order || '].size') AS INTEGER)) FROM replica_locations r JOIN object_manifests m ON m.object_id=r.object_id JOIN active_objects ao ON ao.object_id=m.object_id WHERE r.account_id=a.id AND r.mode='replica' AND r.state='ready' AND m.commit_state='committed'),0) FROM telegram_accounts a WHERE a.id=?1",
+            [account_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, i64>(2)?)),
+        )
+        .optional()? else {
+        return Ok(());
+    };
+    let current: u64 = tx
+        .query_row(
+            "SELECT COALESCE(CAST(json_extract(m.manifest_json,'$.content_length') AS INTEGER),0) FROM active_objects ao JOIN object_manifests m ON m.object_id=ao.object_id WHERE ao.bucket=?1 AND ao.object_key=?2 AND m.connection_id=?3 AND m.commit_state='committed'",
+            params![bucket, key, account_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0)
+        .max(0) as u64;
+    enforce_quota(
+        &label,
+        quota.map(|value| value.max(0) as u64),
+        used.max(0) as u64,
+        content_length.saturating_sub(current),
+    )
+}
+
 fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
     Ok(AccountRecord {
         id: row.get(0)?,
@@ -93,28 +147,66 @@ fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> 
         state: row.get(3)?,
         download_enabled: row.get::<_, i64>(4)? != 0,
         storage_chat_id: row.get(5)?,
-        replica_objects: row.get(6)?,
-        access_objects: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        quota_bytes: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
+        used_bytes: row.get::<_, i64>(7)?.max(0) as u64,
+        replica_objects: row.get(8)?,
+        access_objects: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
     })
+}
+
+const ACCOUNT_SELECT: &str = r#"
+    SELECT a.id,a.label,a.phone,a.state,a.download_enabled,
+        json_extract(a.bootstrap_json,'$.telegram_storage_chat_id'),
+        a.quota_bytes,
+        COALESCE((
+            SELECT SUM(CAST(json_extract(m.manifest_json,'$.content_length') AS INTEGER))
+            FROM active_objects ao
+            JOIN object_manifests m ON m.object_id=ao.object_id
+            WHERE m.connection_id=a.id AND m.commit_state='committed'
+        ),0) + COALESCE((
+            SELECT SUM(CAST(json_extract(m.manifest_json, '$.chunks[' || r.chunk_order || '].size') AS INTEGER))
+            FROM replica_locations r
+            JOIN object_manifests m ON m.object_id=r.object_id
+            JOIN active_objects ao ON ao.object_id=m.object_id
+            WHERE r.account_id=a.id AND r.mode='replica' AND r.state='ready'
+              AND m.commit_state='committed'
+        ),0),
+        COUNT(DISTINCT CASE WHEN r.mode='replica' THEN r.object_id END),
+        COUNT(DISTINCT CASE WHEN r.mode='access' THEN r.object_id END),
+        a.created_at,a.updated_at
+    FROM telegram_accounts a
+    LEFT JOIN replica_locations r ON r.account_id=a.id AND r.state='ready'
+"#;
+
+fn load_account(
+    connection: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<AccountRecord>, rusqlite::Error> {
+    connection
+        .query_row(
+            &format!("{ACCOUNT_SELECT} WHERE a.id=?1 GROUP BY a.id"),
+            [id],
+            account_from_row,
+        )
+        .optional()
 }
 
 impl MetadataStore {
     pub fn list_telegram_accounts(&self) -> Result<Vec<AccountRecord>, MetadataError> {
         self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                r#"SELECT a.id,a.label,a.phone,a.state,a.download_enabled,
-                    json_extract(a.bootstrap_json,'$.telegram_storage_chat_id'),
-                    COUNT(DISTINCT CASE WHEN r.mode='replica' THEN r.object_id END),
-                    COUNT(DISTINCT CASE WHEN r.mode='access' THEN r.object_id END),
-                    a.created_at,a.updated_at
-                   FROM telegram_accounts a
-                   LEFT JOIN replica_locations r ON r.account_id=a.id AND r.state='ready'
-                   GROUP BY a.id ORDER BY a.created_at ASC"#,
-            )?;
-            let rows = statement.query_map([], account_from_row)?;
-            rows.collect::<Result<Vec<_>, _>>()
+            let mut statement =
+                connection.prepare("SELECT id FROM telegram_accounts ORDER BY created_at ASC")?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids.iter()
+                .map(|id| {
+                    load_account(connection, id)?
+                        .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+                })
+                .collect::<Result<Vec<_>, _>>()
                 .map_err(MetadataError::from)
         })
     }
@@ -124,22 +216,19 @@ impl MetadataStore {
         id: &str,
     ) -> Result<Option<(AccountRecord, TelegramBootstrapSettings)>, MetadataError> {
         self.with_connection(|connection| {
-            let row = connection
+            let json: Option<String> = connection
                 .query_row(
-                    r#"SELECT a.id,a.label,a.phone,a.state,a.download_enabled,
-                        json_extract(a.bootstrap_json,'$.telegram_storage_chat_id'),
-                        COUNT(DISTINCT CASE WHEN r.mode='replica' THEN r.object_id END),
-                        COUNT(DISTINCT CASE WHEN r.mode='access' THEN r.object_id END),
-                        a.created_at,a.updated_at,a.bootstrap_json
-                       FROM telegram_accounts a
-                       LEFT JOIN replica_locations r ON r.account_id=a.id AND r.state='ready'
-                       WHERE a.id=?1 GROUP BY a.id"#,
+                    "SELECT bootstrap_json FROM telegram_accounts WHERE id=?1",
                     [id],
-                    |row| Ok((account_from_row(row)?, row.get::<_, String>(10)?)),
+                    |row| row.get(0),
                 )
                 .optional()?;
-            row.map(|(record, json)| Ok((record, parse_bootstrap(json)?)))
-                .transpose()
+            let Some(json) = json else {
+                return Ok(None);
+            };
+            let record =
+                load_account(connection, id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            Ok(Some((record, parse_bootstrap(json)?)))
         })
     }
 
@@ -150,27 +239,84 @@ impl MetadataStore {
         settings: &TelegramBootstrapSettings,
         phone: Option<&str>,
         download_enabled: Option<bool>,
+        quota_bytes: Option<Option<u64>>,
     ) -> Result<AccountRecord, MetadataError> {
         let id = id
             .map(str::to_owned)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let json = serde_json::to_string(settings)?;
+        let quota_bytes = quota_bytes
+            .map(|value| {
+                value.map(i64::try_from).transpose().map_err(|_| {
+                    MetadataError::InvalidManifest("account quota is too large".into())
+                })
+            })
+            .transpose()?;
         let now = crate::durable::now();
         self.with_connection(|connection| {
             connection.execute(
-                r#"INSERT INTO telegram_accounts(id,label,bootstrap_json,phone,download_enabled,state,created_at,updated_at)
-                   VALUES(?1,?2,?3,?4,COALESCE(?5,1),'configured',?6,?6)
+                r#"INSERT INTO telegram_accounts(id,label,bootstrap_json,phone,download_enabled,quota_bytes,state,created_at,updated_at)
+                   VALUES(?1,?2,?3,?4,COALESCE(?5,1),?6,'configured',?7,?7)
                    ON CONFLICT(id) DO UPDATE SET label=excluded.label,bootstrap_json=excluded.bootstrap_json,
-                     phone=excluded.phone,download_enabled=COALESCE(?5,telegram_accounts.download_enabled),state='configured',updated_at=excluded.updated_at"#,
-                params![id, label.trim(), json, phone, download_enabled, now],
+                     phone=excluded.phone,download_enabled=COALESCE(?5,telegram_accounts.download_enabled),
+                     quota_bytes=CASE WHEN ?8 THEN ?6 ELSE telegram_accounts.quota_bytes END,
+                     state='configured',updated_at=excluded.updated_at"#,
+                params![
+                    id,
+                    label.trim(),
+                    json,
+                    phone,
+                    download_enabled,
+                    quota_bytes.flatten(),
+                    now,
+                    quota_bytes.is_some(),
+                ],
             )?;
-            let record = connection.query_row(
-                r#"SELECT a.id,a.label,a.phone,a.state,a.download_enabled,
-                    json_extract(a.bootstrap_json,'$.telegram_storage_chat_id'),0,0,a.created_at,a.updated_at
-                   FROM telegram_accounts a WHERE a.id=?1"#,
-                [&id], account_from_row,
-            )?;
+            let record = load_account(connection, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
             Ok(record)
+        })
+    }
+
+    /// Ensure a new primary object fits the owning account. Replacing the
+    /// active object at the same key only consumes the size delta.
+    pub fn ensure_account_quota_for_object(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        content_length: u64,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|connection| {
+            let tx =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            enforce_account_quota_in_transaction(&tx, account_id, bucket, key, content_length)?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Check capacity before a physical replica is copied to an account.
+    pub fn ensure_account_quota_for_additional_bytes(
+        &self,
+        account_id: &str,
+        additional_bytes: u64,
+    ) -> Result<(), MetadataError> {
+        self.with_connection(|connection| {
+            let Some((label, quota, used)) = connection
+                .query_row(
+                    "SELECT a.label,a.quota_bytes,COALESCE((SELECT SUM(CAST(json_extract(m.manifest_json,'$.content_length') AS INTEGER)) FROM active_objects ao JOIN object_manifests m ON m.object_id=ao.object_id WHERE m.connection_id=a.id AND m.commit_state='committed'),0)+COALESCE((SELECT SUM(CAST(json_extract(m.manifest_json, '$.chunks[' || r.chunk_order || '].size') AS INTEGER)) FROM replica_locations r JOIN object_manifests m ON m.object_id=r.object_id JOIN active_objects ao ON ao.object_id=m.object_id WHERE r.account_id=a.id AND r.mode='replica' AND r.state='ready' AND m.commit_state='committed'),0) FROM telegram_accounts a WHERE a.id=?1",
+                    [account_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, i64>(2)?)),
+                )
+                .optional()? else {
+                    return Ok(());
+                };
+            enforce_quota(
+                &label,
+                quota.map(|value| value.max(0) as u64),
+                used.max(0) as u64,
+                additional_bytes,
+            )
         })
     }
 
@@ -470,4 +616,93 @@ fn row_rechunk_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<RechunkJob> {
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::{CommittedManifestArgs, ObjectManifest};
+    use crate::metadata::{BucketRecord, OperationKind, TelegramBootstrapSettings};
+    use time::OffsetDateTime;
+
+    #[test]
+    fn account_quota_supports_unlimited_and_reports_derived_usage() {
+        let store = MetadataStore::open_in_memory().expect("metadata");
+        store
+            .set_telegram_bootstrap_settings(&TelegramBootstrapSettings::default())
+            .expect("bootstrap");
+        let account_id = store
+            .active_connection_id()
+            .expect("active id")
+            .expect("account id");
+        let account = store
+            .upsert_telegram_account(
+                Some(&account_id),
+                "Primary",
+                &TelegramBootstrapSettings::default(),
+                None,
+                Some(true),
+                Some(Some(10)),
+            )
+            .expect("bounded account");
+        assert_eq!(account.quota_bytes, Some(10));
+        assert_eq!(account.used_bytes, 0);
+        assert!(
+            store
+                .ensure_account_quota_for_additional_bytes(&account_id, 10)
+                .is_ok()
+        );
+        assert!(matches!(
+            store.ensure_account_quota_for_additional_bytes(&account_id, 11),
+            Err(MetadataError::QuotaExceeded(_))
+        ));
+
+        store
+            .create_bucket(BucketRecord {
+                name: "quota-test".into(),
+                created_at: OffsetDateTime::now_utc(),
+                deleted_at: None,
+                versioning_enabled: false,
+                object_locking_enabled: false,
+            })
+            .expect("bucket");
+        let manifest = ObjectManifest::committed(CommittedManifestArgs {
+            bucket: "quota-test".into(),
+            key: "one.bin".into(),
+            content_length: 7,
+            content_type: "application/octet-stream".into(),
+            checksum_algorithm: "sha256".into(),
+            whole_object: "checksum".into(),
+            peer_id: "peer".into(),
+            message_id: 1,
+        });
+        let operation = store
+            .stage_manifest(OperationKind::Put, manifest)
+            .expect("stage");
+        store.commit_manifest(operation).expect("commit");
+        let account = store
+            .list_telegram_accounts()
+            .expect("accounts")
+            .into_iter()
+            .find(|item| item.id == account_id)
+            .expect("account");
+        assert_eq!(account.used_bytes, 7);
+
+        let unlimited = store
+            .upsert_telegram_account(
+                Some(&account_id),
+                "Primary",
+                &TelegramBootstrapSettings::default(),
+                None,
+                None,
+                Some(None),
+            )
+            .expect("unlimited account");
+        assert_eq!(unlimited.quota_bytes, None);
+        assert!(
+            store
+                .ensure_account_quota_for_additional_bytes(&account_id, u64::MAX)
+                .is_ok()
+        );
+    }
 }

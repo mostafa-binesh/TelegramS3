@@ -145,6 +145,23 @@
       {#if loading || !overview}<div class="skeleton" style="height:80px"></div>{:else}<div class="signal-track"><span style={`width:${Math.min(corruptedCount * 10, 100)}%`}></span></div><p class="fine-print">{acknowledgedCount ? `${formatCount(acknowledgedCount)} acknowledged issue(s) remain reviewable.` : 'No acknowledged issues.'}</p>{/if}
     </article>
   </section>
+  <section class="card surface account-quota-card" aria-label="Telegram account storage quotas">
+    <div class="analytics-heading"><div><p class="card-label">Account capacity</p><h2>Telegram account limits</h2></div><span class="fine-print">Primary files and physical replicas</span></div>
+    {#if loading || !overview}<div class="skeleton" style="height:116px"></div>
+    {:else if !(overview.accounts?.length)}<p class="fine-print">No Telegram storage accounts are configured yet.</p>
+    {:else}<div class="account-quota-grid">
+      {#each overview.accounts as account (account.id)}
+        {@const unlimited = account.quota_bytes == null}
+        {@const ratio = unlimited ? 0 : Math.min(100, account.used_bytes / Math.max(account.quota_bytes ?? 0, 1) * 100)}
+        <article class="account-quota" class:full={!unlimited && account.used_bytes >= (account.quota_bytes ?? 0)}>
+          <div class="account-quota-heading"><strong>{account.label}</strong><span>{unlimited ? 'Unlimited' : `${Math.round(ratio)}% used`}</span></div>
+          <div class="account-quota-bar" aria-hidden="true"><span style={`width:${unlimited ? 0 : ratio}%`}></span></div>
+          <div class="account-quota-values"><span>{formatBytes(account.used_bytes)} used</span><strong>{unlimited ? 'Unlimited' : formatBytes(account.quota_bytes ?? 0)}</strong></div>
+          {#if !unlimited && account.used_bytes >= (account.quota_bytes ?? 0)}<small class="quota-full">Full — new files are rejected</small>{:else}<small>{account.download_enabled ? 'Receiving enabled' : 'Receiving enabled · downloads disabled'}</small>{/if}
+        </article>
+      {/each}
+    </div>{/if}
+  </section>
   <section class="layout insight-grid">
     <article class="card surface analytics-card">
       <div class="analytics-heading"><div><p class="card-label">Live queue snapshot</p><h2>Transfer pipeline</h2></div><span class:clear={transferMetrics.pending_jobs === 0 && transferMetrics.failed_jobs === 0 && transferMetrics.cleanup_due === 0 && transferMetrics.cleanup_recovery_required === 0} class="score-chip">{transferMetrics.failed_jobs || transferMetrics.cleanup_recovery_required ? 'Needs attention' : transferMetrics.pending_jobs || transferMetrics.cleanup_due ? 'In progress' : 'Clear'}</span></div>
@@ -276,6 +293,20 @@
   .overview-head h2 { margin: .25rem 0 0; }
   .analysis-grid { grid-template-columns: 1.25fr .75fr; }
   .insight-grid { grid-template-columns: 1.15fr .85fr; align-items: stretch; }
+  .account-quota-card { display: grid; gap: 18px; }
+  .account-quota-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+  .account-quota { min-width: 0; padding: 13px 14px; border: 1px solid #e1e9f0; border-radius: 12px; background: #fbfcfe; }
+  .account-quota.full { border-color: #efb3b3; background: #fff8f8; }
+  .account-quota-heading, .account-quota-values { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .account-quota-heading strong { overflow: hidden; color: #203b57; font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }
+  .account-quota-heading span, .account-quota-values span, .account-quota small { color: var(--muted); font-size: .66rem; }
+  .account-quota-values { margin-top: 8px; }
+  .account-quota-values strong { color: #203b57; font-size: .72rem; }
+  .account-quota-bar { height: 7px; margin-top: 12px; overflow: hidden; border-radius: 999px; background: #e8edf2; }
+  .account-quota-bar span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #3d8ac5, #58a37c); }
+  .account-quota.full .account-quota-bar span { background: #c35a5a; }
+  .account-quota small { display: block; margin-top: 9px; }
+  .account-quota .quota-full { color: #b24646; font-weight: 800; }
   .chart-card h2 { margin: .25rem 0 1.2rem; }
   .analytics-card, .checks-card, .posture-card { display: grid; align-content: start; gap: 18px; }
   .analytics-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
@@ -414,6 +445,7 @@
   .corrupted.attention { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); background: color-mix(in srgb, var(--danger) 5%, var(--surface)); }
   .corrupted.attention strong { color: var(--danger); }
   .card-link { margin-top: .6rem; font-size: .85rem; }
-  @media (max-width: 760px) { .analysis-grid, .insight-grid, .traffic-grid { grid-template-columns: 1fr; } .posture-card, .traffic-card, .verifier-card, .stage-metrics-card { grid-column: auto; } .posture-grid, .verifier-summary, .stage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  @media (max-width: 480px) { .metric-strip { grid-template-columns: 1fr; gap: 8px; } .posture-grid, .verifier-summary, .stage-summary { grid-template-columns: 1fr; } .traffic-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; } .traffic-label { grid-column: 1 / -1; } .traffic-meter { grid-column: 1; } }
+  @media (max-width: 1100px) { .account-quota-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (max-width: 760px) { .analysis-grid, .insight-grid, .traffic-grid { grid-template-columns: 1fr; } .posture-card, .traffic-card, .verifier-card, .stage-metrics-card { grid-column: auto; } .posture-grid, .verifier-summary, .stage-summary, .account-quota-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 480px) { .metric-strip { grid-template-columns: 1fr; gap: 8px; } .posture-grid, .verifier-summary, .stage-summary, .account-quota-grid { grid-template-columns: 1fr; } .traffic-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; } .traffic-label { grid-column: 1 / -1; } .traffic-meter { grid-column: 1; } }
 </style>

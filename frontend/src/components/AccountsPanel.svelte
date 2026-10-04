@@ -32,8 +32,9 @@
   export let onWizardClose: () => void = () => {};
   export let onRemoveConnection: (phoneConfirmation: string, deleteUploadedFiles: boolean) => Promise<void> = async () => {};
 
-  type AccountDraft = {label: string; phone: string; apiId: string; apiHash: string; sessionPath: string; storageChatId: string; proxyUrl: string; proxyUsername: string; proxyPassword: string; proxyMode: string; downloadEnabled: boolean};
-  const emptyDraft = (): AccountDraft => ({label: '', phone: '', apiId: '', apiHash: '', sessionPath: '', storageChatId: '', proxyUrl: '', proxyUsername: '', proxyPassword: '', proxyMode: 'auto', downloadEnabled: true});
+  type AccountDraft = {label: string; phone: string; apiId: string; apiHash: string; sessionPath: string; storageChatId: string; proxyUrl: string; proxyUsername: string; proxyPassword: string; proxyMode: string; downloadEnabled: boolean; quotaGiB: string; quotaUnlimited: boolean};
+  const GIB = 1024 ** 3;
+  const emptyDraft = (): AccountDraft => ({label: '', phone: '', apiId: '', apiHash: '', sessionPath: '', storageChatId: '', proxyUrl: '', proxyUsername: '', proxyPassword: '', proxyMode: 'auto', downloadEnabled: true, quotaGiB: '', quotaUnlimited: true});
   let availableBuckets: {name: string}[] = buckets;
   let accounts: AccountInfo[] = [];
   let replication: ReplicationJob[] = [];
@@ -70,7 +71,21 @@
   $: selectedHealth = overview?.telegram?.accounts?.find((account: any) => account.id === selectedAccountId);
 
   function primaryDraft(): AccountDraft {
-    return {label: accounts[0]?.label || 'Primary account', phone: telegramAccountPhone, apiId: telegramApiId, apiHash: telegramApiHash, sessionPath: '', storageChatId: telegramStorageChatId, proxyUrl: telegramProxyUrl, proxyUsername: telegramProxyUsername, proxyPassword: telegramProxyPassword, proxyMode: telegramProxyMode || 'auto', downloadEnabled: accounts[0]?.download_enabled ?? true};
+    const account = accounts[0];
+    return {label: account?.label || 'Primary account', phone: telegramAccountPhone, apiId: telegramApiId, apiHash: telegramApiHash, sessionPath: '', storageChatId: telegramStorageChatId, proxyUrl: telegramProxyUrl, proxyUsername: telegramProxyUsername, proxyPassword: telegramProxyPassword, proxyMode: telegramProxyMode || 'auto', downloadEnabled: account?.download_enabled ?? true, quotaGiB: account?.quota_bytes == null ? '' : String(account.quota_bytes / GIB), quotaUnlimited: account?.quota_bytes == null};
+  }
+
+  function accountQuotaDraft(account: AccountInfo): Pick<AccountDraft, 'quotaGiB' | 'quotaUnlimited'> {
+    return {quotaGiB: account.quota_bytes == null ? '' : String(account.quota_bytes / GIB), quotaUnlimited: account.quota_bytes == null};
+  }
+
+  function quotaBytesFromDraft() {
+    if (draft.quotaUnlimited) return null;
+    const gib = Number(draft.quotaGiB);
+    if (!Number.isFinite(gib) || gib < 0) throw new Error('Enter a non-negative quota in GiB, or select Unlimited quota.');
+    const bytes = Math.round(gib * GIB);
+    if (!Number.isSafeInteger(bytes)) throw new Error('The quota is too large.');
+    return bytes;
   }
 
   function selectAccount(account: AccountInfo | null) {
@@ -84,7 +99,7 @@
     addWizardAccountId = null;
     if (!account) draft = emptyDraft();
     else if (accounts[0]?.id === account.id) draft = primaryDraft();
-    else draft = {label: account.label, phone: account.phone || '', apiId: '', apiHash: '', sessionPath: '', storageChatId: account.storage_chat_id || '', proxyUrl: '', proxyUsername: '', proxyPassword: '', proxyMode: 'auto', downloadEnabled: account.download_enabled};
+    else draft = {label: account.label, phone: account.phone || '', apiId: '', apiHash: '', sessionPath: '', storageChatId: account.storage_chat_id || '', proxyUrl: '', proxyUsername: '', proxyPassword: '', proxyMode: 'auto', downloadEnabled: account.download_enabled, ...accountQuotaDraft(account)};
   }
 
   function markDraftDirty() { draftDirty = true; }
@@ -96,7 +111,7 @@
     loading = true;
     try {
       const [a, r, c, b] = await Promise.all([listAccounts(csrf), listReplicationJobs(csrf), listRechunkJobs(csrf), listBuckets(csrf, {page: 1, pageSize: 100})]);
-      const legacyPrimary: AccountInfo = {id: 'primary', label: 'Primary account', phone: telegramAccountPhone || null, state: overview?.telegram?.connection_state || 'configured', storage_chat_id: telegramStorageChatId || overview?.telegram?.storage_chat_id || null, replica_objects: 0, access_objects: 0, download_enabled: true, created_at: 0, updated_at: 0};
+      const legacyPrimary: AccountInfo = {id: 'primary', label: 'Primary account', phone: telegramAccountPhone || null, state: overview?.telegram?.connection_state || 'configured', storage_chat_id: telegramStorageChatId || overview?.telegram?.storage_chat_id || null, replica_objects: 0, access_objects: 0, download_enabled: true, quota_bytes: null, used_bytes: 0, created_at: 0, updated_at: 0};
       accounts = a.accounts?.length ? a.accounts : (telegramApiId || telegramStorageChatId || telegramAccountPhone ? [legacyPrimary] : []);
       replication = r.jobs; rechunk = c.jobs; availableBuckets = b.buckets;
       if (!selectionTouched && !selectedAccountId && accounts[0]) selectAccount(accounts[0]);
@@ -114,7 +129,7 @@
     busy = true; message = ''; error = '';
     try {
       if (isPrimary) applyPrimaryDraft();
-      const result = await saveAccount(csrf, {id: selectedAccountId || undefined, label: draft.label.trim(), phone: draft.phone.trim() || undefined, telegram_api_id: draft.apiId.trim() || undefined, telegram_api_hash: draft.apiHash || undefined, telegram_session_path: draft.sessionPath.trim() || undefined, telegram_storage_chat_id: draft.storageChatId.trim() || undefined, telegram_proxy_url: draft.proxyUrl.trim() || undefined, telegram_proxy_username: draft.proxyUsername.trim() || undefined, telegram_proxy_password: draft.proxyPassword || undefined, telegram_proxy_mode: draft.proxyMode, download_enabled: draft.downloadEnabled});
+      const result = await saveAccount(csrf, {id: selectedAccountId || undefined, label: draft.label.trim(), phone: draft.phone.trim() || undefined, telegram_api_id: draft.apiId.trim() || undefined, telegram_api_hash: draft.apiHash || undefined, telegram_session_path: draft.sessionPath.trim() || undefined, telegram_storage_chat_id: draft.storageChatId.trim() || undefined, telegram_proxy_url: draft.proxyUrl.trim() || undefined, telegram_proxy_username: draft.proxyUsername.trim() || undefined, telegram_proxy_password: draft.proxyPassword || undefined, telegram_proxy_mode: draft.proxyMode, download_enabled: draft.downloadEnabled, quota_bytes: quotaBytesFromDraft()});
       selectedAccountId = result.account.id; draftDirty = false;
       message = result.refresh_error ? `Account saved. Connection refresh warning: ${result.refresh_error}` : 'Account saved. Its connection policy is active immediately.';
       await refresh();
@@ -128,7 +143,7 @@
     addWizardError = '';
     addWizardMessage = '';
     try {
-      const result = await saveAccount(csrf, {label: draft.label.trim(), phone: phone.trim() || undefined, telegram_api_id: draft.apiId.trim() || undefined, telegram_api_hash: draft.apiHash || undefined, telegram_session_path: draft.sessionPath.trim() || undefined, telegram_storage_chat_id: draft.storageChatId.trim() || undefined, telegram_proxy_url: draft.proxyUrl.trim() || undefined, telegram_proxy_username: draft.proxyUsername.trim() || undefined, telegram_proxy_password: draft.proxyPassword || undefined, telegram_proxy_mode: draft.proxyMode, download_enabled: draft.downloadEnabled});
+      const result = await saveAccount(csrf, {label: draft.label.trim(), phone: phone.trim() || undefined, telegram_api_id: draft.apiId.trim() || undefined, telegram_api_hash: draft.apiHash || undefined, telegram_session_path: draft.sessionPath.trim() || undefined, telegram_storage_chat_id: draft.storageChatId.trim() || undefined, telegram_proxy_url: draft.proxyUrl.trim() || undefined, telegram_proxy_username: draft.proxyUsername.trim() || undefined, telegram_proxy_password: draft.proxyPassword || undefined, telegram_proxy_mode: draft.proxyMode, download_enabled: draft.downloadEnabled, quota_bytes: quotaBytesFromDraft()});
       addWizardAccountId = result.account.id;
       addWizardMessage = 'Connection settings saved. Telegram sign-in is ready.';
       return result.account.id;
@@ -136,6 +151,17 @@
       addWizardError = cause instanceof Error ? cause.message : 'Unable to save account';
       throw cause;
     } finally { addWizardBusy = false; }
+  }
+
+  async function savePrimaryWizard(phone?: string) {
+    await onSave();
+    if (!selectedAccountId) return;
+    await saveAccount(csrf, {
+      id: selectedAccountId,
+      label: draft.label.trim(),
+      phone: (phone ?? draft.phone).trim() || undefined,
+      quota_bytes: quotaBytesFromDraft()
+    });
   }
 
   async function finishAddWizard() {
@@ -215,20 +241,23 @@
       {#if loading}<div class="skeleton-stack"><div class="skeleton" style="height:86px"></div><div class="skeleton" style="height:86px"></div></div>{:else}<div class="account-card-grid" role="tablist" aria-label="Telegram accounts">
         {#each accounts as account, index (account.id)}
           {@const health = overview?.telegram?.accounts?.find((item: any) => item.id === account.id)}
-          <button class:chosen={selectedAccountId === account.id} class="account-card" type="button" role="tab" aria-selected={selectedAccountId === account.id} on:click={() => selectAccount(account)}><span class="account-card-top"><span class="account-icon">{account.label.slice(0, 1).toUpperCase()}</span><span class="health-dot" class:online={health?.connected} title={health?.detail || account.state}></span></span><span class="account-card-copy"><strong>{account.label}</strong>{#if index === 0}<small class="primary-tag">Primary</small>{/if}<small>{account.phone || 'Phone hidden'}</small><small>{account.download_enabled ? 'Available for downloads' : 'Download disabled'}</small></span><span class="account-card-arrow">→</span></button>
+          <button class:chosen={selectedAccountId === account.id} class="account-card" type="button" role="tab" aria-selected={selectedAccountId === account.id} on:click={() => selectAccount(account)}><span class="account-card-top"><span class="account-icon">{account.label.slice(0, 1).toUpperCase()}</span><span class="health-dot" class:online={health?.connected} title={health?.detail || account.state}></span></span><span class="account-card-copy"><strong>{account.label}</strong>{#if index === 0}<small class="primary-tag">Primary</small>{/if}<small>{account.phone || 'Phone hidden'}</small><small>{account.download_enabled ? 'Available for downloads' : 'Download disabled'}</small><small>{account.quota_bytes == null ? 'Unlimited storage' : `${formatBytes(account.used_bytes)} / ${formatBytes(account.quota_bytes)}`}</small></span><span class="account-card-arrow">→</span></button>
         {/each}
         <button class="account-card add-card" type="button" role="tab" aria-selected={isAdding} on:click={() => selectAccount(null)}><span class="add-mark">＋</span><span><strong>Add account</strong><small>Register another Telegram transport</small></span></button>
       </div>{/if}
     </section>
 
     {#if addWizard && wizardComponent && isAdding}
+      <section class="card surface quota-editor" aria-label="New account storage quota"><div><p class="card-label">Storage quota</p><h3>Limit this account's stored files</h3><p class="fine-print">Usage includes committed primary files and ready physical replicas owned by this account. Leave it unlimited if no cap is required.</p></div><div class="quota-form"><label>Quota (GiB)<input type="number" min="0" step="any" bind:value={draft.quotaGiB} disabled={draft.quotaUnlimited} on:input={markDraftDirty} placeholder="e.g. 50" /></label><label class="download-policy"><input type="checkbox" bind:checked={draft.quotaUnlimited} on:change={markDraftDirty}/><span><strong>Unlimited quota</strong><small>Allow this account to receive files without a storage cap.</small></span></label></div></section>
       <svelte:component this={wizardComponent} csrf={session?.csrf_token} bind:accountLabel={draft.label} showAccountLabel={true} wizardTitle="Add another Telegram account" wizardSubtitle="Create an isolated Telegram connection without changing your primary account." bind:telegramApiId={draft.apiId} bind:telegramApiHash={draft.apiHash} bind:telegramStorageChatId={draft.storageChatId} bind:telegramProxyUrl={draft.proxyUrl} bind:telegramProxyUsername={draft.proxyUsername} bind:telegramProxyPassword={draft.proxyPassword} bind:telegramProxyMode={draft.proxyMode} settingsBusy={addWizardBusy} settingsError={addWizardError} settingsMessage={addWizardMessage} onSave={saveAddWizard} onDone={finishAddWizard} onClose={closeAddWizard}/>
     {:else if showWizard && wizardComponent && isPrimary}
-      <svelte:component this={wizardComponent} csrf={session?.csrf_token} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode {settingsBusy} {settingsError} {settingsMessage} {onSave} onDone={onWizardDone} onClose={onWizardClose}/>
+      <section class="card surface quota-editor" aria-label="Primary account storage quota"><div><p class="card-label">Storage quota</p><h3>Limit this account's stored files</h3><p class="fine-print">Usage includes committed primary files and ready physical replicas owned by this account. Leave it unlimited if no cap is required.</p></div><div class="quota-form"><label>Quota (GiB)<input type="number" min="0" step="any" bind:value={draft.quotaGiB} disabled={draft.quotaUnlimited} on:input={markDraftDirty} placeholder="e.g. 50" /></label><label class="download-policy"><input type="checkbox" bind:checked={draft.quotaUnlimited} on:change={markDraftDirty}/><span><strong>Unlimited quota</strong><small>Allow this account to receive files without a storage cap.</small></span></label></div></section>
+      <svelte:component this={wizardComponent} csrf={session?.csrf_token} bind:telegramApiId bind:telegramApiHash bind:telegramStorageChatId bind:telegramProxyUrl bind:telegramProxyUsername bind:telegramProxyPassword bind:telegramProxyMode {settingsBusy} {settingsError} {settingsMessage} onSave={savePrimaryWizard} onDone={onWizardDone} onClose={onWizardClose}/>
     {:else}
       <section class="card surface editor-card" aria-label={isAdding ? 'Add account' : `Edit ${selectedAccount?.label ?? 'account'}`}>
         <div class="section-head"><div><p class="card-label">{isAdding ? 'New account' : 'Account editor'}</p><h2>{isAdding ? 'Add a Telegram account' : isPrimary ? 'Your storage connection, beautifully in sync.' : `Edit ${selectedAccount?.label}`}</h2><p class="fine-print">{isAdding ? 'Use a separate authorized session file when adding the same Telegram account again.' : 'The same form is used for creating and changing every account. Leave secret fields blank to keep the stored value.'}</p></div>{#if isPrimary}<button class="ghost" type="button" on:click={() => onToggleWizard(true)}>Edit account setup <span aria-hidden="true">→</span></button>{/if}</div>
         <div class="form-grid"><label>Account label<input bind:value={draft.label} on:input={markDraftDirty} placeholder="Primary account" /></label><label>Phone (optional)<input bind:value={draft.phone} on:input={markDraftDirty} placeholder="+989…" /></label><label>Telegram API ID<input bind:value={draft.apiId} on:input={markDraftDirty} inputmode="numeric" placeholder={isAdding ? '123456' : 'Leave unchanged'} /></label><label>Telegram API hash<input bind:value={draft.apiHash} on:input={markDraftDirty} type="password" placeholder={isAdding ? 'Application hash' : 'Leave unchanged'} /></label><label>Session file<input bind:value={draft.sessionPath} on:input={markDraftDirty} placeholder={isAdding ? 'data/telegram-account-2.session' : 'Leave unchanged'} /></label><label>Storage chat ID<input bind:value={draft.storageChatId} on:input={markDraftDirty} placeholder={isAdding ? '-100…' : 'Leave unchanged'} /></label><label>Proxy URL<input bind:value={draft.proxyUrl} on:input={markDraftDirty} placeholder="socks5://127.0.0.1:12334" /></label><label>Proxy mode<select bind:value={draft.proxyMode} on:change={markDraftDirty}><option value="auto">Automatic</option><option value="socks5">SOCKS5</option><option value="disabled">Direct / disabled</option></select></label><label>Proxy username<input bind:value={draft.proxyUsername} on:input={markDraftDirty} placeholder="Optional" /></label><label>Proxy password<input bind:value={draft.proxyPassword} on:input={markDraftDirty} type="password" placeholder="Optional" /></label></div>
+        <div class="quota-editor-inline"><label>Quota (GiB)<input type="number" min="0" step="any" bind:value={draft.quotaGiB} disabled={draft.quotaUnlimited} on:input={markDraftDirty} placeholder="e.g. 50" /></label><label class="download-policy"><input type="checkbox" bind:checked={draft.quotaUnlimited} on:change={markDraftDirty}/><span><strong>Unlimited quota</strong><small>Allow this account to receive files without a storage cap.</small></span></label></div>
         <label class="download-policy"><input type="checkbox" bind:checked={draft.downloadEnabled} on:change={markDraftDirty}/><span><strong>Use this account for downloads</strong><small>Turn this off to keep the account available for ownership and cleanup while reads use other replicas.</small></span></label>
         {#if settingsMessage || settingsError}<div class:message-error={Boolean(settingsError)} class="editor-message" role={settingsError ? 'alert' : 'status'}>{settingsError || settingsMessage}</div>{/if}
         <div class="editor-actions"><span class="fine-print">{isPrimary ? 'Primary setup and authorization remain available above.' : 'Credentials are preserved when an edit leaves secret fields blank.'}</span><div>{#if isPrimary}<button class="ghost" type="button" on:click={onManageOperators}>Manage operators</button><button class="ghost danger" type="button" on:click={openRemoval} disabled={busy || !draft.phone.trim()}>Remove connection</button>{/if}<button class="primary" type="button" on:click={saveEditor} disabled={busy || !draft.label.trim() || (!selectedAccount && (!draft.apiId.trim() || !draft.apiHash.trim() || !draft.storageChatId.trim()))}>{busy ? 'Saving…' : isAdding ? 'Add account' : 'Save changes'}</button>{#if selectedAccount && !isPrimary}<button class="ghost danger" type="button" on:click={() => removeAccount(selectedAccount)} disabled={busy}>Remove account</button>{/if}</div></div>
@@ -584,6 +613,38 @@
     min-width: 0;
   }
 
+  .quota-editor,
+  .quota-editor-inline {
+    display: grid;
+    gap: 14px;
+  }
+
+  .quota-editor {
+    padding: 20px 22px;
+  }
+
+  .quota-editor h3 {
+    margin: 0.25rem 0 0.35rem;
+    color: #17345a;
+  }
+
+  .quota-form,
+  .quota-editor-inline {
+    grid-template-columns: minmax(180px, 260px) minmax(260px, 1fr);
+    align-items: end;
+  }
+
+  .quota-editor input[type='number'],
+  .quota-editor-inline input[type='number'] {
+    max-width: 260px;
+  }
+
+  .quota-editor input:disabled,
+  .quota-editor-inline input:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
   .download-policy {
     display: flex;
     align-items: flex-start;
@@ -739,6 +800,8 @@
     }
 
     .form-grid,
+    .quota-form,
+    .quota-editor-inline,
     .job-row {
       grid-template-columns: 1fr;
     }

@@ -256,6 +256,7 @@ export function saveAccount(csrf: string | null | undefined, body: {
   telegram_storage_chat_id?: string; telegram_proxy_url?: string;
   telegram_proxy_username?: string; telegram_proxy_password?: string;
   telegram_proxy_mode?: string; download_enabled?: boolean;
+  quota_bytes?: number | null;
 }) {
   return requestJson<{account: AccountInfo; refresh_error?: string | null}>('/accounts', csrf, {method: 'POST', body});
 }

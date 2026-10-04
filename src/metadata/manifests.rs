@@ -261,6 +261,25 @@ impl MetadataStore {
                 }
             }
             let completion_job = transfer.map(|(job_id, _)| job_id).unwrap_or(&journal.object_id);
+            let is_multipart_part: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM multipart_jobs WHERE job_id=?1 AND part_number>0)",
+                [completion_job],
+                |r| r.get(0),
+            )?;
+            if !is_multipart_part {
+                let account_id: String = tx.query_row(
+                    "SELECT connection_id FROM object_manifests WHERE object_id=?1",
+                    [&journal.object_id],
+                    |row| row.get(0),
+                )?;
+                super::accounts::enforce_account_quota_in_transaction(
+                    &tx,
+                    &account_id,
+                    &manifest.bucket,
+                    &manifest.key,
+                    manifest.content_length,
+                )?;
+            }
             let completion: Option<String> = tx.query_row(
                 "SELECT upload_id FROM multipart_jobs WHERE job_id=?1 AND part_number=0",
                 [completion_job],

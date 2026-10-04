@@ -435,6 +435,10 @@ Multi-user boundary for the next increment:
 - [x] Fixed access-replica reads to resolve the persisted source peer together
   with each Telegram message ID across public, admin, range, prefetch, failover,
   verifier, and replication-read paths; added a disabled-primary regression.
+- [x] Added schema v25 per-account byte quotas with explicit unlimited mode,
+  derived usage for committed primaries and ready physical replicas, admission
+  and commit-time enforcement across admin/resumable/S3 receives, visible
+  capacity cards on Overview, and browser/Rust regression coverage.
 
 Remaining Phase 10 work:
 

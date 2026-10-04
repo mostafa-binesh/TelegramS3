@@ -20,7 +20,7 @@ use crate::config::{
 };
 use crate::manifest::{ObjectManifest, ReplicaMode, TelegramLocation};
 use crate::metadata::{
-    MetadataStore, RecoveryAck, RecoveryAcknowledgements, TelegramBootstrapSettings,
+    MetadataError, MetadataStore, RecoveryAck, RecoveryAcknowledgements, TelegramBootstrapSettings,
 };
 use crate::object_format::{
     ObjectFormatError, ObjectFormatService, RecoveryIssue as RecoveryIssueModel,
@@ -259,6 +259,8 @@ struct AccountRequest {
     telegram_proxy_password: Option<String>,
     telegram_proxy_mode: Option<String>,
     download_enabled: Option<bool>,
+    #[serde(default)]
+    quota_bytes: Option<Option<u64>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -813,6 +815,14 @@ impl AdminUiState {
                 "account label must be 1-120 characters",
             );
         }
+        if body
+            .quota_bytes
+            .as_ref()
+            .and_then(|value| value.as_ref())
+            .is_some_and(|value| i64::try_from(*value).is_err())
+        {
+            return json_error(StatusCode::BAD_REQUEST, "account quota is too large");
+        }
         match self.store().upsert_telegram_account(
             body.id.as_deref(),
             body.label.trim(),
@@ -823,6 +833,7 @@ impl AdminUiState {
                     .and_then(|(account, _)| account.phone.as_deref())
             }),
             body.download_enabled,
+            body.quota_bytes,
         ) {
             Ok(account) => {
                 let active = self.store().active_connection_id().ok().flatten();
@@ -1894,6 +1905,9 @@ impl AdminUiState {
         {
             Ok(manifest) => manifest,
             Err(error) => {
+                if let ObjectFormatError::Metadata(MetadataError::QuotaExceeded(message)) = &error {
+                    return json_error(StatusCode::INSUFFICIENT_STORAGE, message);
+                }
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
             }
         };
@@ -3205,6 +3219,9 @@ impl AdminUiState {
         {
             Ok(manifest) => manifest,
             Err(error) => {
+                if let ObjectFormatError::Metadata(MetadataError::QuotaExceeded(message)) = &error {
+                    return json_error(StatusCode::INSUFFICIENT_STORAGE, message);
+                }
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
             }
         };
@@ -3338,6 +3355,11 @@ impl AdminUiState {
         object.insert(
             "verifier".into(),
             serde_json::to_value(verifier).unwrap_or_default(),
+        );
+        object.insert(
+            "accounts".into(),
+            serde_json::to_value(self.store().list_telegram_accounts().unwrap_or_default())
+                .unwrap_or_default(),
         );
         json_response(StatusCode::OK, payload)
     }

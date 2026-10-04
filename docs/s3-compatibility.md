@@ -45,7 +45,7 @@ check does not affect S3 object access.
 | Retention/object lock | compatibility gap | none yet | Requires additional metadata and enforcement | Telegram cannot enforce S3 locks | 6 |
 | Event notifications | compatibility gap | none yet | Eventing is an upper layer concern | Telegram is not the notifier | 6 |
 | Encryption | implemented | cargo test | Adapter-bound envelope encryption is keyed from `TELEGRAM_S3_MASTER_KEY` and recorded in manifests | Range semantics are bounded by chunk decrypt/read | 6 |
-| Quotas | compatibility gap | none yet | Can be tracked locally | Telegram storage quotas are external | 6 |
+| Quotas | implemented | cargo test / Playwright | Per-Telegram-account byte limits are configurable from the admin account editor; `null` means unlimited. Usage is derived from committed primary objects and ready physical replicas, and full accounts reject admin/resumable receives with HTTP 507 and S3 receives with `EntityTooLarge`; commit-time enforcement closes races | Telegram's own remote limits and protocol overhead remain external; access-only locations do not consume quota | 11 |
 | Metrics/health | implemented | cargo test / Playwright | Loopback-only `/healthz` and `/metrics` endpoints report bootstrap and recovery state; the authenticated Overview caches manifest-derived counts and uses a cheap `/overview/live` payload for five-second transfer, traffic, stage, and connection refreshes; verifier duration and cleanup-state metrics are visible to operators | Admin traffic stays off the S3 listener; Overview storage values may be up to five seconds old | 6 |
 
 ## Operator UI
@@ -100,6 +100,17 @@ label on hover.
 The Accounts/Connections panel performs one initial account state load and
 refreshes account data only when the operator clicks its explicit refresh
 button; it does not poll the account list in the background.
+
+Each registered Telegram account also has a nullable `quota_bytes` policy.
+The Connections editor accepts a quota in GiB or **Unlimited**, while Overview
+shows every account's used/limit pair in a five-column desktop grid. Usage is
+not a mutable counter: it is rebuilt from committed primary manifests owned by
+the account plus ready physical replica chunk locations. Access-only locations
+are metadata pointers and add no bytes. A full account is rejected before a
+new receive begins, rechecked before Telegram publication, and checked again
+inside the manifest-commit transaction. Replacing an existing key consumes
+only the positive size delta. The error is preserved in the durable transfer
+record and returned to the admin UI; S3 maps it to `EntityTooLarge`.
 
 An expired admin session is treated as an authentication state transition: the
 SPA refreshes `/session` after a `401` and returns the operator to login. It

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 24;
+const SCHEMA_VERSION: u32 = 25;
 
 #[derive(Debug, Error)]
 pub enum MetadataError {
@@ -38,6 +38,8 @@ pub enum MetadataError {
     FolderNotEmpty(String),
     #[error("a connection removal is already in progress")]
     ConnectionRemovalInProgress,
+    #[error("account quota exceeded: {0}")]
+    QuotaExceeded(String),
     #[error("metadata state is poisoned")]
     Poisoned,
     #[error("time formatting error: {0}")]

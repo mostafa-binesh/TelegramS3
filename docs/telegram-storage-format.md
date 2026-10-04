@@ -48,7 +48,8 @@ Each object is represented by:
 3. a local index row and journal entry
 4. optional multipart session and part rows while an upload is in progress
 
-Schema v21 additionally stores an account registry, durable replication jobs,
+The current schema (v25, through additive migrations from v21-v24) stores an
+account registry, durable replication jobs,
 selected-object replication scopes, replica/access locations, and re-chunk
 locks/jobs. Account rows include `download_enabled`, an additive read-selection
 policy that defaults to enabled for existing data. The `object_keys_json` migration is additive: an empty array keeps
@@ -70,6 +71,17 @@ The verifier also stores a durable integrity event for each sampled account and
 chunk. Events retain the account label, failure details, and repair state across
 restarts without changing the manifest's committed state when only an alternate
 replica is affected.
+
+Account rows also store nullable `quota_bytes`; `NULL` is the explicit unlimited
+mode. `used_bytes` is intentionally derived for API responses and enforcement,
+not persisted as a mutable counter: committed active manifests whose
+`connection_id` owns the primary are summed by content length, and ready
+`replica` locations are summed by their referenced manifest chunk size.
+`access` locations are excluded because they do not create another physical
+copy. New receives perform a capacity admission check, publication performs a
+second check before any remote send, and the committed-manifest transaction
+performs the authoritative final check. This leaves failed over-quota receives
+in a recoverable local terminal state without publishing a new object.
 
 Verifier scans emit start/end or failure log records and maintain process-local
 run, failure, timestamp, and duration metrics for the operator Overview. These

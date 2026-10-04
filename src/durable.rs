@@ -529,6 +529,30 @@ impl MetadataStore {
         })
     }
 
+    /// Reject a queued transfer before its worker can send any staged payload
+    /// to Telegram. The local reception is terminal and can be discarded by
+    /// the normal staging cleanup worker.
+    pub(crate) fn reject_transfer_for_quota(
+        &self,
+        id: &str,
+        message: &str,
+    ) -> Result<bool, MetadataError> {
+        self.with_connection(|c| {
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let changed = tx.execute(
+                "UPDATE transfer_jobs SET state='reception_failed',bytes=0,lease=NULL,lease_until=0,error=?2,updated_at=?3 WHERE id=?1 AND state IN ('uploading','committing')",
+                params![id, message, now()],
+            )? == 1;
+            if changed {
+                tx.execute("DELETE FROM recovery_markers WHERE object_id=?1", [id])?;
+                tx.execute("DELETE FROM operation_journal WHERE object_id=?1 AND state='staging'", [id])?;
+                tx.execute("DELETE FROM object_manifests WHERE object_id=?1 AND commit_state='staging'", [id])?;
+            }
+            tx.commit()?;
+            Ok(changed)
+        })
+    }
+
     pub(crate) fn multipart_job(&self, id: &str) -> Result<Option<(String, u32)>, MetadataError> {
         self.with_connection(|c| {
             Ok(c.query_row(

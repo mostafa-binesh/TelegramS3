@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.1-rc.1 - 2026-10-04
+
+### Per-account storage quotas
+
+- Add nullable per-Telegram-account byte quotas with an explicit unlimited mode
+  to account creation and editing.
+- Derive account usage from committed primary objects and ready physical
+  replicas, expose limits and usage on Overview, and render five accounts per
+  desktop row with responsive layouts.
+- Reject full accounts across admin uploads, resumable browser reception,
+  multipart/S3 receives, and physical replication; preserve the capacity error
+  in durable transfer state and recheck quota at manifest commit.
+- Add schema v25 migration, Rust quota coverage, Playwright coverage, and
+  recovery/compatibility documentation.
+
 ## 1.0.0 - 2026-10-04
 
 ### Stable release

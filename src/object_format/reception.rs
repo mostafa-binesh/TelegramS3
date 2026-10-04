@@ -41,6 +41,7 @@ impl ObjectFormatService {
         expires_at: Option<OffsetDateTime>,
     ) -> Result<ReceptionStatus, ObjectFormatError> {
         self.ensure_connection_not_removing()?;
+        self.ensure_quota_available()?;
         let object_id = Uuid::new_v4();
         let chunk_size = self.chunk_size();
         let id = self.metadata.begin_transfer(object_id, bucket, key)?;

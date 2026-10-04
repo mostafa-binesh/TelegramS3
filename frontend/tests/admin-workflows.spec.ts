@@ -29,6 +29,20 @@ const overview = {
     recovery_required_objects: 0,
     telegram_files_bytes: 128 * 1024 * 1024
   },
+  accounts: Array.from({ length: 6 }, (_, index) => ({
+    id: `account-${index + 1}`,
+    label: `Storage account ${index + 1}`,
+    phone: `+100${index}`,
+    state: 'connected',
+    storage_chat_id: `-100${index + 1}`,
+    replica_objects: 0,
+    access_objects: 0,
+    download_enabled: true,
+    quota_bytes: 10 * 1024 ** 3,
+    used_bytes: (index + 1) * 1024 ** 3,
+    created_at: index + 1,
+    updated_at: index + 1
+  })),
   recovery: { issue_count: 0, unacknowledged_count: 0, scan_ok: true, issues: [] },
   verifier: {
     enabled: true,
@@ -60,6 +74,7 @@ type MockOptions = {
   activeUploadPartsDone?: number;
   activeUploadPartsTotal?: number;
   multipartFailureAfterInitial?: boolean;
+  quotaFailure?: boolean;
 };
 
 async function mockAdminApi(page: Page, options: MockOptions = {}) {
@@ -319,7 +334,10 @@ async function mockAdminApi(page: Page, options: MockOptions = {}) {
     }
     if (path === '/jobs' && request.method() === 'GET') return route.fulfill({ json: { jobs: [], next_offset: null } });
     if (path === '/jobs/job-upload' && request.method() === 'GET') return route.fulfill({ json: { id: 'job-upload', object_id: 'object-upload', operation_id: 'operation-upload', bucket: 'release-test', key: 'upload.txt', state: 'completed', bytes: 1, chunks_done: 1, chunks_total: 1, attempts: 1, next_retry: 0, created_at: 1_767_000_000, updated_at: 1_767_000_001 } });
-    if (path === '/uploads/resumable' && request.method() === 'POST') return route.fulfill({ json: { id: 'reception-1', chunk_size: 1, received: 0 } });
+    if (path === '/uploads/resumable' && request.method() === 'POST') {
+      if (options.quotaFailure) return route.fulfill({ status: 507, json: { error: 'account quota exceeded: Storage account 1 is full' } });
+      return route.fulfill({ json: { id: 'reception-1', chunk_size: 1, received: 0 } });
+    }
     if (path === '/uploads/resumable/reception-1' && request.method() === 'PATCH') return route.fulfill({ json: { received: 1 } });
     if (path === '/uploads/resumable/reception-1/complete' && request.method() === 'POST') return route.fulfill({ json: { job_id: 'job-upload' } });
     if (path === '/uploads/resumable/reception-1' && request.method() === 'DELETE') return route.fulfill({ json: { ok: true } });
@@ -779,6 +797,25 @@ test('upload modal sends the selected object expiry through the resumable upload
   ]);
   expect(beginRequest.postDataJSON()).toMatchObject({ bucket: 'release-test', key: 'upload.txt', expires_in_seconds: 30 });
   await expect(page.getByText('completed')).toBeVisible();
+});
+
+test('overview shows account quotas five per desktop row and upload reports quota errors', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockAdminApi(page, { quotaFailure: true });
+  await signIn(page);
+  const quotaCards = page.locator('.account-quota-grid .account-quota');
+  await expect(quotaCards).toHaveCount(6);
+  const firstRow = await Promise.all([0, 1, 2, 3, 4].map((index) => quotaCards.nth(index).boundingBox()));
+  const secondRow = await quotaCards.nth(5).boundingBox();
+  expect(firstRow.every((box) => box && Math.abs(box.y - firstRow[0]!.y) < 2)).toBe(true);
+  expect(secondRow).not.toBeNull();
+  expect(secondRow!.y).toBeGreaterThan(firstRow[0]!.y);
+
+  await openBucket(page);
+  await page.getByRole('button', { name: 'Upload' }).click();
+  await page.locator('input[type="file"]').setInputFiles({ name: 'quota-blocked.txt', mimeType: 'text/plain', buffer: Buffer.from('x') });
+  await page.getByRole('button', { name: 'Upload 1' }).click();
+  await expect(page.getByText(/quota exceeded/i)).toBeVisible();
 });
 
 test('storage policy tab loads, applies MiB to bytes, and reports a save failure', async ({ page }) => {

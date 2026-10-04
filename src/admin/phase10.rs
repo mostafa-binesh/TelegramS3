@@ -224,6 +224,9 @@ impl AdminUiState {
                         crate::metadata::MetadataError::BucketNotFound(_),
                     ) => (StatusCode::NOT_FOUND, "bucket not found"),
                     crate::object_format::ObjectFormatError::Metadata(
+                        crate::metadata::MetadataError::QuotaExceeded(message),
+                    ) => (StatusCode::INSUFFICIENT_STORAGE, message.as_str()),
+                    crate::object_format::ObjectFormatError::Metadata(
                         crate::metadata::MetadataError::InvalidManifest(m),
                     ) if m.contains("capacity") => (
                         StatusCode::INSUFFICIENT_STORAGE,
@@ -386,6 +389,9 @@ fn resumable_error_response(error: &crate::object_format::ObjectFormatError) -> 
         crate::object_format::ObjectFormatError::Metadata(
             crate::metadata::MetadataError::BucketNotFound(_),
         ) => json_error(StatusCode::NOT_FOUND, "bucket not found"),
+        crate::object_format::ObjectFormatError::Metadata(
+            crate::metadata::MetadataError::QuotaExceeded(message),
+        ) => json_error(StatusCode::INSUFFICIENT_STORAGE, message),
         crate::object_format::ObjectFormatError::Metadata(
             crate::metadata::MetadataError::InvalidManifest(message),
         ) if message.contains("capacity") => json_error(

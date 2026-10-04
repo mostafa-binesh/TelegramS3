@@ -68,6 +68,7 @@ impl ObjectFormatService {
         expires_at: Option<OffsetDateTime>,
     ) -> Result<TransferJob, ObjectFormatError> {
         self.ensure_connection_not_removing()?;
+        self.ensure_quota_available()?;
         self.enqueue_with_part(
             bucket,
             key,
@@ -766,6 +767,23 @@ impl ObjectFormatService {
             .iter()
             .map(|manifest| manifest.chunks.len() as u64)
             .sum();
+        if job.access_mode == "replica" {
+            let additional_bytes = manifests
+                .iter()
+                .flat_map(|manifest| manifest.chunks.iter())
+                .filter(|chunk| {
+                    !chunk.replicas.iter().any(|replica| {
+                        replica.account_id == job.target_account_id
+                            && replica.mode == ReplicaMode::Replica
+                    })
+                })
+                .map(|chunk| chunk.size)
+                .sum();
+            self.metadata.ensure_account_quota_for_additional_bytes(
+                &job.target_account_id,
+                additional_bytes,
+            )?;
+        }
         self.metadata
             .update_replication_progress(&job.id, objects_total, 0, chunks_total, 0, 0)?;
         let target_manager = if job.access_mode == "replica" {
@@ -1280,6 +1298,26 @@ impl ObjectFormatService {
             .metadata
             .get_manifest(object_id)?
             .ok_or_else(|| ObjectFormatError::InvalidPlan("staged manifest missing".into()))?;
+        let is_multipart_part = self
+            .metadata
+            .multipart_job(&job.id)?
+            .is_some_and(|(_, number)| number > 0);
+        if !is_multipart_part {
+            match self.metadata.ensure_account_quota_for_object(
+                &job.connection_id,
+                &manifest.bucket,
+                &manifest.key,
+                manifest.content_length,
+            ) {
+                Ok(()) => {}
+                Err(error @ MetadataError::QuotaExceeded(_)) => {
+                    let message = error.to_string();
+                    let _ = self.metadata.reject_transfer_for_quota(&job.id, &message);
+                    return Err(ObjectFormatError::Metadata(error));
+                }
+                Err(error) => return Err(ObjectFormatError::Metadata(error)),
+            }
+        }
         let dir = self.staging_dir(operation);
         let lease = job.lease.as_deref().unwrap_or("");
         let pending =

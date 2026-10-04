@@ -99,6 +99,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
         ensure_traffic_totals_schema(connection)?;
         ensure_multi_account_schema(connection)?;
         ensure_account_download_policy(connection)?;
+        ensure_account_quota_schema(connection)?;
         ensure_replication_scope_schema(connection)?;
         ensure_rechunk_replica_schema(connection)?;
         ensure_integrity_recovery_events_schema(connection)?;
@@ -378,6 +379,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), MetadataError> {
     ensure_traffic_totals_schema(connection)?;
     ensure_multi_account_schema(connection)?;
     ensure_account_download_policy(connection)?;
+    ensure_account_quota_schema(connection)?;
     ensure_replication_scope_schema(connection)?;
     ensure_rechunk_replica_schema(connection)?;
     ensure_integrity_recovery_events_schema(connection)?;
@@ -540,6 +542,24 @@ fn ensure_account_download_policy(connection: &mut Connection) -> Result<(), Met
     if !has_column {
         connection.execute(
             "ALTER TABLE telegram_accounts ADD COLUMN download_enabled INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Account quotas are nullable so an account can explicitly remain unlimited.
+/// Usage is derived from committed active manifests and ready physical replica
+/// locations; no mutable counter can drift away from the durable object index.
+fn ensure_account_quota_schema(connection: &mut Connection) -> Result<(), MetadataError> {
+    let has_column: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('telegram_accounts') WHERE name='quota_bytes')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_column {
+        connection.execute(
+            "ALTER TABLE telegram_accounts ADD COLUMN quota_bytes INTEGER",
             [],
         )?;
     }

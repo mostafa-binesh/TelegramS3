@@ -2,14 +2,15 @@
 
 ## Local Metadata Lost
 
-Schema v20 account, scoped-replication, maintenance, download-failover, and
-integrity-event rows
+Schema v25 account, scoped-replication, maintenance, download-failover,
+integrity-event, and account-quota rows
 are part of the
 recovery boundary.
 Back up `metadata.sqlite` before adding or scheduling replication. Restoring
 the database restores account definitions, replica/access maps, pending job
 progress, re-chunk replica policy/target snapshots, re-chunk locks, and durable
-per-account integrity findings; queued
+per-account integrity findings, quota limits, and derived usage after index
+rebuild; queued
 workers resume after restart. Inspect
 failed replication or re-chunk jobs before retrying them. An access-only record
 is not a second copy: it is recoverable only while the target session can read
@@ -26,6 +27,13 @@ checks rather than relying only on the pool being able to open a connection.
 The Accounts/Connections view loads this restored account state on entry and
 has an explicit refresh action; it does not continuously poll account metadata
 while the page is open.
+Quota usage is rebuilt from the restored active-object index and manifest
+content lengths, plus ready physical replica locations. It is not restored from
+a counter. A `NULL` account quota remains unlimited; an account at its limit
+rejects new admin/resumable/S3 receives, while access-only locations do not
+increase usage. A receive rejected after local staging is marked
+`reception_failed` and its staged files are eligible for ordinary local cleanup;
+no new Telegram payload is published for that rejection.
 The Profile page changes only the operator row in this same database. A display
 name is restored with the user record, while a password is stored only as an
 Argon2id hash; changing it requires the current password, then advances the

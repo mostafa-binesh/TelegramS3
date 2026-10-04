@@ -2255,6 +2255,7 @@ impl ObjectFormatService {
                 "bucket does not exist: {bucket}"
             )));
         }
+        self.ensure_quota_available()?;
         let upload_id = Uuid::new_v4();
         let session = MultipartSession {
             upload_id,
@@ -2304,6 +2305,12 @@ impl ObjectFormatService {
                 "multipart upload is not active: {upload_id}"
             )));
         }
+
+        // A multipart session can outlive another upload that consumes the
+        // remaining capacity, so check again immediately before receiving a
+        // part. The final composed object is checked transactionally at
+        // completion as well.
+        self.ensure_quota_available()?;
 
         if let Some(existing) = self
             .metadata
@@ -4499,6 +4506,14 @@ impl ObjectFormatService {
         Ok(())
     }
 
+    fn ensure_quota_available(&self) -> Result<(), ObjectFormatError> {
+        if let Some(account_id) = self.metadata.active_connection_id()? {
+            self.metadata
+                .ensure_account_quota_for_additional_bytes(&account_id, 1)?;
+        }
+        Ok(())
+    }
+
     fn multipart_dir(&self, upload_id: Uuid) -> PathBuf {
         self.data_dir
             .join(MULTIPART_ROOT)
@@ -5940,6 +5955,7 @@ mod tests {
                 &primary_settings,
                 primary.phone.as_deref(),
                 Some(false),
+                None,
             )
             .expect("disable primary downloads");
 
@@ -5954,6 +5970,7 @@ mod tests {
                 &replica_settings,
                 primary.phone.as_deref(),
                 Some(true),
+                None,
             )
             .expect("access replica account");
 
@@ -6805,6 +6822,7 @@ mod tests {
                 &account_settings,
                 None,
                 Some(true),
+                None,
             )
             .expect("replica account");
         let manifest = service

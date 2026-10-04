@@ -1530,6 +1530,9 @@ fn map_object_error(error: crate::object_format::ObjectFormatError) -> s3s::S3Er
         crate::object_format::ObjectFormatError::Metadata(
             crate::metadata::MetadataError::PreconditionFailed(message),
         ) => s3s::S3Error::with_message(S3ErrorCode::PreconditionFailed, message),
+        crate::object_format::ObjectFormatError::Metadata(
+            crate::metadata::MetadataError::QuotaExceeded(message),
+        ) => s3s::S3Error::with_message(S3ErrorCode::EntityTooLarge, message),
         other => s3s::S3Error::with_message(S3ErrorCode::InternalError, other.to_string()),
     }
 }

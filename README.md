@@ -163,6 +163,13 @@ staging, and recovery artifacts, not committed payloads.
   read carries the persisted Telegram peer and message ID for its selected
   location, which is required when an access replica reads from a shared chat
   different from the selected account's configured storage chat.
+- **Per-account storage quotas** — every Telegram storage account can have a
+  persisted byte limit or remain unlimited. Quota usage is derived from
+  committed primary objects and ready physical replicas, shown on Overview in
+  five-column account cards, and enforced before receiving plus again at
+  transactional commit. A full account rejects admin, resumable, and S3
+  receives with an explicit capacity error; access-only locations do not
+  consume quota.
 - Automatic physical replication reuses existing encrypted chunk messages when
   the source and target connections use the same Telegram storage chat. This
   records a new account location without downloading or uploading the chunk;
@@ -188,7 +195,8 @@ staging, and recovery artifacts, not committed payloads.
 Everything described in [Features](#features) is live and smoke-tested against a
 standard S3 client. Beyond the core CRUD path, that includes multipart sessions,
 byte-range reads, conditional requests, version-aware listings and delete
-markers, checksum enforcement, and retention-aware garbage collection.
+markers, checksum enforcement, per-account storage quotas with unlimited
+support, and retention-aware garbage collection.
 
 Modern S3 semantics that can't be honored over the current store are not
 silently emulated — known constraints are documented in
@@ -484,8 +492,9 @@ Implemented operations include bucket create/delete/list/head, object
 put/get/head/delete/list-v1/list-v2/copy, byte-range GET, multipart
 initiate/upload/complete/abort/list, conditional requests, versioning with
 delete markers, and checksum enforcement. Presigned URLs, batch delete, bucket
-policies, object tags, retention/object lock, event notifications, and quotas
-are documented **gaps** — they are not silently emulated. Capability share
+policies, object tags, retention/object lock, and event notifications are
+documented **gaps** — they are not silently emulated. Per-account storage
+quotas are implemented locally with explicit unlimited support. Capability share
 links are available through the admin panel, but AWS SigV4 presigned URLs
 remain unsupported. The authoritative,
 per-operation matrix is [docs/s3-compatibility.md](docs/s3-compatibility.md).

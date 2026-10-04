@@ -308,6 +308,7 @@ export interface OverviewState {
   stage_metrics?: DownloadStageMetrics;
   recovery?: RecoveryState;
   verifier?: VerifierState;
+  accounts?: AccountInfo[];
   telegram?: {
     session_state: string;
     connection_state: string;
@@ -427,6 +428,8 @@ export interface AccountInfo {
   replica_objects: number;
   access_objects: number;
   download_enabled: boolean;
+  quota_bytes: number | null;
+  used_bytes: number;
   created_at: number;
   updated_at: number;
 }
