@@ -1,7 +1,23 @@
-# Telegram S3
+<p align="center">
+  <img src="docs/assets/telegram-s3-logo.png" alt="Telegram S3 logo" width="128">
+</p>
 
-[![Docker image](https://github.com/mostafa-binesh/TelegramS3/actions/workflows/publish-docker-image.yml/badge.svg)](https://github.com/mostafa-binesh/TelegramS3/actions/workflows/publish-docker-image.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSES.md)
+<h1 align="center">Telegram S3</h1>
+
+<p align="center">
+  An S3-compatible object store backed by chunked, encrypted Telegram documents.
+</p>
+
+<p align="center">
+  <a href="https://github.com/mostafa-binesh/TelegramS3/actions/workflows/publish-docker-image.yml"><img src="https://github.com/mostafa-binesh/TelegramS3/actions/workflows/publish-docker-image.yml/badge.svg" alt="Docker image workflow"></a>
+  <a href="LICENSES.md"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0 license"></a>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/overview.png" alt="Telegram S3 Overview dashboard" width="100%">
+</p>
+
+<p align="center"><em>The Overview dashboard brings storage, Telegram payload, account health, and recovery signals together in one place.</em></p>
 
 An S3-compatible object storage server. Buckets and objects are served to
 standard S3 clients (`aws` CLI, SDKs, MinIO tooling) through a RustFS-compatible
