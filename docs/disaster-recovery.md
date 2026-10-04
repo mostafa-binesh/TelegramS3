@@ -28,8 +28,9 @@ has an explicit refresh action; it does not continuously poll account metadata
 while the page is open.
 The Profile page changes only the operator row in this same database. A display
 name is restored with the user record, while a password is stored only as an
-Argon2id hash; changing it advances the user's token version and invalidates
-older sessions. No Telegram payload or object manifest is involved.
+Argon2id hash; changing it requires the current password, then advances the
+user's token version and invalidates older sessions. No Telegram payload or
+object manifest is involved.
 
 The admin bucket-level re-chunk action expands selected buckets into their
 committed objects and queues independent durable jobs. A restart can therefore

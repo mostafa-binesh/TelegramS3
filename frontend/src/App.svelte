@@ -608,7 +608,7 @@
     else navigate({ view: next });
   }
 
-  async function saveProfile(body: { display_name: string; password?: string }) {
+  async function saveProfile(body: { display_name: string; current_password?: string; password?: string }) {
     profileBusy = true;
     profileError = '';
     profileMessage = '';

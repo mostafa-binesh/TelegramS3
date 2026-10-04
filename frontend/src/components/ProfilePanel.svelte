@@ -6,11 +6,12 @@
   export let busy = false;
   export let error = '';
   export let message = '';
-  export let onSave: (body: { display_name: string; password?: string }) => Promise<void> = async () => {};
+  export let onSave: (body: { display_name: string; current_password?: string; password?: string }) => Promise<void> = async () => {};
 
   let displayName = '';
   let newPassword = '';
   let confirmPassword = '';
+  let currentPassword = '';
   let validationError = '';
   let initializedFor = '';
 
@@ -19,6 +20,7 @@
     displayName = session.user.display_name || session.user.username;
     newPassword = '';
     confirmPassword = '';
+    currentPassword = '';
     validationError = '';
   }
 
@@ -37,11 +39,16 @@
       validationError = 'New password must be at least 12 characters.';
       return;
     }
+    if (newPassword && !currentPassword) {
+      validationError = 'Enter your current password to change it.';
+      return;
+    }
     if (newPassword !== confirmPassword) {
       validationError = 'New password and confirmation do not match.';
       return;
     }
-    await onSave(newPassword ? { display_name: normalizedName, password: newPassword } : { display_name: normalizedName });
+    await onSave(newPassword ? { display_name: normalizedName, current_password: currentPassword, password: newPassword } : { display_name: normalizedName });
+    currentPassword = '';
     newPassword = '';
     confirmPassword = '';
   }
@@ -61,8 +68,9 @@
     {#if message}<p class="form-message success" role="status">{message}</p>{/if}
     <label><span>Display name</span><input aria-label="Display name" bind:value={displayName} maxlength="120" autocomplete="name" /></label>
     <div class="password-heading"><div><p class="card-label">Security</p><h3>Change password</h3></div><span class="fine-print">Optional</span></div>
-    <p class="fine-print password-note">Leave both password fields blank to keep the current password. New passwords must be at least 12 characters.</p>
+    <p class="fine-print password-note">Leave the password fields blank to keep the current password. To change it, enter your current password and a new password of at least 12 characters.</p>
     <div class="form-grid">
+      <label><span>Current password</span><input aria-label="Current password" bind:value={currentPassword} type="password" autocomplete="current-password" /></label>
       <label><span>New password</span><input aria-label="New password" bind:value={newPassword} type="password" autocomplete="new-password" /></label>
       <label><span>Confirm new password</span><input aria-label="Confirm new password" bind:value={confirmPassword} type="password" autocomplete="new-password" /></label>
     </div>

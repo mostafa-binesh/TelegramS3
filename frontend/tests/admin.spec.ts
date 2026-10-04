@@ -164,7 +164,8 @@ async function mockAdminApi(
     }
     if (path === '/profile' && request.method() === 'PATCH') {
       if (options.profileSaveFailure) return route.fulfill({ status: 400, json: { error: 'profile update rejected for this test' } });
-      const body = request.postDataJSON() as { display_name: string; password?: string };
+      const body = request.postDataJSON() as { display_name: string; current_password?: string; password?: string };
+      if (body.password && body.current_password !== 'current-password') return route.fulfill({ status: 401, json: { error: 'current password is incorrect' } });
       profileUser = { ...profileUser, display_name: body.display_name };
       csrfToken = body.password ? 'csrf-profile-refreshed' : csrfToken;
       return route.fulfill({ json: { ...authenticated, user: profileUser, csrf_token: csrfToken } });
@@ -501,15 +502,26 @@ test('profile page validates and saves the display name and password', async ({ 
 
   await page.getByLabel('New password', { exact: true }).fill('new-correct-passphrase');
   await page.getByLabel('Confirm new password').fill('different-passphrase');
+  await page.getByLabel('Current password').fill('current-password');
   await page.getByRole('button', { name: 'Save profile' }).click();
   await expect(page.getByRole('alert')).toContainText('do not match');
 
+  await page.getByLabel('Current password').fill('');
+  await page.getByLabel('Confirm new password').fill('new-correct-passphrase');
+  await page.getByRole('button', { name: 'Save profile' }).click();
+  await expect(page.getByRole('alert')).toContainText('current password');
+
+  await page.getByLabel('Current password').fill('wrong-current-password');
+  await page.getByRole('button', { name: 'Save profile' }).click();
+  await expect(page.getByText('current password is incorrect')).toBeVisible();
+
   const request = page.waitForRequest((candidate) => new URL(candidate.url()).pathname === '/_admin/api/profile' && candidate.method() === 'PATCH');
   await page.getByLabel('Display name').fill('Storage Operator');
+  await page.getByLabel('Current password').fill('current-password');
   await page.getByLabel('Confirm new password').fill('new-correct-passphrase');
   await page.getByRole('button', { name: 'Save profile' }).click();
   const profileRequest = await request;
-  expect(profileRequest.postDataJSON()).toEqual({ display_name: 'Storage Operator', password: 'new-correct-passphrase' });
+  expect(profileRequest.postDataJSON()).toEqual({ display_name: 'Storage Operator', current_password: 'current-password', password: 'new-correct-passphrase' });
   await expect(page.locator('form').getByRole('status')).toContainText('Other sessions were signed out');
   await expect(page.locator('.account-copy strong')).toHaveText('Storage Operator');
   await expect(page.locator('.account-copy small')).toHaveText('@admin');

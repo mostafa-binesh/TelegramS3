@@ -8,7 +8,9 @@ connection pool. The rows below track externally
 visible S3 API wiring; implemented entries are available through `server`, and
 the standard S3 CRUD smoke test now passes. The authenticated operator frontend
 and `/_admin` JSON API are operational surfaces, not S3 compatibility
-features, so they are documented separately.
+features, so they are documented separately. The self-service profile endpoint
+requires the current password before a password rotation; this control-plane
+check does not affect S3 object access.
 
 | API operation | Status | Test coverage | Compatibility notes | Telegram-specific limitation | Planned phase |
 | --- | --- | --- | --- | --- | --- |

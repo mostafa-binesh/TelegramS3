@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.0-rc.2 - 2026-10-04
+
+### Verified profile password changes
+
+- Require the current operator password before accepting a new password from
+  the Profile page.
+- Verify the current password against the stored Argon2id hash before hashing
+  or saving the replacement; missing or incorrect values leave the account
+  unchanged.
+- Add a dedicated current-password field, client validation, and Playwright
+  coverage for the required-password and successful-rotation paths.
+
 ## 1.0.0-rc.1 - 2026-10-04
 
 ### Operator profiles and console documentation

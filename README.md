@@ -541,8 +541,8 @@ authorization failures still remain visible to the operator.
 
 The signed-in account card and the **Profile** page provide a small self-service
 profile workflow. Display names are trimmed and bounded to 120 characters;
-passwords must meet the same 12-character policy as account creation. The
-server validates and writes both fields together, and a password change
+passwords must meet the same 12-character policy as account creation. A
+password change requires the current password, is verified server-side, and
 invalidates older sessions without interrupting the current browser.
 
 ## Console screenshots

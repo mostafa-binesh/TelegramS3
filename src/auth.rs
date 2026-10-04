@@ -292,15 +292,25 @@ pub fn update_profile(
     store: &MetadataStore,
     user_id: &str,
     display_name: &str,
+    current_password: Option<&str>,
     new_password: Option<&str>,
 ) -> Result<(), AuthError> {
     let display_name = normalize_display_name(display_name)?;
-    let password_hash = new_password
-        .map(|password| {
-            validate_password(password)?;
-            hash_password(password)
-        })
-        .transpose()?;
+    if let Some(new_password) = new_password {
+        let current_password = current_password.ok_or_else(|| {
+            AuthError::new(
+                AuthErrorKind::InvalidPassword,
+                "current password is required to change password",
+            )
+        })?;
+        let user = store
+            .get_user_by_id(user_id)
+            .map_err(|error| internal(format!("failed to read profile password: {error}")))?
+            .ok_or_else(|| AuthError::new(AuthErrorKind::UnknownUser, "account not found"))?;
+        verify_password(current_password, &user.password_hash)?;
+        validate_password(new_password)?;
+    }
+    let password_hash = new_password.map(hash_password).transpose()?;
     store
         .update_user_profile(user_id, &display_name, password_hash.as_deref())
         .map_err(|error| internal(format!("failed to update profile: {error}")))?;
@@ -526,6 +536,7 @@ mod tests {
             &store,
             &user.id,
             "Updated Name",
+            Some("correct-horse-battery-staple"),
             Some("new-correct-passphrase"),
         )
         .expect("update profile");
@@ -534,5 +545,40 @@ mod tests {
         assert!(updated.token_version > user.token_version);
         assert!(authenticate(&store, "root", "new-correct-passphrase").is_ok());
         assert!(authenticate(&store, "root", "correct-horse-battery-staple").is_err());
+    }
+
+    #[test]
+    fn profile_password_change_requires_the_current_password() {
+        let store = crate::metadata::MetadataStore::open_in_memory().expect("store");
+        let user = create_account(
+            &store,
+            "root",
+            "correct-horse-battery-staple",
+            ROLE_ADMIN,
+            "Original",
+        )
+        .expect("create");
+
+        let missing = update_profile(
+            &store,
+            &user.id,
+            "Updated Name",
+            None,
+            Some("new-correct-passphrase"),
+        )
+        .expect_err("missing current password must be rejected");
+        assert_eq!(missing.kind, AuthErrorKind::InvalidPassword);
+        assert!(authenticate(&store, "root", "correct-horse-battery-staple").is_ok());
+
+        let wrong = update_profile(
+            &store,
+            &user.id,
+            "Updated Name",
+            Some("wrong-current-password"),
+            Some("new-correct-passphrase"),
+        )
+        .expect_err("wrong current password must be rejected");
+        assert_eq!(wrong.kind, AuthErrorKind::InvalidPassword);
+        assert!(authenticate(&store, "root", "correct-horse-battery-staple").is_ok());
     }
 }

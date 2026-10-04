@@ -118,7 +118,9 @@ argon2id. There is no per-user `.env` entry.
 - **After boot:** an authenticated superadmin can add/remove operators in the
   `/_admin` "Users" view, or use `telegram-s3 users list | status | password |
   delete`.
-- Password changes revoke all of that user's sessions (`token_version` bump).
+- Self-service password changes require the current password, validate the new
+  password with the same policy as account creation, and revoke all of that
+  user's sessions (`token_version` bump).
   There is **no email/password-reset flow**; recovery is CLI-admin only.
 - Deleting the last remaining superadmin is refused.
 

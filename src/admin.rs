@@ -173,6 +173,8 @@ struct ChangePasswordRequest {
 struct UpdateProfileRequest {
     display_name: String,
     #[serde(default)]
+    current_password: Option<String>,
+    #[serde(default)]
     password: Option<String>,
 }
 
@@ -1261,6 +1263,7 @@ impl AdminUiState {
     ) -> Response<Body> {
         let UpdateProfileRequest {
             display_name,
+            current_password,
             password,
         } = match read_json::<UpdateProfileRequest>(request).await {
             Ok(body) => body,
@@ -1271,6 +1274,7 @@ impl AdminUiState {
             self.store(),
             &principal.user.id,
             &display_name,
+            current_password.as_deref(),
             password.as_deref(),
         ) {
             return auth_error_response(&error);

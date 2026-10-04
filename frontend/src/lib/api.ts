@@ -141,7 +141,7 @@ export function getSession() {
 
 export function updateProfile(
   csrf: string | null | undefined,
-  body: { display_name: string; password?: string }
+  body: { display_name: string; current_password?: string; password?: string }
 ) {
   return requestJson<SessionState>('/profile', csrf, { method: 'PATCH', body });
 }
