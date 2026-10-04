@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.8.0 - 2026-10-04
+
+### Stable release
+
+This stable release promotes the validated `v0.7.6` release-candidate line.
+
+- Serializes S3, public-link, and authenticated-admin segmented downloads per
+  client and object, so extra browser or IDM range requests wait before they
+  create backend download stages, prefetch workers, or Telegram reads.
+- Supports access-replica downloads across shared Telegram chats by preserving
+  each manifest's source peer/message location through ranged reads, prefetch,
+  failover, verification, public links, and replication.
+- Adds adaptive and sequential download scheduling, first-chunk priority,
+  account-aware connection limits, per-account failover, and live stage
+  metrics for client/Telegram bytes and timing breakdowns.
+- Includes the multi-account replication, recovery verification, cleanup,
+  server-side move, re-chunking, object information, shared-link, and account
+  management improvements shipped throughout the release-candidate line.
+- Documents the backend serialization boundary: the server controls parallel
+  work, but HTTP cannot literally force a client to use one TCP socket.
+
 ## 0.7.6-rc.28 - 2026-10-03
 
 ### Single backend pipeline for segmented client downloads
